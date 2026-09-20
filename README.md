@@ -107,6 +107,9 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 | `update_variable_collection`   | Rename a variable collection                                                                                      |
 | `delete_variable_collection`   | Delete a variable collection and every variable in it, with explicit confirmation                                 |
 | `create_variables`             | Create up to 200 variables in one collection with values, aliases, scopes                                         |
+| `update_variables`             | Change the name, value, scopes, or description of up to 200 variables                                             |
+| `delete_variables`             | Delete up to 200 variables and report what aliased each one, with explicit confirmation                           |
+| `bind_variables`               | Bind variables to node fields such as `fills`, `itemSpacing`, or `characters`, or remove a binding                |
 
 All tools accept an optional `fileKey` parameter when multiple Figma files are connected. Use `list_files` to discover connected files and their keys.
 
@@ -120,10 +123,12 @@ All tools accept an optional `fileKey` parameter when multiple Figma files are c
 - `create_image` reads local paths relative to the MCP server working directory unless you pass an absolute path.
 - `import_html_layers` takes a JSON file produced by [html-figma](https://github.com/sergcen/html-to-figma)'s browser `htmlToFigma()`. The path resolves relative to the MCP server working directory and must stay inside it, even when absolute. Everything lands inside one wrapper frame, and the response reports `layerCount` against `expectedLayerCount` so partial imports are visible.
 - `create_page` returns the new page's ID — pass it as `parentId` to `create_frame` / `create_text` / `create_shape` / `create_image` to author content on that page without switching the editor.
-- The variable tools work on a free (Starter) Figma plan. A collection there has one mode, and `create_variables` writes values to that default mode. Adding a mode, publishing a library, and extended collections need a paid plan and are not exposed.
-- `create_variables` checks every item before the first write: a batch with a bad item writes nothing and reports every item to correct. A failure during the write removes the variables that call had created.
-- A variable value can alias another variable by `aliasId` or by `aliasName`. An `aliasName` resolves against the batch first, then the target collection, then the other local collections, so an item can alias a later item of the same call.
-- `delete_variable_collection` is gated behind `confirm: true`, like `delete_nodes`, and removes every variable in the collection.
+- The variable tools work on a free (Starter) Figma plan, and they write the default mode of a collection only — the one mode a free plan gives it. Adding a mode, publishing a library, and extended collections need a paid plan and are not exposed.
+- `create_variables`, `update_variables`, `delete_variables`, and `bind_variables` check every item before the first write: a batch with a bad item writes nothing and reports every item to correct. A write that fails afterwards stops the batch; `create_variables` removes the variables that call had created, and the others report `not written` for the items they did not reach.
+- A variable value can alias another variable by `aliasId` or by `aliasName`. In `create_variables` an `aliasName` resolves against the batch first, then the target collection, then the other local collections, so an item can alias a later item of the same call. In `update_variables` it resolves against the file as it stands, not against the renames of the same call.
+- `delete_variable_collection` is gated behind `confirm: true`, like `delete_nodes`, and removes every variable in the collection. `delete_variables` is gated the same way and reports `aliasedBy` for each removed variable: the local variables that aliased it and now resolve to nothing.
+- `bind_variables` binds a COLOR variable into one `SOLID` paint of `fills` or `strokes` — pick it with `paintIndex` — BOOLEAN to `visible`, STRING to `characters`, `fontFamily`, and `fontStyle`, and FLOAT to every other field. Pass `variableId: null` to remove a binding and leave the field at its last value. Variable scopes are not consulted: they steer Figma's variable picker and do not restrict the Plugin API.
+- The read tools report a node's bindings as `boundVariables`, mapping each bound field to the variable ID bound to it. The key is absent when the node binds nothing.
 
 ### What You Can Build
 
