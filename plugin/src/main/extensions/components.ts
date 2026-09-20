@@ -1052,10 +1052,16 @@ type PropertyEntry = {
 /** Writes a node as `4:5 "mcp-test/Button"`, the way these errors name one. */
 const labelOf = (node: BaseNode): string => `${node.id} "${node.name}"`;
 
+/** Picks the article a property type takes, so INSTANCE_SWAP reads right. */
+const articleFor = (type: string): string => (type.startsWith("I") ? "an" : "a");
+
 /** Lists the linkable fields with the property type each one reads. */
 const describeReferenceFields = (): string =>
   (Object.keys(REFERENCE_FIELDS) as ReferenceField[])
-    .map((field) => `${field} reads a ${REFERENCE_FIELDS[field]} property`)
+    .map((field) => {
+      const type = REFERENCE_FIELDS[field];
+      return `${field} reads ${articleFor(type)} ${type} property`;
+    })
     .join(", ");
 
 /**
@@ -1201,8 +1207,34 @@ const requireSupportedProperty = (
   const match = PROPERTY_TYPES.find((type) => type === property.type);
   if (match) return match;
   throw new Error(
-    `${property.name} of ${owner} is a ${property.type} property, which ${tool} does not model. These tools cover ${PROPERTY_TYPES.join(", ")}; change a ${property.type} property in Figma itself.`
+    `${property.name} of ${owner} is ${articleFor(property.type)} ${property.type} property, which ${tool} does not model. These tools cover ${PROPERTY_TYPES.join(", ")}; change ${articleFor(property.type)} ${property.type} property in Figma itself.`
   );
+};
+
+/**
+ * Reads back the name Figma stored for a property just written.
+ *
+ * `addComponentProperty` and `editComponentProperty` hand back the name that
+ * was asked for, but Figma keeps the display names of one component apart and
+ * renames a colliding one behind them: a second "Text" is stored as "Text2".
+ * The suffix survives that rename, so it identifies the property, and the
+ * stored name is the one the other tools take.
+ * @param owner - The component or the component set.
+ * @param written - The name the write handed back.
+ * @returns The name the file carries now.
+ */
+const storedPropertyName = (owner: ComponentNode | ComponentSetNode, written: string): string => {
+  let names: string[];
+  try {
+    names = Object.keys(owner.componentPropertyDefinitions);
+  } catch {
+    return written;
+  }
+  if (names.includes(written)) return written;
+  const hash = written.lastIndexOf("#");
+  if (hash < 0) return written;
+  const suffix = written.slice(hash);
+  return names.find((name) => name.endsWith(suffix)) ?? written;
 };
 
 /**
@@ -1379,7 +1411,7 @@ const addComponentProperty = async (req: ExtensionRequest): Promise<unknown> => 
       err
     );
   }
-  return { componentId: owner.id, propertyName };
+  return { componentId: owner.id, propertyName: storedPropertyName(owner, propertyName) };
 };
 
 /**
@@ -1438,7 +1470,7 @@ const editComponentProperty = async (req: ExtensionRequest): Promise<unknown> =>
       err
     );
   }
-  return { componentId: owner.id, propertyName };
+  return { componentId: owner.id, propertyName: storedPropertyName(owner, propertyName) };
 };
 
 /**
@@ -1582,8 +1614,9 @@ const bindComponentProperty = async (req: ExtensionRequest): Promise<unknown> =>
     const property = resolveProperty(propertyEntriesOf(owner, tool), rawName, ownerLabel, tool);
     const type = requireSupportedProperty(property, ownerLabel, tool);
     if (type !== REFERENCE_FIELDS[field]) {
+      const wanted = REFERENCE_FIELDS[field];
       throw new Error(
-        `${field} reads a ${REFERENCE_FIELDS[field]} property, but ${property.name} of ${ownerLabel} is a ${type} property. ${describeReferenceFields()}.`
+        `${field} reads ${articleFor(wanted)} ${wanted} property, but ${property.name} of ${ownerLabel} is ${articleFor(type)} ${type} property. ${describeReferenceFields()}.`
       );
     }
     requireFieldNode(node, field);
@@ -1591,7 +1624,9 @@ const bindComponentProperty = async (req: ExtensionRequest): Promise<unknown> =>
   }
 
   try {
-    node.componentPropertyReferences = Object.keys(links).length > 0 ? links : null;
+    // Always an object, never null: Figma reports null for a layer that links
+    // nothing, but its setter refuses one — removing the last link writes {}.
+    node.componentPropertyReferences = links;
   } catch (err) {
     throw describeWriteError(
       `${tool} could not link ${field} of ${labelOf(node)} to a property of ${ownerLabel}`,

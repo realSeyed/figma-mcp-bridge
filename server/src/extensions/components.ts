@@ -109,7 +109,7 @@ const editComponentPropertyShape = z.object({
     .min(1)
     .optional()
     .describe(
-      'The new display name, without a "#" suffix. Figma appends a fresh suffix and the call returns the new full name.'
+      'The new display name, without a "#" suffix. The call returns the full name the file carries afterwards, which Figma changes when the new name collides with another property of this component.'
     ),
   newDefaultValue: z
     .union([z.string(), z.boolean()])
@@ -404,7 +404,7 @@ export function register(server: McpServer, node: Node): void {
 
   server.tool(
     "add_component_property",
-    'Add one component property to a component or a component set, so an instance of it can be configured without being edited. A BOOLEAN property drives whether a layer shows, TEXT the words of a text layer, INSTANCE_SWAP the component a nested instance follows, and VARIANT a new axis of a component set. Figma appends a unique suffix to a BOOLEAN, TEXT, or INSTANCE_SWAP name, so the call returns the full name — "Label#12:0" — and that is the name the other tools take; a VARIANT name carries no suffix. Pass the component set, not one of its variants: a variant owns no properties, and a property on the set reaches every variant. SLOT properties are not supported. Use bind_component_property next to point a layer at the new property. When multiple files are connected, specify fileKey.',
+    'Add one component property to a component or a component set, so an instance of it can be configured without being edited. A BOOLEAN property drives whether a layer shows, TEXT the words of a text layer, INSTANCE_SWAP the component a nested instance follows, and VARIANT a new axis of a component set. Figma appends a unique suffix to a BOOLEAN, TEXT, or INSTANCE_SWAP name, so the call returns the full name — "Label#12:0" — and that is the name the other tools take; a VARIANT name carries no suffix. Figma also keeps the display names of one component apart, so a name that collides with another property is stored with a number appended and the returned name reflects that. Pass the component set, not one of its variants: a variant owns no properties, and a property on the set reaches every variant. SLOT properties are not supported. Use bind_component_property next to point a layer at the new property. When multiple files are connected, specify fileKey.',
     schemas.add_component_property.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(schemas.add_component_property, args);
@@ -418,7 +418,7 @@ export function register(server: McpServer, node: Node): void {
 
   server.tool(
     "edit_component_property",
-    "Change the name, the default value, or the preferred values of one component property, and return the property's full name afterwards. Renaming gives Figma a fresh suffix, so the returned name is the one to pass from then on. Name the property by the display name Figma shows or by the full name; a display name that matches two properties comes back with both full names. newDefaultValue belongs to a BOOLEAN, TEXT, or INSTANCE_SWAP property — a VARIANT property takes none, because the first variant of the set is the default — and preferredValues to an INSTANCE_SWAP property. A field left out keeps the value it has. When multiple files are connected, specify fileKey.",
+    "Change the name, the default value, or the preferred values of one component property, and return the full name the file carries afterwards — Figma keeps the display names of one component apart, so a new name that collides with another property is stored with a number appended, and the returned name is the one to pass from then on. Name the property by the display name Figma shows or by the full name. newDefaultValue belongs to a BOOLEAN, TEXT, or INSTANCE_SWAP property — a VARIANT property takes none, because the first variant of the set is the default — and preferredValues to an INSTANCE_SWAP property. A field left out keeps the value it has. When multiple files are connected, specify fileKey.",
     editComponentPropertyShape.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(editComponentPropertyInput, args);
