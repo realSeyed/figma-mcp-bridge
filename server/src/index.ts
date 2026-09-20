@@ -7,17 +7,17 @@ import { Election } from "./election.js";
 import { registerTools } from "./tools.js";
 import { VERSION } from "./version.js";
 
-// Overridable so a fork/test instance can run beside a stock 1994 bridge
-// without joining its leader election. The plugin must be built with the
-// matching VITE_FIGMA_BRIDGE_WS URL (which must also be listed in the
+// This fork defaults to 1995 so it runs beside a stock bridge on 1994 without
+// joining its leader election. Still overridable. The plugin must be built with
+// the matching VITE_FIGMA_BRIDGE_WS URL (which must also be listed in the
 // plugin manifest's networkAccess.allowedDomains).
 function resolvePort(): number {
   const raw = process.env.FIGMA_BRIDGE_PORT;
-  if (raw === undefined) return 1994;
+  if (raw === undefined) return 1995;
   const port = Number(raw.trim());
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    // An explicitly set but invalid value must not silently join the stock
-    // bridge on 1994 — fail loudly instead.
+    // An explicitly set but invalid value must not silently join another
+    // bridge's election — fail loudly instead.
     console.error(`Invalid FIGMA_BRIDGE_PORT "${raw}" — expected an integer between 1 and 65535`);
     process.exit(1);
   }
