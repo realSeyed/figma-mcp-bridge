@@ -102,6 +102,7 @@ type SerializedNode = {
   textStyleId?: string;
   styles?: SerializedStyles;
   boundVariables?: SerializedBoundVariables;
+  componentProperties?: Record<string, string | boolean>;
   children?: SerializedNode[];
   childCount?: number;
 };
@@ -416,6 +417,25 @@ const serializeBoundVariables = (node: SerializableNode): SerializedBoundVariabl
     : undefined;
 
 /**
+ * Reads the component property values an instance carries, as the full
+ * property name to its value.
+ *
+ * The name keeps the `#12:0` suffix Figma gives it, because that is the name
+ * get_component reports and the name the write APIs take.
+ * @param node - The instance to read.
+ * @returns The values, or undefined when the instance takes no properties.
+ */
+const serializeComponentProperties = (
+  node: InstanceNode
+): Record<string, string | boolean> | undefined => {
+  const properties: Record<string, string | boolean> = {};
+  for (const [name, property] of Object.entries(node.componentProperties)) {
+    properties[name] = property.value;
+  }
+  return Object.keys(properties).length > 0 ? properties : undefined;
+};
+
+/**
  * `serializeNode` is also called with the current page (get_document,
  * get_design_context), which shares the id/name/type/children surface it reads.
  * Every property beyond that is read behind an `in` check.
@@ -433,6 +453,11 @@ export const serializeNode = (node: SerializableNode): SerializedNode => {
 
   const boundVariables = serializeBoundVariables(node);
   if (boundVariables) base.boundVariables = boundVariables;
+
+  if (node.type === "INSTANCE") {
+    const componentProperties = serializeComponentProperties(node);
+    if (componentProperties) base.componentProperties = componentProperties;
+  }
 
   if (node.type === "TEXT") {
     return serializeText(node, base);
