@@ -1,4 +1,4 @@
-import { parseHexColor } from "../shared";
+import { getSceneNodeById, loadFontsForTextNode, parseHexColor } from "../shared";
 import type { ExtensionHandler, ExtensionRequest } from "./types";
 
 /**
@@ -734,6 +734,35 @@ const isVariableAlias = (value: unknown): value is VariableAlias =>
   "type" in value &&
   (value as VariableAlias).type === "VARIABLE_ALIAS";
 
+/**
+ * Reads a variable's value in the default mode of its collection, following an
+ * alias chain to the concrete value at the end of it.
+ *
+ * The depth cap only guards a cycle that Figma let through; it refuses to
+ * store one.
+ * @param variable - The variable to read.
+ * @param depth - How many aliases have been followed already.
+ * @returns The value, or undefined when the chain does not end in one.
+ */
+const resolveVariableInDefaultMode = async (
+  variable: Variable,
+  depth = 0
+): Promise<VariableValue | undefined> => {
+  if (depth > 10) return undefined;
+  let collection: VariableCollection;
+  try {
+    collection = await getVariableCollectionById(variable.variableCollectionId);
+  } catch {
+    return undefined;
+  }
+  const value = variable.valuesByMode[collection.defaultModeId];
+  if (isVariableAlias(value)) {
+    const target = await getVariableById(value.id);
+    return target ? resolveVariableInDefaultMode(target, depth + 1) : undefined;
+  }
+  return value;
+};
+
 /** One validated `update_variables` item, ready to write. */
 type VariableUpdatePlan = {
   variable: Variable;
@@ -1041,6 +1070,416 @@ const deleteVariables = async (req: ExtensionRequest): Promise<unknown> => {
   });
 };
 
+/** A paint list a COLOR variable binds into, addressed by `paintIndex`. */
+type PaintBindableField = "fills" | "strokes";
+
+/** Every field `bind_variables` accepts. */
+type BindableField = VariableBindableNodeField | VariableBindableTextField | PaintBindableField;
+
+/** The variable a field takes, and what the field needs from its node. */
+type BindableFieldRule = {
+  /** The resolved type the bound variable must have. */
+  type: SupportedVariableType;
+  /** True when the node carries the field. */
+  supports: (node: SceneNode) => boolean;
+  /** What the field needs, phrased for the error message. */
+  requirement: string;
+};
+
+/**
+ * Builds a support test that reads whether the node carries one property.
+ * @param property - The property name.
+ * @returns The support test.
+ */
+const carries =
+  (property: string) =>
+  (node: SceneNode): boolean =>
+    property in node;
+
+const isTextNode = (node: SceneNode): boolean => node.type === "TEXT";
+
+const hasAutoLayout = (node: SceneNode): boolean =>
+  "layoutMode" in node && (node.layoutMode === "HORIZONTAL" || node.layoutMode === "VERTICAL");
+
+const hasLayout = (node: SceneNode): boolean => "layoutMode" in node && node.layoutMode !== "NONE";
+
+const hasGridLayout = (node: SceneNode): boolean =>
+  "layoutMode" in node && node.layoutMode === "GRID";
+
+const TEXT_NODE = "a TEXT node";
+const AUTO_LAYOUT = "a frame with auto layout. Call set_auto_layout on the frame first";
+const LAID_OUT = "a frame with auto layout or grid layout. Call set_auto_layout on the frame first";
+const GRID_LAYOUT = "a frame with grid layout";
+const RESIZABLE = "a node that can be resized";
+const SIZE_LIMITS = "a node with minimum and maximum sizes, for example a frame";
+const CORNERS = "a node with a corner radius, for example a rectangle or a frame";
+const INDIVIDUAL_CORNERS =
+  "a node with individual corner radii, for example a rectangle or a frame";
+const STROKED = "a node that can carry a stroke";
+const INDIVIDUAL_STROKES =
+  "a node with individual stroke weights, for example a rectangle or a frame";
+
+/**
+ * Every field `bind_variables` accepts, with the variable type it takes.
+ *
+ * Typed against the two Figma field unions plus `fills` and `strokes`, so a
+ * field Figma adds later fails the type check here rather than silently
+ * dropping out of the tool.
+ */
+const BINDABLE_FIELDS: Record<BindableField, BindableFieldRule> = {
+  fills: {
+    type: "COLOR",
+    supports: carries("fills"),
+    requirement: "a node that can carry fills, for example a frame, a shape, or a text node",
+  },
+  strokes: {
+    type: "COLOR",
+    supports: carries("strokes"),
+    requirement: "a node that can carry strokes, for example a frame or a shape",
+  },
+  visible: { type: "BOOLEAN", supports: carries("visible"), requirement: "a scene node" },
+  characters: { type: "STRING", supports: isTextNode, requirement: TEXT_NODE },
+  fontFamily: { type: "STRING", supports: isTextNode, requirement: TEXT_NODE },
+  fontStyle: { type: "STRING", supports: isTextNode, requirement: TEXT_NODE },
+  fontSize: { type: "FLOAT", supports: isTextNode, requirement: TEXT_NODE },
+  fontWeight: { type: "FLOAT", supports: isTextNode, requirement: TEXT_NODE },
+  letterSpacing: { type: "FLOAT", supports: isTextNode, requirement: TEXT_NODE },
+  lineHeight: { type: "FLOAT", supports: isTextNode, requirement: TEXT_NODE },
+  paragraphSpacing: { type: "FLOAT", supports: isTextNode, requirement: TEXT_NODE },
+  paragraphIndent: { type: "FLOAT", supports: isTextNode, requirement: TEXT_NODE },
+  width: { type: "FLOAT", supports: carries("resize"), requirement: RESIZABLE },
+  height: { type: "FLOAT", supports: carries("resize"), requirement: RESIZABLE },
+  minWidth: { type: "FLOAT", supports: carries("minWidth"), requirement: SIZE_LIMITS },
+  maxWidth: { type: "FLOAT", supports: carries("maxWidth"), requirement: SIZE_LIMITS },
+  minHeight: { type: "FLOAT", supports: carries("minHeight"), requirement: SIZE_LIMITS },
+  maxHeight: { type: "FLOAT", supports: carries("maxHeight"), requirement: SIZE_LIMITS },
+  opacity: { type: "FLOAT", supports: carries("opacity"), requirement: "a node with an opacity" },
+  cornerRadius: { type: "FLOAT", supports: carries("cornerRadius"), requirement: CORNERS },
+  topLeftRadius: {
+    type: "FLOAT",
+    supports: carries("topLeftRadius"),
+    requirement: INDIVIDUAL_CORNERS,
+  },
+  topRightRadius: {
+    type: "FLOAT",
+    supports: carries("topRightRadius"),
+    requirement: INDIVIDUAL_CORNERS,
+  },
+  bottomLeftRadius: {
+    type: "FLOAT",
+    supports: carries("bottomLeftRadius"),
+    requirement: INDIVIDUAL_CORNERS,
+  },
+  bottomRightRadius: {
+    type: "FLOAT",
+    supports: carries("bottomRightRadius"),
+    requirement: INDIVIDUAL_CORNERS,
+  },
+  strokeWeight: { type: "FLOAT", supports: carries("strokeWeight"), requirement: STROKED },
+  strokeTopWeight: {
+    type: "FLOAT",
+    supports: carries("strokeTopWeight"),
+    requirement: INDIVIDUAL_STROKES,
+  },
+  strokeRightWeight: {
+    type: "FLOAT",
+    supports: carries("strokeRightWeight"),
+    requirement: INDIVIDUAL_STROKES,
+  },
+  strokeBottomWeight: {
+    type: "FLOAT",
+    supports: carries("strokeBottomWeight"),
+    requirement: INDIVIDUAL_STROKES,
+  },
+  strokeLeftWeight: {
+    type: "FLOAT",
+    supports: carries("strokeLeftWeight"),
+    requirement: INDIVIDUAL_STROKES,
+  },
+  itemSpacing: { type: "FLOAT", supports: hasAutoLayout, requirement: AUTO_LAYOUT },
+  counterAxisSpacing: { type: "FLOAT", supports: hasAutoLayout, requirement: AUTO_LAYOUT },
+  paddingLeft: { type: "FLOAT", supports: hasLayout, requirement: LAID_OUT },
+  paddingRight: { type: "FLOAT", supports: hasLayout, requirement: LAID_OUT },
+  paddingTop: { type: "FLOAT", supports: hasLayout, requirement: LAID_OUT },
+  paddingBottom: { type: "FLOAT", supports: hasLayout, requirement: LAID_OUT },
+  gridRowGap: { type: "FLOAT", supports: hasGridLayout, requirement: GRID_LAYOUT },
+  gridColumnGap: { type: "FLOAT", supports: hasGridLayout, requirement: GRID_LAYOUT },
+};
+
+const BINDABLE_FIELD_NAMES = Object.keys(BINDABLE_FIELDS);
+
+/**
+ * Tests whether a field name is one this tool binds.
+ * @param value - The candidate field name.
+ * @returns True when the field is bindable.
+ */
+const isBindableField = (value: unknown): value is BindableField =>
+  typeof value === "string" && Object.prototype.hasOwnProperty.call(BINDABLE_FIELDS, value);
+
+/** A node that takes a variable binding on a field. Every SceneNode does. */
+type BindableNode = {
+  setBoundVariable(
+    field: VariableBindableNodeField | VariableBindableTextField,
+    variable: Variable | null
+  ): void;
+};
+
+/**
+ * Reads the paint list of a node.
+ * @param node - The node.
+ * @param property - Which paint list to read.
+ * @returns The paints, or null when the node has none or Figma reports mixed.
+ */
+const readPaints = (node: SceneNode, property: PaintBindableField): readonly Paint[] | null => {
+  if (!(property in node)) return null;
+  const paints = (node as unknown as Record<string, unknown>)[property];
+  return Array.isArray(paints) ? (paints as readonly Paint[]) : null;
+};
+
+/**
+ * Writes a paint list back to a node.
+ * @param node - The node.
+ * @param property - Which paint list to write.
+ * @param paints - The new paints.
+ */
+const writePaints = (node: SceneNode, property: PaintBindableField, paints: Paint[]): void => {
+  (node as unknown as Record<string, Paint[]>)[property] = paints;
+};
+
+/**
+ * Lists the fonts a text node uses right now.
+ * @param node - The text node.
+ * @returns The fonts, or none when the node is empty with a mixed font.
+ */
+const textNodeFonts = (node: TextNode): FontName[] => {
+  if (node.characters.length > 0) return [...node.getRangeAllFontNames(0, node.characters.length)];
+  return typeof node.fontName === "symbol" ? [] : [node.fontName];
+};
+
+/**
+ * Loads one font, remembering the answer so a batch asks Figma once per font.
+ * @param font - The font to load.
+ * @param cache - The answers from earlier items, keyed by family and style.
+ * @returns Null when the font is loaded, or the problem to report.
+ */
+const loadFontOnce = async (
+  font: FontName,
+  cache: Map<string, string | null>
+): Promise<string | null> => {
+  const key = `${font.family}::${font.style}`;
+  const cached = cache.get(key);
+  if (cached !== undefined) return cached;
+  let problem: string | null = null;
+  try {
+    await figma.loadFontAsync(font);
+  } catch (err) {
+    problem = `the font "${font.family} ${font.style}" that this binding would apply cannot be loaded: ${messageOf(err)}. Bind a variable whose value names a font this file can use.`;
+  }
+  cache.set(key, problem);
+  return problem;
+};
+
+/** One validated `bind_variables` item, ready to write. */
+type BindPlan = {
+  node: SceneNode;
+  field: BindableField;
+  /** Null removes the binding and leaves the field at its last value. */
+  variable: Variable | null;
+  /** Set for `fills` and `strokes` only. */
+  paint?: { property: PaintBindableField; index: number };
+};
+
+/**
+ * Binds variables to node fields, or removes a binding.
+ *
+ * A COLOR variable binds into one solid paint of `fills` or `strokes`, chosen
+ * by `paintIndex`; every other field takes the variable directly. Scopes are
+ * not consulted: they steer the Figma variable picker and do not restrict the
+ * Plugin API.
+ *
+ * Fonts are loaded during validation, which touches nothing in the file, so a
+ * binding that would apply an unavailable font is reported before any write.
+ * @param req - The extension request.
+ * @returns One result entry per item.
+ */
+const bindVariables = async (req: ExtensionRequest): Promise<unknown> => {
+  const tool = "bind_variables";
+  const rawItems = readBatchArray(req.params, "bindings", tool);
+
+  const problems: string[] = [];
+  const plans: BindPlan[] = [];
+  const fontChecks = new Map<string, string | null>();
+
+  for (let index = 0; index < rawItems.length; index++) {
+    const raw = rawItems[index];
+    const fail = (problem: string) => problems.push(`items[${index}]: ${problem}`);
+
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      fail(
+        `each item must be an object with nodeId, field, and variableId, received ${describeValue(raw)}.`
+      );
+      continue;
+    }
+    const item = raw as Record<string, unknown>;
+
+    if (typeof item.nodeId !== "string" || item.nodeId.trim() === "") {
+      fail(
+        'nodeId is required and must be a node ID such as "4029:12345". Call get_document or get_selection to list them.'
+      );
+      continue;
+    }
+    if (!isBindableField(item.field)) {
+      fail(
+        `field ${describeValue(item.field)} cannot take a variable. Use one of: ${BINDABLE_FIELD_NAMES.join(", ")}.`
+      );
+      continue;
+    }
+    const field = item.field;
+    const rule = BINDABLE_FIELDS[field];
+    if (item.variableId !== null && typeof item.variableId !== "string") {
+      fail(
+        'variableId is required. Give a variable ID such as "VariableID:1:2", or null to remove the binding.'
+      );
+      continue;
+    }
+
+    let node: SceneNode;
+    try {
+      node = await getSceneNodeById(item.nodeId);
+    } catch {
+      fail(
+        `node not found: ${item.nodeId}. Call get_document or get_selection to list the node IDs of this page.`
+      );
+      continue;
+    }
+
+    const itemProblems: string[] = [];
+    if (!rule.supports(node)) {
+      itemProblems.push(
+        `field "${field}" cannot bind on the ${node.type} node ${node.id} "${node.name}". It needs ${rule.requirement}.`
+      );
+    }
+
+    let variable: Variable | null = null;
+    if (typeof item.variableId === "string") {
+      variable = await getVariableById(item.variableId);
+      if (!variable) {
+        itemProblems.push(
+          `variable not found: ${item.variableId}. Call get_variable_defs to list the variable IDs of this file.`
+        );
+      } else if (variable.resolvedType !== rule.type) {
+        itemProblems.push(
+          `"${variable.name}" (${variable.id}) is a ${variable.resolvedType} variable, but field "${field}" takes a ${rule.type} variable. Bind a ${rule.type} variable, or choose a field that takes ${variable.resolvedType}.`
+        );
+      }
+    }
+
+    let paintIndex = 0;
+    const bindsPaint = field === "fills" || field === "strokes";
+    if (item.paintIndex !== undefined) {
+      if (!bindsPaint) {
+        itemProblems.push(
+          `paintIndex applies to fills and strokes only, not to "${field}". Drop paintIndex.`
+        );
+      } else if (
+        typeof item.paintIndex !== "number" ||
+        !Number.isInteger(item.paintIndex) ||
+        item.paintIndex < 0
+      ) {
+        itemProblems.push(
+          `paintIndex must be a whole number of 0 or more, received ${describeValue(item.paintIndex)}.`
+        );
+      } else {
+        paintIndex = item.paintIndex;
+      }
+    }
+    if (bindsPaint) {
+      const paints = readPaints(node, field);
+      if (!paints) {
+        itemProblems.push(
+          `the ${field} of ${node.id} "${node.name}" are mixed or absent, so there is no single paint to bind. Call set_solid_fill on the node first.`
+        );
+      } else if (paintIndex >= paints.length) {
+        itemProblems.push(
+          `${field}[${paintIndex}] does not exist on ${node.id} "${node.name}": it carries ${paints.length} paint${paints.length === 1 ? "" : "s"}. Use a paintIndex from 0 to ${paints.length - 1}.`
+        );
+      } else if (paints[paintIndex].type !== "SOLID") {
+        itemProblems.push(
+          `${field}[${paintIndex}] of ${node.id} "${node.name}" is a ${paints[paintIndex].type} paint. A COLOR variable binds to a SOLID paint only.`
+        );
+      }
+    }
+
+    // Any write through a text node needs its current fonts loaded, and a
+    // binding that changes the font needs the new one loaded as well.
+    if (node.type === "TEXT") {
+      try {
+        await loadFontsForTextNode(node);
+      } catch (err) {
+        itemProblems.push(
+          `${messageOf(err)}. Give the text node one font before binding a variable to it.`
+        );
+      }
+      if (variable && (field === "fontFamily" || field === "fontStyle")) {
+        const nextValue = await resolveVariableInDefaultMode(variable);
+        if (typeof nextValue === "string") {
+          const nextFonts = new Map<string, FontName>();
+          for (const font of textNodeFonts(node)) {
+            const next =
+              field === "fontFamily"
+                ? { family: nextValue, style: font.style }
+                : { family: font.family, style: nextValue };
+            nextFonts.set(`${next.family}::${next.style}`, next);
+          }
+          for (const font of nextFonts.values()) {
+            const problem = await loadFontOnce(font, fontChecks);
+            if (problem) itemProblems.push(problem);
+          }
+        }
+      }
+    }
+
+    if (itemProblems.length > 0) {
+      itemProblems.forEach(fail);
+    } else {
+      plans.push({
+        node,
+        field,
+        variable,
+        paint: bindsPaint ? { property: field, index: paintIndex } : undefined,
+      });
+    }
+  }
+  if (problems.length > 0) throw validationError(tool, problems);
+
+  return runBatchWrites(plans, async (plan) => {
+    if (plan.paint) {
+      // Re-read rather than reuse the validated list, so two items that bind
+      // different paints of the same node both survive.
+      const current = readPaints(plan.node, plan.paint.property);
+      const paint = current?.[plan.paint.index];
+      if (!paint || paint.type !== "SOLID") {
+        throw new Error(
+          `${plan.paint.property}[${plan.paint.index}] of ${plan.node.id} is no longer a solid paint`
+        );
+      }
+      const paints = [...(current as readonly Paint[])];
+      paints[plan.paint.index] = figma.variables.setBoundVariableForPaint(
+        paint,
+        "color",
+        plan.variable
+      );
+      writePaints(plan.node, plan.paint.property, paints);
+    } else {
+      (plan.node as unknown as BindableNode).setBoundVariable(
+        plan.field as VariableBindableNodeField | VariableBindableTextField,
+        plan.variable
+      );
+    }
+    return { nodeId: plan.node.id, field: plan.field };
+  });
+};
+
 export const variablesHandlers = {
   create_variable_collection: { edit: true, run: createVariableCollection },
   update_variable_collection: { edit: true, run: updateVariableCollection },
@@ -1048,4 +1487,5 @@ export const variablesHandlers = {
   create_variables: { edit: true, run: createVariables },
   update_variables: { edit: true, run: updateVariables },
   delete_variables: { edit: true, run: deleteVariables },
+  bind_variables: { edit: true, run: bindVariables },
 } satisfies Record<string, ExtensionHandler>;

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Node } from "../node.js";
-import { fileKeyField } from "../schema-common.js";
+import { createFigmaNodeIdSchema, fileKeyField } from "../schema-common.js";
 import { parseToolInput, renderResponse } from "../tool-helpers.js";
 import type { ToolResult } from "../tool-helpers.js";
 import type { ExtensionRpcMap, ExtensionSchemaMap } from "./types.js";
@@ -151,6 +151,66 @@ const updateVariableItem = z
     "Each update needs at least one of name, value, scopes, or description"
   );
 
+const bindableField = z
+  .enum([
+    "fills",
+    "strokes",
+    "visible",
+    "characters",
+    "fontFamily",
+    "fontStyle",
+    "fontSize",
+    "fontWeight",
+    "letterSpacing",
+    "lineHeight",
+    "paragraphSpacing",
+    "paragraphIndent",
+    "width",
+    "height",
+    "minWidth",
+    "maxWidth",
+    "minHeight",
+    "maxHeight",
+    "opacity",
+    "cornerRadius",
+    "topLeftRadius",
+    "topRightRadius",
+    "bottomLeftRadius",
+    "bottomRightRadius",
+    "strokeWeight",
+    "strokeTopWeight",
+    "strokeRightWeight",
+    "strokeBottomWeight",
+    "strokeLeftWeight",
+    "itemSpacing",
+    "counterAxisSpacing",
+    "paddingLeft",
+    "paddingRight",
+    "paddingTop",
+    "paddingBottom",
+    "gridRowGap",
+    "gridColumnGap",
+  ])
+  .describe(
+    "The field to bind. COLOR variables take fills and strokes, BOOLEAN takes visible, STRING takes characters, fontFamily, and fontStyle, and FLOAT takes every other field."
+  );
+
+const bindingItem = z.object({
+  nodeId: createFigmaNodeIdSchema().describe("The node to bind on"),
+  field: bindableField,
+  variableId: createVariableIdSchema()
+    .nullable()
+    .describe("The variable to bind, or null to remove the binding from this field"),
+  paintIndex: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      "Which paint of fills or strokes to bind, defaulting to 0. That paint must be SOLID. Leave it out for every other field."
+    ),
+});
+
 /** Tool name to Zod object schema. Spread into `toolInputSchemas`. */
 export const schemas = {
   create_variable_collection: z.object({
@@ -198,6 +258,15 @@ export const schemas = {
     confirm: z.boolean().describe("Must be true to confirm deletion"),
     fileKey: fileKeyField,
   }),
+
+  bind_variables: z.object({
+    bindings: z
+      .array(bindingItem)
+      .min(1)
+      .max(200)
+      .describe("The bindings to apply, 1 to 200 per call"),
+    fileKey: fileKeyField,
+  }),
 } satisfies ExtensionSchemaMap;
 
 /** Tool name to RPC wire mapper. Spread into `rpcToArgs`. */
@@ -208,6 +277,7 @@ export const rpcToArgs = {
   create_variables: (_nodeIds, params) => ({ ...params }),
   update_variables: (_nodeIds, params) => ({ ...params }),
   delete_variables: (_nodeIds, params) => ({ ...params }),
+  bind_variables: (_nodeIds, params) => ({ ...params }),
 } satisfies ExtensionRpcMap;
 
 /**
@@ -296,6 +366,20 @@ export function register(server: McpServer, node: Node): void {
       const { fileKey, ...params } = parsed.data;
       return renderResponse(() =>
         node.sendWithParams("delete_variables", undefined, params, fileKey)
+      );
+    }
+  );
+
+  server.tool(
+    "bind_variables",
+    "Bind variables to node fields, up to 200 per call, or pass variableId: null to remove a binding and leave the field at its last value. A COLOR variable binds into one SOLID paint of fills or strokes, chosen by paintIndex; every other field takes the variable directly. The node must support the field — itemSpacing needs an auto layout frame, for example — and the variable type must match it. Every item is checked before the first write: a batch with a bad item writes nothing and reports every item to correct. When multiple files are connected, specify fileKey.",
+    schemas.bind_variables.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(schemas.bind_variables, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, ...params } = parsed.data;
+      return renderResponse(() =>
+        node.sendWithParams("bind_variables", undefined, params, fileKey)
       );
     }
   );
