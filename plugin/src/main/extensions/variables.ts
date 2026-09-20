@@ -26,19 +26,25 @@ const readRequiredString = (params: Record<string, unknown>, key: string, tool: 
 /**
  * Rewrites a failure from a Figma write so the message carries a correction,
  * and names the plan limit when Figma rejected the call because of one.
+ * @param err - The error Figma threw.
+ * @returns The sentence to report.
+ */
+const describeWriteFailure = (err: unknown): string => {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/\b(limit|plan|upgrade|professional|organization|enterprise|subscri\w*)\b/i.test(message)) {
+    return `${message}. This is a Figma plan limit. A free (Starter) account keeps one mode per collection and cannot publish a library or use extended collections; a paid plan lifts the limit.`;
+  }
+  return `${message}.`;
+};
+
+/**
+ * Wraps a failed Figma write in an error that names what the handler was doing.
  * @param action - What the handler was doing, phrased for a message.
  * @param err - The error Figma threw.
  * @returns The error to throw on.
  */
-const describeWriteError = (action: string, err: unknown): Error => {
-  const message = err instanceof Error ? err.message : String(err);
-  if (/\b(limit|plan|upgrade|professional|organization|enterprise|subscri\w*)\b/i.test(message)) {
-    return new Error(
-      `${action}: ${message}. This is a Figma plan limit. A free (Starter) account keeps one mode per collection and cannot publish a library or use extended collections; a paid plan lifts the limit.`
-    );
-  }
-  return new Error(`${action}: ${message}.`);
-};
+const describeWriteError = (action: string, err: unknown): Error =>
+  new Error(`${action}: ${describeWriteFailure(err)}`);
 
 /**
  * Looks a variable collection up by ID.
@@ -417,6 +423,26 @@ export const findAliasByName = (
 /** The most items one batch call accepts. */
 const MAX_BATCH_ITEMS = 200;
 
+/**
+ * Reads the array parameter of a batch tool and checks its size.
+ * @param params - The request params.
+ * @param key - The parameter name.
+ * @param tool - The tool name, for the error message.
+ * @returns The raw items, still unexamined.
+ */
+const readBatchArray = (params: Record<string, unknown>, key: string, tool: string): unknown[] => {
+  const raw = params[key];
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(`${tool} requires ${key} as an array of 1 to ${MAX_BATCH_ITEMS} items.`);
+  }
+  if (raw.length > MAX_BATCH_ITEMS) {
+    throw new Error(
+      `${tool} accepts at most ${MAX_BATCH_ITEMS} items per call, received ${raw.length}. Split the batch.`
+    );
+  }
+  return raw;
+};
+
 /** What the write phase does with the value of one item. */
 type PlannedValue =
   { kind: "value"; value: VariableValue } | { kind: "alias"; target: AliasLookup };
@@ -485,15 +511,7 @@ const readScopes = (raw: unknown): VariableScope[] => {
 const createVariables = async (req: ExtensionRequest): Promise<unknown> => {
   const tool = "create_variables";
   const collectionId = readRequiredString(req.params, "collectionId", tool);
-  const rawItems = req.params.variables;
-  if (!Array.isArray(rawItems) || rawItems.length === 0) {
-    throw new Error(`${tool} requires variables as an array of 1 to ${MAX_BATCH_ITEMS} items.`);
-  }
-  if (rawItems.length > MAX_BATCH_ITEMS) {
-    throw new Error(
-      `${tool} accepts at most ${MAX_BATCH_ITEMS} items per call, received ${rawItems.length}. Split the batch.`
-    );
-  }
+  const rawItems = readBatchArray(req.params, "variables", tool);
 
   const collection = await getVariableCollectionById(collectionId);
   const localVariables = await figma.variables.getLocalVariablesAsync();
@@ -672,9 +690,362 @@ const createVariables = async (req: ExtensionRequest): Promise<unknown> => {
   };
 };
 
+/** One entry of the `results` array a batch tool returns. */
+type BatchResult = Record<string, unknown> & { index: number; ok: boolean };
+
+/**
+ * Runs the write phase of a batch.
+ *
+ * Validation has already passed here, so a failure is Figma refusing a write.
+ * The call stops at that item: the items before it keep their result, the
+ * failed item carries the cause, and every item after it reports that nothing
+ * was written for it.
+ * @param plans - The validated items, one per input item and in input order.
+ * @param write - Writes one item and returns the fields of its result.
+ * @returns One result entry per item.
+ */
+const runBatchWrites = async <TPlan>(
+  plans: readonly TPlan[],
+  write: (plan: TPlan) => Promise<Record<string, unknown>>
+): Promise<{ results: BatchResult[] }> => {
+  const results: BatchResult[] = [];
+  for (let index = 0; index < plans.length; index++) {
+    try {
+      results.push({ index, ok: true, ...(await write(plans[index])) });
+    } catch (err) {
+      results.push({ index, ok: false, error: describeWriteFailure(err) });
+      for (let rest = index + 1; rest < plans.length; rest++) {
+        results.push({ index: rest, ok: false, error: "not written" });
+      }
+      break;
+    }
+  }
+  return { results };
+};
+
+/**
+ * Tests whether a stored variable value is an alias to another variable.
+ * @param value - The stored value.
+ * @returns True when the value is an alias.
+ */
+const isVariableAlias = (value: unknown): value is VariableAlias =>
+  typeof value === "object" &&
+  value !== null &&
+  "type" in value &&
+  (value as VariableAlias).type === "VARIABLE_ALIAS";
+
+/** One validated `update_variables` item, ready to write. */
+type VariableUpdatePlan = {
+  variable: Variable;
+  defaultModeId: string;
+  name?: string;
+  value?: { kind: "value"; value: VariableValue } | { kind: "alias"; variable: Variable };
+  scopes?: VariableScope[];
+  description?: string;
+};
+
+/**
+ * Changes the name, value, scopes, or description of existing variables.
+ *
+ * A value goes to the default mode of the variable's collection, which is the
+ * only mode a free plan has. The type of a variable is fixed once it exists,
+ * so a value is checked against the type Figma already reports for it.
+ *
+ * An `aliasName` resolves against the document as it stands, not against the
+ * renames of this call, so a batch that renames a variable and aliases it by
+ * its old name stays unambiguous.
+ * @param req - The extension request.
+ * @returns One result entry per item.
+ */
+const updateVariables = async (req: ExtensionRequest): Promise<unknown> => {
+  const tool = "update_variables";
+  const rawItems = readBatchArray(req.params, "updates", tool);
+  const localVariables = await figma.variables.getLocalVariablesAsync();
+
+  const problems: string[] = [];
+  const plans: VariableUpdatePlan[] = [];
+  /** Variable ID to the index of the item that already updates it. */
+  const claimedVariables = new Map<string, number>();
+  /** Collection ID to new name to the index of the item that already takes it. */
+  const claimedNames = new Map<string, Map<string, number>>();
+
+  for (let index = 0; index < rawItems.length; index++) {
+    const raw = rawItems[index];
+    const fail = (problem: string) => problems.push(`items[${index}]: ${problem}`);
+
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      fail(
+        `each item must be an object with variableId and at least one of name, value, scopes, or description, received ${describeValue(raw)}.`
+      );
+      continue;
+    }
+    const item = raw as Record<string, unknown>;
+    if (typeof item.variableId !== "string" || item.variableId.trim() === "") {
+      fail(
+        'variableId is required and must be a variable ID such as "VariableID:1:2". Call get_variable_defs to list them.'
+      );
+      continue;
+    }
+    const variable = await getVariableById(item.variableId);
+    if (!variable) {
+      fail(
+        `variable not found: ${item.variableId}. Call get_variable_defs to list the variable IDs of this file.`
+      );
+      continue;
+    }
+    if (!isSupportedVariableType(variable.resolvedType)) {
+      fail(
+        `"${variable.name}" is a ${variable.resolvedType} variable, which these tools do not write. They write ${SUPPORTED_VARIABLE_TYPES.join(", ")}.`
+      );
+      continue;
+    }
+    const type = variable.resolvedType;
+
+    let collection: VariableCollection;
+    try {
+      collection = await getVariableCollectionById(variable.variableCollectionId);
+    } catch (err) {
+      fail(messageOf(err));
+      continue;
+    }
+
+    const itemProblems: string[] = [];
+    const claimed = claimedVariables.get(variable.id);
+    if (claimed !== undefined) {
+      itemProblems.push(
+        `${variable.id} is already updated by items[${claimed}]. Give each variable at most one item.`
+      );
+    } else {
+      claimedVariables.set(variable.id, index);
+    }
+
+    if (
+      item.name === undefined &&
+      item.value === undefined &&
+      item.scopes === undefined &&
+      item.description === undefined
+    ) {
+      itemProblems.push(
+        "an item needs at least one of name, value, scopes, or description. An item that carries only variableId changes nothing."
+      );
+    }
+
+    let name: string | undefined;
+    if (item.name !== undefined) {
+      if (typeof item.name !== "string" || item.name.trim() === "") {
+        itemProblems.push(
+          'name must be a non-empty string. Use "/" to group, for example "color/brand".'
+        );
+      } else {
+        name = item.name;
+        const clash = localVariables.filter(
+          (other) =>
+            other.variableCollectionId === variable.variableCollectionId &&
+            other.name === name &&
+            other.id !== variable.id
+        )[0];
+        if (clash) {
+          itemProblems.push(
+            `name "${name}" already exists in collection "${collection.name}" (${clash.id}). Choose another name.`
+          );
+        }
+        const namesInCollection =
+          claimedNames.get(variable.variableCollectionId) ?? new Map<string, number>();
+        claimedNames.set(variable.variableCollectionId, namesInCollection);
+        const takenBy = namesInCollection.get(name);
+        if (takenBy !== undefined) {
+          itemProblems.push(
+            `name "${name}" is already taken by items[${takenBy}] in the same collection. Every new name in a batch must be unique.`
+          );
+        } else {
+          namesInCollection.set(name, index);
+        }
+      }
+    }
+
+    let value: VariableUpdatePlan["value"];
+    if (item.value !== undefined) {
+      try {
+        const parsed = parseVariableValue(type, item.value);
+        if (parsed.kind === "value") {
+          value = { kind: "value", value: parsed.value };
+        } else {
+          let target: Variable | null = null;
+          if (parsed.kind === "aliasId") {
+            target = await getVariableById(parsed.aliasId);
+            if (!target) {
+              itemProblems.push(
+                `aliasId "${parsed.aliasId}" was not found. Use a variable ID from get_variable_defs.`
+              );
+            }
+          } else {
+            // The batch argument is empty: an update names variables that
+            // already exist, so every alias target already has an ID.
+            const lookup = findAliasByName(
+              parsed.aliasName,
+              [],
+              localVariables.filter(
+                (other) => other.variableCollectionId === variable.variableCollectionId
+              ),
+              localVariables.filter(
+                (other) => other.variableCollectionId !== variable.variableCollectionId
+              )
+            );
+            target = lookup.source === "document" ? lookup.variable : null;
+          }
+          if (target && target.id === variable.id) {
+            itemProblems.push(
+              `value aliases the variable this item updates, "${variable.name}" (${variable.id}). Point the alias at another variable.`
+            );
+          } else if (target && target.resolvedType !== type) {
+            itemProblems.push(
+              `alias target "${target.name}" (${target.id}) is a ${target.resolvedType} variable but "${variable.name}" is ${type}. An alias must point at a variable of the same type.`
+            );
+          } else if (target) {
+            value = { kind: "alias", variable: target };
+          }
+        }
+      } catch (err) {
+        itemProblems.push(messageOf(err));
+      }
+    }
+
+    let scopes: VariableScope[] | undefined;
+    if (item.scopes !== undefined) {
+      try {
+        scopes = readScopes(item.scopes);
+        validateVariableScopes(type, scopes);
+      } catch (err) {
+        scopes = undefined;
+        itemProblems.push(messageOf(err));
+      }
+    }
+
+    let description: string | undefined;
+    if (item.description !== undefined) {
+      if (typeof item.description !== "string") {
+        itemProblems.push(
+          `description must be a string, received ${describeValue(item.description)}.`
+        );
+      } else {
+        description = item.description;
+      }
+    }
+
+    if (itemProblems.length > 0) {
+      itemProblems.forEach(fail);
+    } else {
+      plans.push({
+        variable,
+        defaultModeId: collection.defaultModeId,
+        name,
+        value,
+        scopes,
+        description,
+      });
+    }
+  }
+  if (problems.length > 0) throw validationError(tool, problems);
+
+  return runBatchWrites(plans, async (plan) => {
+    if (plan.name !== undefined) plan.variable.name = plan.name;
+    if (plan.scopes) plan.variable.scopes = plan.scopes;
+    if (plan.description !== undefined) plan.variable.description = plan.description;
+    if (plan.value) {
+      plan.variable.setValueForMode(
+        plan.defaultModeId,
+        plan.value.kind === "value"
+          ? plan.value.value
+          : figma.variables.createVariableAlias(plan.value.variable)
+      );
+    }
+    return { id: plan.variable.id, name: plan.variable.name };
+  });
+};
+
+/**
+ * Finds the local variables that alias one target, in any mode.
+ *
+ * Figma leaves such a variable without a target once the removal goes through,
+ * so `delete_variables` reports them instead of breaking them silently.
+ * @param localVariables - Every local variable of the file.
+ * @param targetId - The variable about to be removed.
+ * @returns The IDs of the variables that point at the target.
+ */
+const findAliasSources = (localVariables: readonly Variable[], targetId: string): string[] =>
+  localVariables
+    .filter(
+      (variable) =>
+        variable.id !== targetId &&
+        Object.values(variable.valuesByMode).some(
+          (value) => isVariableAlias(value) && value.id === targetId
+        )
+    )
+    .map((variable) => variable.id);
+
+/**
+ * Removes variables, and reports what aliased each of them.
+ *
+ * The alias sources are read before the first removal, because a removed
+ * variable cannot be looked up afterwards.
+ * @param req - The extension request.
+ * @returns One result entry per item.
+ */
+const deleteVariables = async (req: ExtensionRequest): Promise<unknown> => {
+  const tool = "delete_variables";
+  if (req.params.confirm !== true) {
+    throw new Error(
+      `${tool} requires confirm: true. It removes each variable, and any node or variable bound to one of them keeps its last resolved value.`
+    );
+  }
+  const rawIds = readBatchArray(req.params, "variableIds", tool);
+  const localVariables = await figma.variables.getLocalVariablesAsync();
+
+  const problems: string[] = [];
+  const plans: { variable: Variable; aliasedBy: string[] }[] = [];
+  const claimed = new Map<string, number>();
+
+  for (let index = 0; index < rawIds.length; index++) {
+    const raw = rawIds[index];
+    if (typeof raw !== "string" || raw.trim() === "") {
+      problems.push(
+        `items[${index}]: each entry must be a variable ID such as "VariableID:1:2", received ${describeValue(raw)}.`
+      );
+      continue;
+    }
+    const variable = await getVariableById(raw);
+    if (!variable) {
+      problems.push(
+        `items[${index}]: variable not found: ${raw}. Call get_variable_defs to list the variable IDs of this file.`
+      );
+      continue;
+    }
+    const duplicate = claimed.get(variable.id);
+    if (duplicate !== undefined) {
+      problems.push(
+        `items[${index}]: ${variable.id} is already listed at items[${duplicate}]. List each variable once.`
+      );
+      continue;
+    }
+    claimed.set(variable.id, index);
+    plans.push({ variable, aliasedBy: findAliasSources(localVariables, variable.id) });
+  }
+  if (problems.length > 0) throw validationError(tool, problems);
+
+  return runBatchWrites(plans, async (plan) => {
+    // Read before the removal: the object throws on every property access once
+    // it is gone.
+    const id = plan.variable.id;
+    plan.variable.remove();
+    return { id, aliasedBy: plan.aliasedBy };
+  });
+};
+
 export const variablesHandlers = {
   create_variable_collection: { edit: true, run: createVariableCollection },
   update_variable_collection: { edit: true, run: updateVariableCollection },
   delete_variable_collection: { edit: true, run: deleteVariableCollection },
   create_variables: { edit: true, run: createVariables },
+  update_variables: { edit: true, run: updateVariables },
+  delete_variables: { edit: true, run: deleteVariables },
 } satisfies Record<string, ExtensionHandler>;

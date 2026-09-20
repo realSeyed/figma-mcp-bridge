@@ -108,6 +108,49 @@ const createVariableItem = z.object({
   description: z.string().optional().describe("Optional description, shown in Figma"),
 });
 
+/**
+ * Creates a Zod schema that validates a variable ID.
+ * @returns A Zod string schema for variable IDs.
+ */
+const createVariableIdSchema = () =>
+  z
+    .string()
+    .regex(
+      /^VariableID:.+$/,
+      "Variable ID must start with 'VariableID:' — use an ID from get_variable_defs"
+    );
+
+const variableIdField = createVariableIdSchema().describe(
+  "The variable to change, as reported by get_variable_defs"
+);
+
+const updateVariableItem = z
+  .object({
+    variableId: variableIdField,
+    name: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "A new name. Must not already exist in the collection of this variable, and must be unique within this call."
+      ),
+    value: variableValueField.optional(),
+    scopes: z
+      .array(variableScopeField)
+      .min(1)
+      .optional()
+      .describe("Replaces the current scopes. Must suit the type the variable already has."),
+    description: z.string().optional().describe("Replaces the current description"),
+  })
+  .refine(
+    (item) =>
+      item.name !== undefined ||
+      item.value !== undefined ||
+      item.scopes !== undefined ||
+      item.description !== undefined,
+    "Each update needs at least one of name, value, scopes, or description"
+  );
+
 /** Tool name to Zod object schema. Spread into `toolInputSchemas`. */
 export const schemas = {
   create_variable_collection: z.object({
@@ -136,6 +179,25 @@ export const schemas = {
       .describe("The variables to create, 1 to 200 per call"),
     fileKey: fileKeyField,
   }),
+
+  update_variables: z.object({
+    updates: z
+      .array(updateVariableItem)
+      .min(1)
+      .max(200)
+      .describe("The changes to apply, 1 to 200 per call"),
+    fileKey: fileKeyField,
+  }),
+
+  delete_variables: z.object({
+    variableIds: z
+      .array(createVariableIdSchema())
+      .min(1)
+      .max(200)
+      .describe("The variables to delete, 1 to 200 per call"),
+    confirm: z.boolean().describe("Must be true to confirm deletion"),
+    fileKey: fileKeyField,
+  }),
 } satisfies ExtensionSchemaMap;
 
 /** Tool name to RPC wire mapper. Spread into `rpcToArgs`. */
@@ -144,6 +206,8 @@ export const rpcToArgs = {
   update_variable_collection: (_nodeIds, params) => ({ ...params }),
   delete_variable_collection: (_nodeIds, params) => ({ ...params }),
   create_variables: (_nodeIds, params) => ({ ...params }),
+  update_variables: (_nodeIds, params) => ({ ...params }),
+  delete_variables: (_nodeIds, params) => ({ ...params }),
 } satisfies ExtensionRpcMap;
 
 /**
@@ -204,6 +268,34 @@ export function register(server: McpServer, node: Node): void {
       const { fileKey, ...params } = parsed.data;
       return renderResponse(() =>
         node.sendWithParams("create_variables", undefined, params, fileKey)
+      );
+    }
+  );
+
+  server.tool(
+    "update_variables",
+    "Change the name, value, scopes, or description of up to 200 existing variables. A value goes to the default mode of the variable's collection and must match the type the variable already has. It can be an alias to another variable by ID or by name; an aliasName resolves against the file as it stands, not against the renames in this call. Every item is checked before the first write: a batch with a bad item writes nothing and reports every item to correct. When multiple files are connected, specify fileKey.",
+    schemas.update_variables.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(schemas.update_variables, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, ...params } = parsed.data;
+      return renderResponse(() =>
+        node.sendWithParams("update_variables", undefined, params, fileKey)
+      );
+    }
+  );
+
+  server.tool(
+    "delete_variables",
+    "Delete up to 200 local variables. This is destructive and requires confirm: true. Each result carries aliasedBy, the local variables that aliased the deleted one and now resolve to nothing, and nodes bound to a deleted variable keep their last resolved value. When multiple files are connected, specify fileKey.",
+    schemas.delete_variables.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(schemas.delete_variables, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, ...params } = parsed.data;
+      return renderResponse(() =>
+        node.sendWithParams("delete_variables", undefined, params, fileKey)
       );
     }
   );
