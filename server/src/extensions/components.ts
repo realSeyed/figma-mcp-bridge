@@ -70,6 +70,65 @@ const createComponentInput = createComponentShape
     "create_component takes fromNodeId or width, height, and fillHex, not both: a converted node keeps the size and the fill it already has"
   );
 
+/** The most components one preferredValues list carries. */
+const MAX_PREFERRED_VALUES = 50;
+
+const propertyOwnerField = createFigmaNodeIdSchema().describe(
+  "The component, or the component set, that owns the property. A variant is refused with the ID of its set: a variant owns no properties of its own."
+);
+
+const propertyNameField = z
+  .string()
+  .min(1)
+  .describe(
+    'The property, named either the way Figma shows it ("Label") or in full with the suffix Figma appends ("Label#12:0"). A display name that matches two properties comes back with both full names.'
+  );
+
+const preferredValuesField = z
+  .array(createFigmaNodeIdSchema())
+  .max(MAX_PREFERRED_VALUES)
+  .optional()
+  .describe(
+    "IDs of the components or component sets the instance swap menu offers first, up to 50. Belongs to an INSTANCE_SWAP property only."
+  );
+
+const propertyValueDescription =
+  "BOOLEAN takes true or false, TEXT and VARIANT take a string, and INSTANCE_SWAP takes the node ID of the component an instance starts on, e.g. '4029:12345'.";
+
+/**
+ * The form of `edit_component_property`: at least one field to change.
+ *
+ * `server.tool` takes the object's `.shape`, which a refinement would hide, so
+ * the plain object and the refined schema are kept apart.
+ */
+const editComponentPropertyShape = z.object({
+  componentId: propertyOwnerField,
+  propertyName: propertyNameField,
+  newName: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'The new display name, without a "#" suffix. Figma appends a fresh suffix and the call returns the new full name.'
+    ),
+  newDefaultValue: z
+    .union([z.string(), z.boolean()])
+    .optional()
+    .describe(
+      `The new default value an instance starts on. ${propertyValueDescription} A VARIANT property takes none: the first variant of the set is the default.`
+    ),
+  preferredValues: preferredValuesField,
+  fileKey: fileKeyField,
+});
+
+const editComponentPropertyInput = editComponentPropertyShape.refine(
+  (value) =>
+    value.newName !== undefined ||
+    value.newDefaultValue !== undefined ||
+    value.preferredValues !== undefined,
+  "edit_component_property needs at least one of newName, newDefaultValue, and preferredValues: a field left out keeps the value it has"
+);
+
 /** Tool name to Zod object schema. Spread into `toolInputSchemas`. */
 export const schemas = {
   list_components: z.object({
@@ -158,6 +217,62 @@ export const schemas = {
       .describe("The instances to turn into frames, 1 to 200 per call"),
     fileKey: fileKeyField,
   }),
+
+  add_component_property: z.object({
+    componentId: propertyOwnerField,
+    name: z
+      .string()
+      .min(1)
+      .describe(
+        'The property name Figma shows, e.g. "Label". Leave the "#" suffix out — Figma appends one, and the call returns the full name to pass back.'
+      ),
+    type: z
+      .enum(["BOOLEAN", "TEXT", "INSTANCE_SWAP", "VARIANT"])
+      .describe(
+        "The property type. VARIANT is an axis of a component set and is refused on a single component. SLOT is not supported."
+      ),
+    defaultValue: z
+      .union([z.string(), z.boolean()])
+      .describe(`The value an instance starts on. ${propertyValueDescription}`),
+    preferredValues: preferredValuesField,
+    fileKey: fileKeyField,
+  }),
+
+  edit_component_property: editComponentPropertyInput,
+
+  delete_component_property: z.object({
+    componentId: propertyOwnerField,
+    propertyName: propertyNameField,
+    confirm: z.boolean().describe("Must be true to confirm deletion"),
+    fileKey: fileKeyField,
+  }),
+
+  bind_component_property: z.object({
+    nodeId: createFigmaNodeIdSchema().describe(
+      "The layer inside the component, or inside one variant of the component set, to drive from a property"
+    ),
+    field: z
+      .enum(["characters", "visible", "mainComponent"])
+      .describe(
+        "The field the property drives: characters is the text of a TEXT layer and reads a TEXT property, visible reads a BOOLEAN property, and mainComponent is the component an INSTANCE layer follows and reads an INSTANCE_SWAP property."
+      ),
+    propertyName: propertyNameField
+      .nullable()
+      .describe(
+        "The property to link the field to, named in display or full form, or null to remove the link. The layer then keeps the value it last showed."
+      ),
+    fileKey: fileKeyField,
+  }),
+
+  set_instance_properties: z.object({
+    nodeId: createFigmaNodeIdSchema().describe("The instance to change"),
+    properties: z
+      .record(z.union([z.string(), z.boolean()]))
+      .describe(
+        `The properties to set, as property name to value, e.g. { "Label": "Buy", "Show icon": false }. Each name is the display name or the full name. ${propertyValueDescription}`
+      ),
+    fileKey: fileKeyField,
+  }),
 } satisfies ExtensionSchemaMap;
 
 /** Tool name to RPC wire mapper. Spread into `rpcToArgs`. */
@@ -170,6 +285,11 @@ export const rpcToArgs = {
   create_instance: (_nodeIds, params) => ({ ...params }),
   swap_instance: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
   detach_instance: (nodeIds, params) => ({ nodeIds, ...params }),
+  add_component_property: (_nodeIds, params) => ({ ...params }),
+  edit_component_property: (_nodeIds, params) => ({ ...params }),
+  delete_component_property: (_nodeIds, params) => ({ ...params }),
+  bind_component_property: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
+  set_instance_properties: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
 } satisfies ExtensionRpcMap;
 
 /**
@@ -279,6 +399,76 @@ export function register(server: McpServer, node: Node): void {
       if (!parsed.success) return parsed.error;
       const { fileKey, nodeIds } = parsed.data;
       return renderResponse(() => node.sendWithParams("detach_instance", nodeIds, {}, fileKey));
+    }
+  );
+
+  server.tool(
+    "add_component_property",
+    'Add one component property to a component or a component set, so an instance of it can be configured without being edited. A BOOLEAN property drives whether a layer shows, TEXT the words of a text layer, INSTANCE_SWAP the component a nested instance follows, and VARIANT a new axis of a component set. Figma appends a unique suffix to a BOOLEAN, TEXT, or INSTANCE_SWAP name, so the call returns the full name — "Label#12:0" — and that is the name the other tools take; a VARIANT name carries no suffix. Pass the component set, not one of its variants: a variant owns no properties, and a property on the set reaches every variant. SLOT properties are not supported. Use bind_component_property next to point a layer at the new property. When multiple files are connected, specify fileKey.',
+    schemas.add_component_property.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(schemas.add_component_property, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, ...params } = parsed.data;
+      return renderResponse(() =>
+        node.sendWithParams("add_component_property", undefined, params, fileKey)
+      );
+    }
+  );
+
+  server.tool(
+    "edit_component_property",
+    "Change the name, the default value, or the preferred values of one component property, and return the property's full name afterwards. Renaming gives Figma a fresh suffix, so the returned name is the one to pass from then on. Name the property by the display name Figma shows or by the full name; a display name that matches two properties comes back with both full names. newDefaultValue belongs to a BOOLEAN, TEXT, or INSTANCE_SWAP property — a VARIANT property takes none, because the first variant of the set is the default — and preferredValues to an INSTANCE_SWAP property. A field left out keeps the value it has. When multiple files are connected, specify fileKey.",
+    editComponentPropertyShape.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(editComponentPropertyInput, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, ...params } = parsed.data;
+      return renderResponse(() =>
+        node.sendWithParams("edit_component_property", undefined, params, fileKey)
+      );
+    }
+  );
+
+  server.tool(
+    "delete_component_property",
+    "Remove one component property from a component or a component set. This is destructive and requires confirm: true — it drops the property from every instance as well, and each layer the property drove keeps the value it last showed. Name the property by its display name or its full name. A VARIANT property cannot be removed this way: it is an axis of the set, carried in the name of every variant. When multiple files are connected, specify fileKey.",
+    schemas.delete_component_property.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(schemas.delete_component_property, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, ...params } = parsed.data;
+      return renderResponse(() =>
+        node.sendWithParams("delete_component_property", undefined, params, fileKey)
+      );
+    }
+  );
+
+  server.tool(
+    "bind_component_property",
+    "Point one field of a layer inside a component at a component property, so an instance drives that field through the property. The field must match the property type: characters reads a TEXT property and belongs to a TEXT layer, visible reads a BOOLEAN property, and mainComponent reads an INSTANCE_SWAP property and belongs to an INSTANCE layer. The layer must sit inside the component, or inside one variant of the component set, that owns the property — a layer inside an instance is refused, because the link lives on the main component. The other links on the layer are kept. Pass propertyName: null to remove the link and leave the layer as it looks. When multiple files are connected, specify fileKey.",
+    schemas.bind_component_property.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(schemas.bind_component_property, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, nodeId, ...params } = parsed.data;
+      return renderResponse(() =>
+        node.sendWithParams("bind_component_property", [nodeId], params, fileKey)
+      );
+    }
+  );
+
+  server.tool(
+    "set_instance_properties",
+    "Set the component property values of one instance: the text it shows, whether a layer of it is visible, the component a nested instance follows, and which variant of a component set it is. Name each property by the display name Figma shows or by the full name; a display name that matches two properties comes back with both full names. A VARIANT value that the set does not have comes back with the values it does have, and the fonts of the text layers a TEXT property drives are loaded before the change. Every value is checked before the first write, so a call with a bad value leaves the instance as it was. Call get_instance or get_component to see what an instance takes. When multiple files are connected, specify fileKey.",
+    schemas.set_instance_properties.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(schemas.set_instance_properties, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, nodeId, ...params } = parsed.data;
+      return renderResponse(() =>
+        node.sendWithParams("set_instance_properties", [nodeId], params, fileKey)
+      );
     }
   );
 }

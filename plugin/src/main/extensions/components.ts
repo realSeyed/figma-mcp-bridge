@@ -1,6 +1,7 @@
 import {
   getParentNodeById,
   getSceneNodeById,
+  loadFontsForTextNode,
   parseHexColor,
   positionNode,
   supportsChildren,
@@ -8,6 +9,7 @@ import {
 import {
   describeValue,
   describeWriteError,
+  messageOf,
   readBatchArray,
   readRequiredString,
   runBatchWrites,
@@ -1018,6 +1020,761 @@ const getInstance = async (req: ExtensionRequest): Promise<unknown> => {
   };
 };
 
+/** The component property types these tools cover. */
+const PROPERTY_TYPES = ["BOOLEAN", "TEXT", "INSTANCE_SWAP", "VARIANT"] as const;
+
+type SupportedPropertyType = (typeof PROPERTY_TYPES)[number];
+
+/** The most components one preferredValues list carries. */
+const MAX_PREFERRED_VALUES = 50;
+
+/**
+ * The property type each node field reads, keyed as Figma keys them in
+ * `componentPropertyReferences`.
+ */
+const REFERENCE_FIELDS = {
+  characters: "TEXT",
+  visible: "BOOLEAN",
+  mainComponent: "INSTANCE_SWAP",
+} as const;
+
+type ReferenceField = keyof typeof REFERENCE_FIELDS;
+
+/** One property of a component, as the name lookup needs it. */
+type PropertyEntry = {
+  /** The full name, suffix and all, which is the name the API takes. */
+  name: string;
+  type: ComponentPropertyType;
+  /** The values a VARIANT property accepts. */
+  variantOptions?: string[];
+};
+
+/** Writes a node as `4:5 "mcp-test/Button"`, the way these errors name one. */
+const labelOf = (node: BaseNode): string => `${node.id} "${node.name}"`;
+
+/** Lists the linkable fields with the property type each one reads. */
+const describeReferenceFields = (): string =>
+  (Object.keys(REFERENCE_FIELDS) as ReferenceField[])
+    .map((field) => `${field} reads a ${REFERENCE_FIELDS[field]} property`)
+    .join(", ");
+
+/**
+ * Reads the `type` parameter of `add_component_property`.
+ * @param raw - The parameter value.
+ * @param tool - The tool name, for the error messages.
+ * @returns The property type.
+ */
+const readPropertyType = (raw: string, tool: string): SupportedPropertyType => {
+  const wanted = raw.trim().toUpperCase();
+  const match = PROPERTY_TYPES.find((type) => type === wanted);
+  if (match) return match;
+  if (wanted === "SLOT") {
+    throw new Error(
+      `${tool} does not add a SLOT property. A slot carries a frame contract these tools do not model, and Figma refuses to set one on an instance. Use INSTANCE_SWAP to let an instance choose the component it shows. The types ${tool} takes are ${PROPERTY_TYPES.join(", ")}.`
+    );
+  }
+  throw new Error(
+    `${tool} requires type to be one of ${PROPERTY_TYPES.join(", ")}, received "${raw}".`
+  );
+};
+
+/**
+ * Stops a name that already carries the suffix Figma appends itself.
+ * @param name - The name the caller gave.
+ * @param key - The parameter name, for the error message.
+ * @param tool - The tool name, for the error message.
+ */
+const requireNameWithoutSuffix = (name: string, key: string, tool: string): void => {
+  if (!name.includes("#")) return;
+  throw new Error(
+    `${tool} requires ${key} without a "#": Figma appends the suffix itself, as in "Label#12:0", and the call returns the full name. Pass the display name alone.`
+  );
+};
+
+/**
+ * Finds the component or component set that owns a property.
+ *
+ * A variant owns none of its own: `componentPropertyDefinitions` lives on the
+ * set. A variant ID therefore comes back with the ID of its set rather than
+ * being followed silently, because a property on the set reaches every variant
+ * and a caller who named one variant may not expect that.
+ * @param componentId - The ID the caller gave.
+ * @param tool - The tool name, for the error messages.
+ * @returns The component or the component set.
+ */
+const readPropertyOwner = async (
+  componentId: string,
+  tool: string
+): Promise<ComponentNode | ComponentSetNode> => {
+  const node = await readNodeById(componentId, tool);
+  if (node.type === "COMPONENT_SET") return node;
+  if (node.type === "COMPONENT") {
+    const parent = node.parent;
+    if (parent && parent.type === "COMPONENT_SET") {
+      throw new Error(
+        `${labelOf(node)} is one variant of the component set ${labelOf(parent)}, and a variant owns no properties of its own. Pass ${parent.id} to ${tool}: a property on the set reaches every variant of it.`
+      );
+    }
+    return node;
+  }
+  throw new Error(
+    `${labelOf(node)} is a ${node.type} node, not a COMPONENT or a COMPONENT_SET. ${tool} works on the component that owns the property; call list_components to find one, or get_instance to find the main component of an instance.`
+  );
+};
+
+/**
+ * Lists the properties of a component or a component set.
+ * @param owner - The component or the component set.
+ * @param tool - The tool name, for the error message.
+ * @returns One entry per property.
+ */
+const propertyEntriesOf = (
+  owner: ComponentNode | ComponentSetNode,
+  tool: string
+): PropertyEntry[] => {
+  let definitions: ComponentPropertyDefinitions;
+  try {
+    definitions = owner.componentPropertyDefinitions;
+  } catch (err) {
+    throw new Error(
+      `${tool} could not read the properties of ${labelOf(owner)}: ${messageOf(err)}. Figma reports none for a component set whose variants do not all name the same properties; give every variant the same property names and call it again.`
+    );
+  }
+  return Object.entries(definitions).map(([name, definition]) => ({
+    name,
+    type: definition.type,
+    variantOptions: definition.variantOptions,
+  }));
+};
+
+/**
+ * Finds one property by the name the caller gave.
+ *
+ * Both names work: the display name Figma shows, and the full name carrying
+ * the suffix that keeps two properties of one display name apart. A display
+ * name that matches more than one property is refused with the full names,
+ * because picking one of them would be a guess.
+ * @param entries - The properties of the owner.
+ * @param wanted - The name the caller gave.
+ * @param owner - The owner, for the error messages.
+ * @param tool - The tool name, for the error messages.
+ * @returns The property.
+ */
+const resolveProperty = (
+  entries: readonly PropertyEntry[],
+  wanted: string,
+  owner: string,
+  tool: string
+): PropertyEntry => {
+  const name = wanted.trim();
+  if (entries.length === 0) {
+    throw new Error(
+      `${owner} has no component properties, so there is no "${name}" to change. Call add_component_property to add one.`
+    );
+  }
+  const exact = entries.find((entry) => entry.name === name);
+  if (exact) return exact;
+  const matches = entries.filter((entry) => displayNameOf(entry.name) === name);
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    throw new Error(
+      `${owner} has ${matches.length} properties named "${name}": ${matches.map((entry) => entry.name).join(", ")}. Pass one of those full names to ${tool}; the display name alone does not say which.`
+    );
+  }
+  throw new Error(
+    `${owner} has no property named "${name}". Its properties are ${entries.map((entry) => `${entry.name} (${entry.type})`).join(", ")}. Pass one of those names, with or without the "#" suffix.`
+  );
+};
+
+/**
+ * Stops a tool on a property type it does not model.
+ * @param property - The property.
+ * @param owner - The owner, for the error message.
+ * @param tool - The tool name, for the error message.
+ * @returns The property type, narrowed to the ones these tools cover.
+ */
+const requireSupportedProperty = (
+  property: PropertyEntry,
+  owner: string,
+  tool: string
+): SupportedPropertyType => {
+  const match = PROPERTY_TYPES.find((type) => type === property.type);
+  if (match) return match;
+  throw new Error(
+    `${property.name} of ${owner} is a ${property.type} property, which ${tool} does not model. These tools cover ${PROPERTY_TYPES.join(", ")}; change a ${property.type} property in Figma itself.`
+  );
+};
+
+/**
+ * Reads a node ID that names the component an instance follows.
+ * @param rawId - The ID the caller gave.
+ * @param key - The parameter the ID came from, for the error messages.
+ * @param tool - The tool name, for the error messages.
+ * @returns The component.
+ */
+const readSwapTarget = async (rawId: string, key: string, tool: string): Promise<ComponentNode> => {
+  const node = await figma.getNodeByIdAsync(rawId);
+  if (!node) {
+    throw new Error(
+      `${tool} found no node with the ID ${rawId} for ${key}. Call list_components to list the components of this file.`
+    );
+  }
+  if (node.type === "COMPONENT_SET") {
+    const variants = variantsOf(node);
+    const example = variants.length > 0 ? `, such as ${labelOf(node.defaultVariant)}` : "";
+    throw new Error(
+      `${labelOf(node)} is a COMPONENT_SET, and an instance follows one component rather than a whole set. Pass the ID of one variant${example}; call get_component on the set to list them.`
+    );
+  }
+  if (node.type !== "COMPONENT") {
+    throw new Error(
+      `${labelOf(node)} is a ${node.type} node, not a COMPONENT. ${key} takes the component an instance follows; call list_components to list them.`
+    );
+  }
+  return node;
+};
+
+/**
+ * Reads a property's default value, or the value one is being set to.
+ * @param raw - The parameter value.
+ * @param type - The type of the property the value belongs to.
+ * @param key - What the value is, for the error messages.
+ * @param tool - The tool name, for the error messages.
+ * @returns The value, with an INSTANCE_SWAP ID checked against the file.
+ */
+const readPropertyValue = async (
+  raw: unknown,
+  type: SupportedPropertyType,
+  key: string,
+  tool: string
+): Promise<string | boolean> => {
+  if (type === "BOOLEAN") {
+    if (typeof raw !== "boolean") {
+      throw new Error(
+        `${tool} requires ${key} as true or false for a BOOLEAN property, received ${describeValue(raw)}.`
+      );
+    }
+    return raw;
+  }
+  if (type === "INSTANCE_SWAP") {
+    if (typeof raw !== "string" || raw.trim() === "") {
+      throw new Error(
+        `${tool} requires ${key} as the node ID of a component for an INSTANCE_SWAP property, such as "4029:12345", received ${describeValue(raw)}.`
+      );
+    }
+    return (await readSwapTarget(raw, key, tool)).id;
+  }
+  if (typeof raw !== "string") {
+    throw new Error(
+      `${tool} requires ${key} as a string for a ${type} property, received ${describeValue(raw)}.`
+    );
+  }
+  if (type === "VARIANT" && raw.trim() === "") {
+    throw new Error(
+      `${tool} requires ${key} as a non-empty string for a VARIANT property: the value names one option of the axis, such as "Small".`
+    );
+  }
+  return raw;
+};
+
+/**
+ * Reads the `preferredValues` parameter: the components Figma offers first in
+ * the swap menu of an INSTANCE_SWAP property.
+ * @param raw - The parameter value.
+ * @param tool - The tool name, for the error messages.
+ * @returns The preferred values, or undefined when the parameter is absent.
+ */
+const readPreferredValues = async (
+  raw: unknown,
+  tool: string
+): Promise<InstanceSwapPreferredValue[] | undefined> => {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) {
+    throw new Error(
+      `${tool} requires preferredValues as an array of component or component set IDs, received ${describeValue(raw)}.`
+    );
+  }
+  if (raw.length > MAX_PREFERRED_VALUES) {
+    throw new Error(
+      `${tool} accepts at most ${MAX_PREFERRED_VALUES} preferredValues, received ${raw.length}.`
+    );
+  }
+  const values: InstanceSwapPreferredValue[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < raw.length; index++) {
+    const rawId = raw[index];
+    if (typeof rawId !== "string" || rawId.trim() === "") {
+      throw new Error(
+        `${tool} requires every item of preferredValues to be a node ID such as "4029:12345", but preferredValues[${index}] is ${describeValue(rawId)}.`
+      );
+    }
+    const node = await figma.getNodeByIdAsync(rawId);
+    if (!node) {
+      throw new Error(
+        `${tool} found no node with the ID ${rawId} at preferredValues[${index}]. Call list_components to list the components of this file.`
+      );
+    }
+    if (node.type !== "COMPONENT" && node.type !== "COMPONENT_SET") {
+      throw new Error(
+        `${labelOf(node)} at preferredValues[${index}] is a ${node.type} node, not a COMPONENT or a COMPONENT_SET. preferredValues names the components the swap menu offers first.`
+      );
+    }
+    if (node.key === "") {
+      throw new Error(
+        `${labelOf(node)} at preferredValues[${index}] carries no component key, so Figma cannot list it in the swap menu. Drop it from preferredValues.`
+      );
+    }
+    if (seen.has(node.key)) {
+      throw new Error(
+        `${labelOf(node)} is listed more than once in preferredValues. Name each component once.`
+      );
+    }
+    seen.add(node.key);
+    values.push({ type: node.type, key: node.key });
+  }
+  return values;
+};
+
+/**
+ * Adds one component property to a component or a component set.
+ *
+ * Figma appends a unique suffix to a BOOLEAN, TEXT, or INSTANCE_SWAP name, so
+ * the full name it hands back is the one the other tools take. A VARIANT name
+ * carries no suffix and comes back as it went in.
+ * @param req - The extension request.
+ * @returns The owner and the full property name.
+ */
+const addComponentProperty = async (req: ExtensionRequest): Promise<unknown> => {
+  const tool = "add_component_property";
+  const componentId = readRequiredString(req.params, "componentId", tool);
+  const name = readRequiredString(req.params, "name", tool);
+  const type = readPropertyType(readRequiredString(req.params, "type", tool), tool);
+  requireNameWithoutSuffix(name, "name", tool);
+
+  const owner = await readPropertyOwner(componentId, tool);
+  if (type === "VARIANT" && owner.type !== "COMPONENT_SET") {
+    throw new Error(
+      `${labelOf(owner)} is a COMPONENT, and a VARIANT property is an axis of a component set. Call combine_as_variants to build a set first, then add the property to the set. A single component takes a BOOLEAN, TEXT, or INSTANCE_SWAP property.`
+    );
+  }
+  const preferredValues = await readPreferredValues(req.params.preferredValues, tool);
+  if (preferredValues !== undefined && type !== "INSTANCE_SWAP") {
+    throw new Error(
+      `preferredValues names the components an INSTANCE_SWAP property offers first, but ${tool} was called with type ${type}. Drop preferredValues.`
+    );
+  }
+  const defaultValue = await readPropertyValue(req.params.defaultValue, type, "defaultValue", tool);
+
+  let propertyName: string;
+  try {
+    propertyName = owner.addComponentProperty(
+      name,
+      type,
+      defaultValue,
+      preferredValues ? { preferredValues } : undefined
+    );
+  } catch (err) {
+    throw describeWriteError(
+      `${tool} could not add the ${type} property "${name}" to ${labelOf(owner)}`,
+      err
+    );
+  }
+  return { componentId: owner.id, propertyName };
+};
+
+/**
+ * Changes the name, the default value, or the preferred values of a property.
+ * @param req - The extension request.
+ * @returns The owner and the property's name after the change.
+ */
+const editComponentProperty = async (req: ExtensionRequest): Promise<unknown> => {
+  const tool = "edit_component_property";
+  const componentId = readRequiredString(req.params, "componentId", tool);
+  const wantedName = readRequiredString(req.params, "propertyName", tool);
+  const owner = await readPropertyOwner(componentId, tool);
+  const ownerLabel = labelOf(owner);
+  const property = resolveProperty(propertyEntriesOf(owner, tool), wantedName, ownerLabel, tool);
+  const type = requireSupportedProperty(property, ownerLabel, tool);
+
+  const newName = readOptionalString(req.params, "newName", tool);
+  const rawDefault = req.params.newDefaultValue;
+  const hasDefault = rawDefault !== undefined && rawDefault !== null;
+  const preferredValues = await readPreferredValues(req.params.preferredValues, tool);
+
+  if (newName === undefined && !hasDefault && preferredValues === undefined) {
+    throw new Error(
+      `${tool} requires at least one of newName, newDefaultValue, and preferredValues. A field left out keeps the value it has.`
+    );
+  }
+  if (newName !== undefined) requireNameWithoutSuffix(newName, "newName", tool);
+  if (hasDefault && type === "VARIANT") {
+    throw new Error(
+      `${property.name} of ${ownerLabel} is a VARIANT property, and Figma takes no default value for one: the first variant of the set is the default. Rename the property with newName, or reorder the variants in Figma to change which one an instance starts on.`
+    );
+  }
+  if (preferredValues !== undefined && type !== "INSTANCE_SWAP") {
+    throw new Error(
+      `preferredValues names the components an INSTANCE_SWAP property offers first, but ${property.name} of ${ownerLabel} is a ${type} property. Drop preferredValues.`
+    );
+  }
+
+  const change: {
+    name?: string;
+    defaultValue?: string | boolean;
+    preferredValues?: InstanceSwapPreferredValue[];
+  } = {};
+  if (newName !== undefined) change.name = newName;
+  if (hasDefault) {
+    change.defaultValue = await readPropertyValue(rawDefault, type, "newDefaultValue", tool);
+  }
+  if (preferredValues !== undefined) change.preferredValues = preferredValues;
+
+  let propertyName: string;
+  try {
+    propertyName = owner.editComponentProperty(property.name, change);
+  } catch (err) {
+    throw describeWriteError(
+      `${tool} could not change the property "${property.name}" of ${ownerLabel}`,
+      err
+    );
+  }
+  return { componentId: owner.id, propertyName };
+};
+
+/**
+ * Removes one component property.
+ * @param req - The extension request.
+ * @returns The owner and the property that was removed.
+ */
+const deleteComponentProperty = async (req: ExtensionRequest): Promise<unknown> => {
+  const tool = "delete_component_property";
+  if (req.params.confirm !== true) {
+    throw new Error(
+      `${tool} requires confirm: true. It removes the property from the component and from every instance of it, and each layer the property drove keeps the value it last showed.`
+    );
+  }
+  const componentId = readRequiredString(req.params, "componentId", tool);
+  const wantedName = readRequiredString(req.params, "propertyName", tool);
+  const owner = await readPropertyOwner(componentId, tool);
+  const ownerLabel = labelOf(owner);
+  const property = resolveProperty(propertyEntriesOf(owner, tool), wantedName, ownerLabel, tool);
+  const type = requireSupportedProperty(property, ownerLabel, tool);
+  if (type === "VARIANT") {
+    throw new Error(
+      `${property.name} of ${ownerLabel} is a VARIANT property, and Figma deletes none: a variant property is an axis of the set, carried in the name of every variant. Rename the variants so they no longer name it, or rename the property with edit_component_property.`
+    );
+  }
+
+  try {
+    owner.deleteComponentProperty(property.name);
+  } catch (err) {
+    throw describeWriteError(
+      `${tool} could not remove the property "${property.name}" from ${ownerLabel}`,
+      err
+    );
+  }
+  return { componentId: owner.id, propertyName: property.name };
+};
+
+/**
+ * Finds the component whose properties a layer can read.
+ *
+ * A link lives on the main component, so an instance in the way is refused
+ * rather than followed: a link written on the copy would not reach the main.
+ * @param node - The layer.
+ * @param tool - The tool name, for the error messages.
+ * @returns The component or the component set that owns the properties.
+ */
+const findLayerOwner = (node: SceneNode, tool: string): ComponentNode | ComponentSetNode => {
+  let current: BaseNode | null = node.parent;
+  while (current) {
+    if (current.type === "INSTANCE") {
+      throw new Error(
+        `${labelOf(node)} sits inside the instance ${labelOf(current)}, and a property link lives on the main component rather than on a copy of it. Call get_instance on ${current.id} to find the main component, then link the matching layer inside it.`
+      );
+    }
+    if (current.type === "COMPONENT_SET") return current;
+    if (current.type === "COMPONENT") {
+      const parent = current.parent;
+      return parent && parent.type === "COMPONENT_SET" ? parent : current;
+    }
+    current = current.parent;
+  }
+  throw new Error(
+    `${labelOf(node)} sits inside no component, so it has no property to read. ${tool} takes a layer inside a component, or inside a variant of a component set; call create_component to make one.`
+  );
+};
+
+/**
+ * Reads the `field` parameter of `bind_component_property`.
+ * @param raw - The parameter value.
+ * @param tool - The tool name, for the error message.
+ * @returns The field.
+ */
+const readReferenceField = (raw: string, tool: string): ReferenceField => {
+  const fields = Object.keys(REFERENCE_FIELDS) as ReferenceField[];
+  const match = fields.find((field) => field === raw.trim());
+  if (match) return match;
+  throw new Error(
+    `${tool} requires field to be one of ${fields.join(", ")}, received "${raw}". ${describeReferenceFields()}.`
+  );
+};
+
+/**
+ * Stops a field the layer cannot carry.
+ * @param node - The layer.
+ * @param field - The field being linked.
+ */
+const requireFieldNode = (node: SceneNode, field: ReferenceField): void => {
+  if (field === "characters" && node.type !== "TEXT") {
+    throw new Error(
+      `${labelOf(node)} is a ${node.type} node, and characters is the text of a text layer. Link characters on a TEXT node, or link this one through visible to a BOOLEAN property.`
+    );
+  }
+  if (field === "mainComponent" && node.type !== "INSTANCE") {
+    throw new Error(
+      `${labelOf(node)} is a ${node.type} node, and mainComponent is the component an instance follows. Link mainComponent on an INSTANCE node; call create_instance to place one inside the component.`
+    );
+  }
+};
+
+/**
+ * Links a layer inside a component to one of the component's properties, or
+ * removes the link.
+ *
+ * Figma keeps all three links of a layer in one object, so the links the
+ * caller did not name are read back and written again alongside the new one.
+ * @param req - The extension request.
+ * @returns The layer and every link on it after the change.
+ */
+const bindComponentProperty = async (req: ExtensionRequest): Promise<unknown> => {
+  const tool = "bind_component_property";
+  const nodeId = readNodeId(req, tool, "the layer inside the component to link");
+  const field = readReferenceField(readRequiredString(req.params, "field", tool), tool);
+  const rawName = req.params.propertyName;
+  if (rawName === undefined) {
+    throw new Error(
+      `${tool} requires propertyName, the property to link ${field} to, or null to remove the link.`
+    );
+  }
+
+  const node = await getSceneNodeById(nodeId);
+  const owner = findLayerOwner(node, tool);
+  const ownerLabel = labelOf(owner);
+
+  const links: { characters?: string; visible?: string; mainComponent?: string } = {};
+  const current = node.componentPropertyReferences;
+  if (current) {
+    for (const key of Object.keys(REFERENCE_FIELDS) as ReferenceField[]) {
+      const value = current[key];
+      if (typeof value === "string") links[key] = value;
+    }
+  }
+
+  if (rawName === null) {
+    delete links[field];
+  } else {
+    if (typeof rawName !== "string" || rawName.trim() === "") {
+      throw new Error(
+        `${tool} requires propertyName as a non-empty string, or null to remove the link, received ${describeValue(rawName)}.`
+      );
+    }
+    const property = resolveProperty(propertyEntriesOf(owner, tool), rawName, ownerLabel, tool);
+    const type = requireSupportedProperty(property, ownerLabel, tool);
+    if (type !== REFERENCE_FIELDS[field]) {
+      throw new Error(
+        `${field} reads a ${REFERENCE_FIELDS[field]} property, but ${property.name} of ${ownerLabel} is a ${type} property. ${describeReferenceFields()}.`
+      );
+    }
+    requireFieldNode(node, field);
+    links[field] = property.name;
+  }
+
+  try {
+    node.componentPropertyReferences = Object.keys(links).length > 0 ? links : null;
+  } catch (err) {
+    throw describeWriteError(
+      `${tool} could not link ${field} of ${labelOf(node)} to a property of ${ownerLabel}`,
+      err
+    );
+  }
+  return { nodeId: node.id, componentPropertyReferences: node.componentPropertyReferences };
+};
+
+/**
+ * Lists the properties an instance takes.
+ *
+ * The definitions on the main component carry the values a VARIANT property
+ * accepts, which the instance's own map does not, so they are read first and
+ * the instance answers only when the main cannot be reached.
+ * @param instance - The instance.
+ * @param tool - The tool name, for the error message.
+ * @returns One entry per property.
+ */
+const instancePropertyEntriesOf = async (
+  instance: InstanceNode,
+  tool: string
+): Promise<PropertyEntry[]> => {
+  // `mainComponent` is write-only under `dynamic-page`.
+  const main = await instance.getMainComponentAsync();
+  if (main) {
+    const parent = main.parent;
+    return propertyEntriesOf(parent && parent.type === "COMPONENT_SET" ? parent : main, tool);
+  }
+  return Object.entries(instance.componentProperties).map(([name, property]) => ({
+    name,
+    type: property.type,
+  }));
+};
+
+/**
+ * Loads the fonts of the text layers a TEXT property drives.
+ *
+ * Figma refuses a text change whose font is not loaded. A layer deeper than
+ * this instance reports leaves the list empty, so every text layer of the
+ * instance is loaded as a fallback; a failure there stays quiet, because the
+ * layer the property drives is the one that has to succeed.
+ * @param instance - The instance.
+ * @param propertyNames - The TEXT properties being set.
+ * @param tool - The tool name, for the error messages.
+ * @returns One problem line per text layer whose font cannot be loaded.
+ */
+const loadPropertyFonts = async (
+  instance: InstanceNode,
+  propertyNames: readonly string[],
+  tool: string
+): Promise<string[]> => {
+  if (propertyNames.length === 0) return [];
+  const texts = instance.findAll((child) => child.type === "TEXT") as TextNode[];
+  const problems: string[] = [];
+  for (const name of propertyNames) {
+    const driven = texts.filter((text) => text.componentPropertyReferences?.characters === name);
+    for (const text of driven.length > 0 ? driven : texts) {
+      try {
+        await loadFontsForTextNode(text);
+      } catch (err) {
+        if (driven.length === 0) continue;
+        problems.push(
+          `properties["${name}"]: the font of the text layer ${labelOf(text)} cannot be loaded: ${messageOf(err)}. Give that layer a font this file can use, then call ${tool} again.`
+        );
+      }
+    }
+  }
+  return problems;
+};
+
+/**
+ * Sets the component property values of one instance.
+ *
+ * Every value is checked against the property it names before the first write,
+ * and Figma takes them all in one call, so a bad value leaves the instance as
+ * it was.
+ * @param req - The extension request.
+ * @returns The instance and its property values after the change.
+ */
+const setInstanceProperties = async (req: ExtensionRequest): Promise<unknown> => {
+  const tool = "set_instance_properties";
+  const nodeId = readNodeId(req, tool, "the instance to change");
+  const node = await getSceneNodeById(nodeId);
+  if (node.type !== "INSTANCE") {
+    throw new Error(
+      `${labelOf(node)} is a ${node.type} node, not an INSTANCE. ${tool} sets the property values of one placed instance; call add_component_property or edit_component_property to change the component itself.`
+    );
+  }
+
+  const raw = req.params.properties;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(
+      `${tool} requires properties as an object of property name to value, such as { "Label": "Buy" }, received ${describeValue(raw)}.`
+    );
+  }
+  const wanted = Object.entries(raw as Record<string, unknown>);
+  if (wanted.length === 0) {
+    throw new Error(
+      `${tool} requires properties to name at least one property. Call get_instance to list the properties this instance takes.`
+    );
+  }
+
+  const entries = await instancePropertyEntriesOf(node, tool);
+  const label = labelOf(node);
+  const problems: string[] = [];
+  const updates: Record<string, string | boolean> = {};
+  const textProperties: string[] = [];
+  const seen = new Set<string>();
+
+  for (const [rawName, rawValue] of wanted) {
+    const fail = (problem: string): void => {
+      problems.push(`properties["${rawName}"]: ${problem}`);
+    };
+
+    let property: PropertyEntry;
+    let type: SupportedPropertyType;
+    try {
+      property = resolveProperty(entries, rawName, label, tool);
+      type = requireSupportedProperty(property, label, tool);
+    } catch (err) {
+      fail(messageOf(err));
+      continue;
+    }
+    if (seen.has(property.name)) {
+      fail(`${property.name} is named twice in properties. Give each property one value.`);
+      continue;
+    }
+    seen.add(property.name);
+
+    if (type === "VARIANT") {
+      const options = property.variantOptions ?? [];
+      if (typeof rawValue !== "string") {
+        fail(
+          `${property.name} is a VARIANT property and takes a string, received ${describeValue(rawValue)}. Every variant value is text in Figma, so write 24 as "24".`
+        );
+        continue;
+      }
+      if (options.length > 0 && !options.includes(rawValue)) {
+        fail(
+          `${property.name} has no value "${rawValue}". It takes ${options.join(", ")}. Give one of those.`
+        );
+        continue;
+      }
+      updates[property.name] = rawValue;
+      continue;
+    }
+
+    try {
+      updates[property.name] = await readPropertyValue(
+        rawValue,
+        type,
+        `the value of ${property.name}`,
+        tool
+      );
+    } catch (err) {
+      fail(messageOf(err));
+      continue;
+    }
+    if (type === "TEXT") textProperties.push(property.name);
+  }
+
+  if (problems.length === 0) {
+    problems.push(...(await loadPropertyFonts(node, textProperties, tool)));
+  }
+  if (problems.length > 0) throw validationError(tool, problems);
+
+  try {
+    node.setProperties(updates);
+  } catch (err) {
+    throw describeWriteError(
+      `${tool} could not set ${Object.keys(updates).join(", ")} on ${label}`,
+      err
+    );
+  }
+
+  const properties: Record<string, unknown> = {};
+  for (const [name, property] of Object.entries(node.componentProperties)) {
+    properties[name] = { type: property.type, value: property.value };
+  }
+  return { id: node.id, properties };
+};
+
 export const componentsHandlers = {
   list_components: { edit: false, run: listComponents },
   get_component: { edit: false, run: getComponent },
@@ -1027,4 +1784,9 @@ export const componentsHandlers = {
   create_instance: { edit: true, run: createInstance },
   swap_instance: { edit: true, run: swapInstance },
   detach_instance: { edit: true, run: detachInstance },
+  add_component_property: { edit: true, run: addComponentProperty },
+  edit_component_property: { edit: true, run: editComponentProperty },
+  delete_component_property: { edit: true, run: deleteComponentProperty },
+  bind_component_property: { edit: true, run: bindComponentProperty },
+  set_instance_properties: { edit: true, run: setInstanceProperties },
 } satisfies Record<string, ExtensionHandler>;
