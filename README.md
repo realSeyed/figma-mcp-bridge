@@ -110,6 +110,11 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 | `update_variables`             | Change the name, value, scopes, or description of up to 200 variables                                             |
 | `delete_variables`             | Delete up to 200 variables and report what aliased each one, with explicit confirmation                           |
 | `bind_variables`               | Bind variables to node fields such as `fills`, `itemSpacing`, or `characters`, or remove a binding                |
+| `list_fonts`                   | List the fonts Figma can use, grouped by family                                                                   |
+| `create_text_style`            | Create a local text style, optionally with variables driving its fields                                           |
+| `update_text_style`            | Change the name, font, metrics, or bound variables of a text style                                                |
+| `delete_text_style`            | Delete a text style with explicit confirmation                                                                    |
+| `apply_text_style`             | Apply a text style to up to 200 text nodes, or to one range of characters                                         |
 
 All tools accept an optional `fileKey` parameter when multiple Figma files are connected. Use `list_files` to discover connected files and their keys.
 
@@ -130,6 +135,9 @@ All tools accept an optional `fileKey` parameter when multiple Figma files are c
 - `bind_variables` binds a COLOR variable into one `SOLID` paint of `fills` or `strokes` — pick it with `paintIndex` — BOOLEAN to `visible`, STRING to `characters`, `fontFamily`, and `fontStyle`, and FLOAT to every other field. Pass `variableId: null` to remove a binding and leave the field at its last value. Variable scopes are not consulted: they steer Figma's variable picker and do not restrict the Plugin API.
 - A FLOAT bound to `opacity` is read as a percentage, the unit Figma's own opacity field uses, not as the 0 to 1 the `opacity` node property takes. A variable holding `50` gives a half-transparent node; one holding `0.5` gives a node that is all but invisible.
 - The read tools report a node's bindings as `boundVariables`, mapping each bound field to the variable ID bound to it. The key is absent when the node binds nothing.
+- The font of a text style must be one Figma has. `create_text_style` and `update_text_style` check the family and the style against `list_fonts` and load the font before writing, so an unavailable font stops the call before it changes anything and comes back with the closest family names. A file that uses a font the account cannot load can still be renamed or redescribed, but not restyled.
+- `create_text_style` and `update_text_style` take `boundVariables`, a style field mapped to a variable ID: a STRING variable for `fontFamily` and `fontStyle`, a FLOAT variable for `fontSize`, `fontWeight`, `lineHeight`, `letterSpacing`, `paragraphSpacing`, and `paragraphIndent`. A binding wins over a literal value given for the same field in the same call, and `null` removes a binding and leaves the field at its last value.
+- `apply_text_style` replaces every text property of the nodes it lands on. Pass `range` to style a stretch of characters instead — one node per call — which leaves `get_node` reporting `textStyleId: "mixed"`. Pass `styleId: null` to remove the link and leave each node looking as it did. `delete_text_style` behaves the same way for the nodes that used the style.
 
 ### What You Can Build
 

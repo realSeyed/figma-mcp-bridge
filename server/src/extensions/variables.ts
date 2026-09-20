@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Node } from "../node.js";
-import { createFigmaNodeIdSchema, fileKeyField } from "../schema-common.js";
+import { createFigmaNodeIdSchema, createVariableIdSchema, fileKeyField } from "../schema-common.js";
 import { parseToolInput, renderResponse } from "../tool-helpers.js";
 import type { ToolResult } from "../tool-helpers.js";
 import type { ExtensionRpcMap, ExtensionSchemaMap } from "./types.js";
@@ -107,18 +107,6 @@ const createVariableItem = z.object({
     ),
   description: z.string().optional().describe("Optional description, shown in Figma"),
 });
-
-/**
- * Creates a Zod schema that validates a variable ID.
- * @returns A Zod string schema for variable IDs.
- */
-const createVariableIdSchema = () =>
-  z
-    .string()
-    .regex(
-      /^VariableID:.+$/,
-      "Variable ID must start with 'VariableID:' — use an ID from get_variable_defs"
-    );
 
 const variableIdField = createVariableIdSchema().describe(
   "The variable to change, as reported by get_variable_defs"

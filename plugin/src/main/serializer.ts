@@ -99,6 +99,7 @@ type SerializedNode = {
   type: string;
   bounds?: SerializedBounds;
   characters?: string;
+  textStyleId?: string;
   styles?: SerializedStyles;
   boundVariables?: SerializedBoundVariables;
   children?: SerializedNode[];
@@ -229,9 +230,13 @@ const serializeText = (node: TextNode, base: SerializedNode) => {
     fontFamily = node.fontName.family;
     fontStyle = node.fontName.style;
   }
+  // Figma reports the mixed symbol when the ranges of the node carry different
+  // text styles, and "" when the node is linked to no text style at all.
+  const textStyleId = isMixed(node.textStyleId) ? "mixed" : node.textStyleId;
   return {
     ...base,
     characters: node.characters,
+    ...(textStyleId === "" ? {} : { textStyleId }),
     styles: {
       ...base.styles,
       fontSize: isMixed(node.fontSize) ? "mixed" : node.fontSize,
@@ -367,15 +372,16 @@ const toAliasId = (value: unknown): string | undefined => {
 };
 
 /**
- * Maps every field a node binds to the ID of the variable bound to it.
- * @param node - The node to read.
- * @returns The bindings, or undefined when the node binds nothing.
+ * Maps every field of a `boundVariables` record to the ID of the variable bound
+ * to it. Exported for `get_styles`, where a style carries the same record.
+ * @param raw - The `boundVariables` record of a node or a style.
+ * @returns The bindings, or undefined when nothing is bound.
  */
-const serializeBoundVariables = (node: SerializableNode): SerializedBoundVariables | undefined => {
-  if (!("boundVariables" in node) || !node.boundVariables) return undefined;
-
+export const serializeBoundVariableMap = (
+  raw: Record<string, unknown>
+): SerializedBoundVariables | undefined => {
   const bound: SerializedBoundVariables = {};
-  for (const [field, value] of Object.entries(node.boundVariables as Record<string, unknown>)) {
+  for (const [field, value] of Object.entries(raw)) {
     if (Array.isArray(value)) {
       const ids = value.map(toAliasId).filter((id): id is string => id !== undefined);
       if (ids.length > 0) bound[field] = ids;
@@ -398,6 +404,16 @@ const serializeBoundVariables = (node: SerializableNode): SerializedBoundVariabl
   }
   return Object.keys(bound).length > 0 ? bound : undefined;
 };
+
+/**
+ * Maps every field a node binds to the ID of the variable bound to it.
+ * @param node - The node to read.
+ * @returns The bindings, or undefined when the node binds nothing.
+ */
+const serializeBoundVariables = (node: SerializableNode): SerializedBoundVariables | undefined =>
+  "boundVariables" in node && node.boundVariables
+    ? serializeBoundVariableMap(node.boundVariables as Record<string, unknown>)
+    : undefined;
 
 /**
  * `serializeNode` is also called with the current page (get_document,
