@@ -223,6 +223,18 @@ bun run format        # format the whole repo
 bun run format:check  # verify formatting without writing (useful in CI)
 ```
 
+### End-to-end test
+
+`server/scripts/e2e-free-plan.ts` drives every variable, text style, and component tool against a real Figma file on a free (Starter) plan, asserting on the parsed results rather than on the absence of an error. It starts its own `node dist/index.js`, which joins the running bridge as a follower, so it covers the follower-to-leader `/rpc` path as well as the tools.
+
+Before running it, build the server, open the plugin in the file you want to test against, and make `MCP E2E` the active page in Figma — the script creates that page on the first run, and `list_components` reads whichever page is open.
+
+```bash
+cd server && bun run e2e
+```
+
+It picks the file up from `list_files` when exactly one is connected; set `FIGMA_FILE_KEY` to choose between several. Everything it makes is named `mcp-e2e/…` and is removed again in a `finally` block, after a failure as well. Screenshots of the test frame land in `server/scripts/e2e-output/` (git-ignored), and a failed step exits with code 1.
+
 ## Structure
 
 ```
