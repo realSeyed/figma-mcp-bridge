@@ -1112,6 +1112,20 @@ type BindableNode = {
 };
 
 /**
+ * The fields Figma spreads over several others, with the fields it writes.
+ *
+ * Binding a variable to `cornerRadius` leaves `cornerRadius` itself unbound and
+ * writes the four corners instead, and `setBoundVariable("cornerRadius", null)`
+ * is then a silent no-op. `strokeWeight` behaves the same way over the four
+ * sides. An unbind therefore has to clear what the bind actually wrote, or the
+ * call would report a write it did not make.
+ */
+const SPREAD_FIELDS: Partial<Record<BindableField, readonly VariableBindableNodeField[]>> = {
+  cornerRadius: ["topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius"],
+  strokeWeight: ["strokeTopWeight", "strokeRightWeight", "strokeBottomWeight", "strokeLeftWeight"],
+};
+
+/**
  * Reads the paint list of a node.
  * @param node - The node.
  * @param property - Which paint list to read.
@@ -1358,10 +1372,19 @@ const bindVariables = async (req: ExtensionRequest): Promise<unknown> => {
       );
       writePaints(plan.node, plan.paint.property, paints);
     } else {
-      (plan.node as unknown as BindableNode).setBoundVariable(
+      const bindable = plan.node as unknown as BindableNode;
+      bindable.setBoundVariable(
         plan.field as VariableBindableNodeField | VariableBindableTextField,
         plan.variable
       );
+      // A spread field ignores the null it was just given, so the fields the
+      // matching bind wrote are cleared by hand. Only the ones this node
+      // carries: a star has a cornerRadius but no individual corners.
+      if (plan.variable === null) {
+        for (const spread of SPREAD_FIELDS[plan.field] ?? []) {
+          if (spread in plan.node) bindable.setBoundVariable(spread, null);
+        }
+      }
     }
     return { nodeId: plan.node.id, field: plan.field };
   });
