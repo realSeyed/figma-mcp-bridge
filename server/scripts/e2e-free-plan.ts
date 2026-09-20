@@ -982,6 +982,40 @@ const runComponentSteps = async (): Promise<void> => {
       `defaultVariantId is ${show(component.defaultVariantId)}, expected a node ID`
     );
   });
+
+  await step("C10 bind_component_property(null) removes the last link", async () => {
+    // Figma's setter refuses null for componentPropertyReferences, so the
+    // handler writes {} instead. Removing a layer's only link is the case that
+    // path exists for.
+    const removed = await okRecord("bind_component_property", {
+      nodeId: need("largeLabelId"),
+      field: "characters",
+      propertyName: null,
+    });
+    const afterRemove = readRecord(
+      removed.componentPropertyReferences,
+      "componentPropertyReferences after the removal"
+    );
+    check(
+      afterRemove.characters === undefined,
+      `characters is still linked to ${show(afterRemove.characters)} after passing propertyName: null`
+    );
+
+    // Put it back: the instance steps read the label through this property.
+    const restored = await okRecord("bind_component_property", {
+      nodeId: need("largeLabelId"),
+      field: "characters",
+      propertyName: propertyName("Label"),
+    });
+    const afterRestore = readRecord(
+      restored.componentPropertyReferences,
+      "componentPropertyReferences after the restore"
+    );
+    check(
+      afterRestore.characters === propertyName("Label"),
+      `characters is linked to ${show(afterRestore.characters)}, expected ${propertyName("Label")}`
+    );
+  });
 };
 
 // ---------------------------------------------------------------------------
