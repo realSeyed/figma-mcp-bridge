@@ -627,7 +627,15 @@ const createInstance = async (req: ExtensionRequest): Promise<unknown> => {
  */
 const swapInstance = async (req: ExtensionRequest): Promise<unknown> => {
   const tool = "swap_instance";
-  const nodeId = readRequiredString(req.params, "nodeId", tool);
+  // The instance ID travels in the request's own `nodeIds` field, as it does
+  // for the core tools that take one node: the leader drops a `nodeId` param
+  // on the follower RPC path, so one passed there never reaches this handler.
+  const nodeId = req.nodeIds && req.nodeIds[0];
+  if (typeof nodeId !== "string" || nodeId.trim() === "") {
+    throw new Error(
+      `${tool} requires nodeId, the instance to point at another component. Call get_document or get_selection to list the node IDs of this page.`
+    );
+  }
   const componentId = readRequiredString(req.params, "componentId", tool);
 
   const node = await getSceneNodeById(nodeId);

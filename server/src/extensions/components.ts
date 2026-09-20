@@ -134,7 +134,7 @@ export const rpcToArgs = {
   create_component: (_nodeIds, params) => ({ ...params }),
   combine_as_variants: (_nodeIds, params) => ({ ...params }),
   create_instance: (_nodeIds, params) => ({ ...params }),
-  swap_instance: (_nodeIds, params) => ({ ...params }),
+  swap_instance: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
   detach_instance: (nodeIds, params) => ({ nodeIds, ...params }),
 } satisfies ExtensionRpcMap;
 
@@ -193,8 +193,8 @@ export function register(server: McpServer, node: Node): void {
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(schemas.swap_instance, args);
       if (!parsed.success) return parsed.error;
-      const { fileKey, ...params } = parsed.data;
-      return renderResponse(() => node.sendWithParams("swap_instance", undefined, params, fileKey));
+      const { fileKey, nodeId, ...params } = parsed.data;
+      return renderResponse(() => node.sendWithParams("swap_instance", [nodeId], params, fileKey));
     }
   );
 
