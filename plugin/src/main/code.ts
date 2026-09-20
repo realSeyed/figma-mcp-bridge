@@ -1,4 +1,4 @@
-import { serializeNode } from "./serializer";
+import { serializeBoundVariableMap, serializeNode } from "./serializer";
 import type { SerializableNode } from "./serializer";
 import { addLayersToFrame } from "../html-figma/figma";
 import { getExtensionHandler } from "./extensions";
@@ -316,11 +316,17 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
             text: textStyles.map((style) => ({
               id: style.id,
               name: style.name,
+              description: style.description,
               fontSize: style.fontSize,
               fontName: style.fontName,
               textDecoration: style.textDecoration,
               lineHeight: style.lineHeight,
               letterSpacing: style.letterSpacing,
+              paragraphSpacing: style.paragraphSpacing,
+              paragraphIndent: style.paragraphIndent,
+              textCase: style.textCase,
+              leadingTrim: style.leadingTrim,
+              boundVariables: serializeBoundVariableMap(style.boundVariables ?? {}),
             })),
             effects: effectStyles.map((style) => ({
               id: style.id,
