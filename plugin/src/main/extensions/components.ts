@@ -29,6 +29,10 @@ const MAX_VARIANTS = 50;
 const DEFAULT_VARIANT_GAP = 24;
 const DEFAULT_VARIANT_PADDING = 24;
 
+/** How many items list_components returns by default, and at most. */
+const DEFAULT_LIST_LIMIT = 100;
+const MAX_LIST_LIMIT = 500;
+
 const VARIANT_NAME_FORM =
   'use "Property=Value", or several pairs separated by commas, as in "Size=Small, State=Hover"';
 
@@ -119,6 +123,14 @@ const parseVariantName = (name: string): VariantNameResult => {
 };
 
 /**
+ * Reads the variants of a component set.
+ * @param set - The component set.
+ * @returns Its component children, in the order the set holds them.
+ */
+const variantsOf = (set: ComponentSetNode): ComponentNode[] =>
+  set.children.filter((child): child is ComponentNode => child.type === "COMPONENT");
+
+/**
  * Reads the values one variant carries.
  *
  * `variantProperties` is what Figma itself reports; the name is the fallback,
@@ -133,10 +145,13 @@ const variantValuesOf = (variant: ComponentNode): Map<string, string> => {
   return parsed.ok ? parsed.properties : new Map();
 };
 
+/** Orders two names, so a listing and a message read the same way every time. */
+const compareNames = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
 /** Writes a property map as `Size=Small, State=Hover`, in a stable order. */
 const describeValues = (values: Map<string, string>): string =>
   [...values.entries()]
-    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .sort(([left], [right]) => compareNames(left, right))
     .map(([property, value]) => `${property}=${value}`)
     .join(", ");
 
@@ -205,9 +220,7 @@ export const resolveVariant = async (
     return node;
   }
 
-  const variants = node.children.filter(
-    (child): child is ComponentNode => child.type === "COMPONENT"
-  );
+  const variants = variantsOf(node);
   if (variants.length === 0) {
     throw new Error(
       `${componentId} "${node.name}" is a COMPONENT_SET that holds no variants, so there is nothing to instantiate. Call combine_as_variants to build a set from components.`
@@ -285,6 +298,100 @@ const findInstanceAncestor = (node: SceneNode): InstanceNode | null => {
     current = current.parent;
   }
   return null;
+};
+
+/**
+ * Names the page a node sits on.
+ * @param node - The node to check.
+ * @returns The page, or null when the node hangs outside the page tree.
+ */
+const pageOf = (node: BaseNode): PageNode | null => {
+  let current: BaseNode | null = node;
+  while (current) {
+    if (current.type === "PAGE") return current;
+    current = current.parent;
+  }
+  return null;
+};
+
+/**
+ * Strips the unique suffix Figma appends to a component property name.
+ *
+ * A boolean, text, or instance-swap property is reported as `Label#12:0`. The
+ * suffix keeps two properties of one name apart and is what the API takes, so
+ * both forms are returned: the full name to pass back, the short one to read.
+ * A variant property carries no suffix and passes through unchanged.
+ * @param name - The full property name.
+ * @returns The name without the suffix.
+ */
+const displayNameOf = (name: string): string => {
+  const hash = name.lastIndexOf("#");
+  return hash > 0 ? name.slice(0, hash) : name;
+};
+
+/**
+ * Reads the variant properties of a set as property name to its values.
+ *
+ * `componentPropertyDefinitions` is what Figma reports, but it throws on a set
+ * whose variants conflict. The variants themselves still answer the question,
+ * so one broken set does not cost the caller the whole listing.
+ * @param set - The component set.
+ * @returns Each variant property and the values it takes.
+ */
+const variantOptionsOf = (set: ComponentSetNode): Record<string, string[]> => {
+  const options: Record<string, string[]> = {};
+  try {
+    for (const [property, definition] of Object.entries(set.componentPropertyDefinitions)) {
+      if (definition.type === "VARIANT") options[property] = definition.variantOptions ?? [];
+    }
+    return options;
+  } catch {
+    for (const variant of variantsOf(set)) {
+      for (const [property, value] of variantValuesOf(variant)) {
+        const values = options[property] ?? [];
+        if (!values.includes(value)) values.push(value);
+        options[property] = values;
+      }
+    }
+    return options;
+  }
+};
+
+/**
+ * Reads the node ID of a tool that takes one node.
+ *
+ * The ID travels in the request's own `nodeIds` field, as it does for the core
+ * tools that take one node: the leader drops a `nodeId` param on the follower
+ * RPC path, so one passed there never reaches this handler.
+ * @param req - The extension request.
+ * @param tool - The tool name, for the error message.
+ * @param what - What the node is, for the error message.
+ * @returns The node ID.
+ */
+const readNodeId = (req: ExtensionRequest, tool: string, what: string): string => {
+  const nodeId = req.nodeIds && req.nodeIds[0];
+  if (typeof nodeId !== "string" || nodeId.trim() === "") {
+    throw new Error(
+      `${tool} requires nodeId, ${what}. Call get_document or get_selection to list the node IDs of this page.`
+    );
+  }
+  return nodeId;
+};
+
+/**
+ * Looks a node up for a read tool.
+ * @param nodeId - The node ID.
+ * @param tool - The tool name, for the error message.
+ * @returns The node.
+ */
+const readNodeById = async (nodeId: string, tool: string): Promise<BaseNode> => {
+  const node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) {
+    throw new Error(
+      `${tool} found no node with the ID ${nodeId}. Call list_components or get_document to list the node IDs of this file.`
+    );
+  }
+  return node;
 };
 
 /**
@@ -627,15 +734,7 @@ const createInstance = async (req: ExtensionRequest): Promise<unknown> => {
  */
 const swapInstance = async (req: ExtensionRequest): Promise<unknown> => {
   const tool = "swap_instance";
-  // The instance ID travels in the request's own `nodeIds` field, as it does
-  // for the core tools that take one node: the leader drops a `nodeId` param
-  // on the follower RPC path, so one passed there never reaches this handler.
-  const nodeId = req.nodeIds && req.nodeIds[0];
-  if (typeof nodeId !== "string" || nodeId.trim() === "") {
-    throw new Error(
-      `${tool} requires nodeId, the instance to point at another component. Call get_document or get_selection to list the node IDs of this page.`
-    );
-  }
+  const nodeId = readNodeId(req, tool, "the instance to point at another component");
   const componentId = readRequiredString(req.params, "componentId", tool);
 
   const node = await getSceneNodeById(nodeId);
@@ -731,7 +830,198 @@ const detachInstance = async (req: ExtensionRequest): Promise<unknown> => {
   });
 };
 
+/**
+ * Lists the components and the component sets of a page or of the whole file.
+ *
+ * A variant is not listed on its own: it belongs to its set, which carries it
+ * under `variantProperties`, and a file of 4-variant sets would otherwise read
+ * as five times as many entries as it has components.
+ * @param req - The extension request.
+ * @returns The items and whether the limit cut the list short.
+ */
+const listComponents = async (req: ExtensionRequest): Promise<unknown> => {
+  const tool = "list_components";
+  const rawScope = readOptionalString(req.params, "scope", tool);
+  if (rawScope !== undefined && rawScope !== "currentPage" && rawScope !== "allPages") {
+    throw new Error(
+      `${tool} requires scope to be currentPage or allPages, received "${rawScope}". currentPage reads the page open in Figma, allPages the whole file.`
+    );
+  }
+  const query = readOptionalString(req.params, "query", tool);
+
+  let limit = DEFAULT_LIST_LIMIT;
+  const rawLimit = req.params.limit;
+  if (rawLimit !== undefined && rawLimit !== null) {
+    if (typeof rawLimit !== "number" || !Number.isInteger(rawLimit) || rawLimit < 1) {
+      throw new Error(
+        `${tool} requires limit as a whole number of 1 or more, received ${describeValue(rawLimit)}.`
+      );
+    }
+    limit = Math.min(rawLimit, MAX_LIST_LIMIT);
+  }
+
+  let found: readonly (PageNode | SceneNode)[];
+  if (rawScope === "allPages") {
+    // Under `dynamic-page` a page's contents stay unloaded until they are
+    // asked for, and searching the document is refused until every page is.
+    await figma.loadAllPagesAsync();
+    found = figma.root.findAllWithCriteria({ types: ["COMPONENT", "COMPONENT_SET"] });
+  } else {
+    found = figma.currentPage.findAllWithCriteria({ types: ["COMPONENT", "COMPONENT_SET"] });
+  }
+
+  const needle = query === undefined ? "" : query.trim().toLowerCase();
+  const matched = found
+    .filter(
+      (node): node is ComponentNode | ComponentSetNode =>
+        node.type === "COMPONENT" || node.type === "COMPONENT_SET"
+    )
+    .filter((node) => !(node.type === "COMPONENT" && node.parent?.type === "COMPONENT_SET"))
+    .filter((node) => needle === "" || node.name.toLowerCase().includes(needle))
+    // A stable order, so the same call twice keeps the same items either side
+    // of the limit. The ID breaks a tie between two components of one name.
+    .sort((a, b) => compareNames(a.name, b.name) || compareNames(a.id, b.id));
+
+  const items = matched.slice(0, limit).map((node) => {
+    const page = pageOf(node);
+    const item = {
+      type: node.type,
+      id: node.id,
+      name: node.name,
+      pageId: page ? page.id : null,
+      pageName: page ? page.name : null,
+      description: node.description,
+    };
+    if (node.type === "COMPONENT") return item;
+    return {
+      ...item,
+      variantCount: variantsOf(node).length,
+      variantProperties: variantOptionsOf(node),
+    };
+  });
+
+  return { items, truncated: matched.length > limit };
+};
+
+/**
+ * Describes the component properties an instance of a component takes.
+ * @param owner - The component or the component set the properties live on.
+ * @returns One entry per property, in the order Figma reports them.
+ */
+const describeProperties = (owner: ComponentNode | ComponentSetNode): unknown[] =>
+  Object.entries(owner.componentPropertyDefinitions).map(([name, definition]) => ({
+    name,
+    displayName: displayNameOf(name),
+    type: definition.type,
+    defaultValue: definition.defaultValue,
+    variantOptions: definition.variantOptions,
+    preferredValues: definition.preferredValues
+      ? definition.preferredValues.map((preferred) => ({
+          type: preferred.type,
+          key: preferred.key,
+        }))
+      : undefined,
+  }));
+
+/**
+ * Reads one component or component set: its properties and its variants.
+ *
+ * `componentPropertyDefinitions` throws on a variant, so a variant is read
+ * through the set it belongs to. That is also the honest answer: a variant
+ * does not own its properties, the set does.
+ * @param req - The extension request.
+ * @returns The component, its properties, and its variants when it is a set.
+ */
+const getComponent = async (req: ExtensionRequest): Promise<unknown> => {
+  const tool = "get_component";
+  const nodeId = readNodeId(req, tool, "the component or component set to read");
+  const node = await readNodeById(nodeId, tool);
+  if (node.type !== "COMPONENT" && node.type !== "COMPONENT_SET") {
+    throw new Error(
+      `${nodeId} "${node.name}" is a ${node.type} node, not a COMPONENT or a COMPONENT_SET. ${tool} reads a component or a component set; call get_instance for an instance, or get_node for any other node.`
+    );
+  }
+
+  const parent = node.parent;
+  const set =
+    node.type === "COMPONENT" && parent && parent.type === "COMPONENT_SET" ? parent : null;
+  const page = pageOf(node);
+
+  const result: Record<string, unknown> = {
+    id: node.id,
+    type: node.type,
+    name: node.name,
+    description: node.description,
+    pageId: page ? page.id : null,
+    properties: describeProperties(set ?? node),
+  };
+
+  if (set) result.parentSetId = set.id;
+
+  if (node.type === "COMPONENT_SET") {
+    const variants = variantsOf(node);
+    result.defaultVariantId = variants.length > 0 ? node.defaultVariant.id : null;
+    result.variants = variants.map((variant) => ({
+      id: variant.id,
+      name: variant.name,
+      variantProperties: Object.fromEntries(variantValuesOf(variant)),
+    }));
+  }
+
+  return result;
+};
+
+/**
+ * Reads one instance: the component it follows, its property values, and what
+ * has been overridden on it.
+ * @param req - The extension request.
+ * @returns The instance.
+ */
+const getInstance = async (req: ExtensionRequest): Promise<unknown> => {
+  const tool = "get_instance";
+  const nodeId = readNodeId(req, tool, "the instance to read");
+  const node = await readNodeById(nodeId, tool);
+  if (node.type !== "INSTANCE") {
+    throw new Error(
+      `${nodeId} "${node.name}" is a ${node.type} node, not an INSTANCE. ${tool} reads an instance; call get_component for a component or a component set, or get_node for any other node.`
+    );
+  }
+
+  // `mainComponent` is write-only under `dynamic-page`.
+  const main = await node.getMainComponentAsync();
+  const mainParent = main ? main.parent : null;
+  const set = mainParent && mainParent.type === "COMPONENT_SET" ? mainParent : null;
+
+  const properties: Record<string, unknown> = {};
+  for (const [name, property] of Object.entries(node.componentProperties)) {
+    properties[name] = { type: property.type, value: property.value };
+  }
+
+  return {
+    id: node.id,
+    name: node.name,
+    mainComponent: main
+      ? {
+          id: main.id,
+          name: main.name,
+          parentSetId: set ? set.id : null,
+          parentSetName: set ? set.name : null,
+          remote: main.remote,
+        }
+      : null,
+    properties,
+    exposedInstanceIds: node.exposedInstances.map((exposed) => exposed.id),
+    overrides: node.overrides.map((override) => ({
+      id: override.id,
+      overriddenFields: override.overriddenFields,
+    })),
+  };
+};
+
 export const componentsHandlers = {
+  list_components: { edit: false, run: listComponents },
+  get_component: { edit: false, run: getComponent },
+  get_instance: { edit: false, run: getInstance },
   create_component: { edit: true, run: createComponent },
   combine_as_variants: { edit: true, run: combineAsVariants },
   create_instance: { edit: true, run: createInstance },

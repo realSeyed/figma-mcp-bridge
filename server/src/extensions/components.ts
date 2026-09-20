@@ -72,6 +72,37 @@ const createComponentInput = createComponentShape
 
 /** Tool name to Zod object schema. Spread into `toolInputSchemas`. */
 export const schemas = {
+  list_components: z.object({
+    scope: z
+      .enum(["currentPage", "allPages"])
+      .optional()
+      .describe(
+        "Which components to list: currentPage reads the page open in Figma, allPages the whole file. currentPage."
+      ),
+    query: z
+      .string()
+      .optional()
+      .describe("Keeps the components whose name contains this text, ignoring case"),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(500)
+      .optional()
+      .describe("How many items to return, defaulting to 100"),
+    fileKey: fileKeyField,
+  }),
+
+  get_component: z.object({
+    nodeId: createFigmaNodeIdSchema().describe("The component or component set to read"),
+    fileKey: fileKeyField,
+  }),
+
+  get_instance: z.object({
+    nodeId: createFigmaNodeIdSchema().describe("The instance to read"),
+    fileKey: fileKeyField,
+  }),
+
   create_component: createComponentInput,
 
   combine_as_variants: z.object({
@@ -131,6 +162,9 @@ export const schemas = {
 
 /** Tool name to RPC wire mapper. Spread into `rpcToArgs`. */
 export const rpcToArgs = {
+  list_components: (_nodeIds, params) => ({ ...params }),
+  get_component: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
+  get_instance: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
   create_component: (_nodeIds, params) => ({ ...params }),
   combine_as_variants: (_nodeIds, params) => ({ ...params }),
   create_instance: (_nodeIds, params) => ({ ...params }),
@@ -144,6 +178,44 @@ export const rpcToArgs = {
  * @param node - The node coordinator for leader/follower routing.
  */
 export function register(server: McpServer, node: Node): void {
+  server.tool(
+    "list_components",
+    'List the local components and component sets of the current page, or of the whole file with scope: "allPages". Each item carries its ID, name, page, and description; a component set also carries how many variants it holds and every variant property with the values it takes, so one call is enough to know what create_instance can ask for. A variant is not listed on its own — it belongs to the set that reports it. Filter by name with query, and cap the list with limit; truncated says whether more matched than were returned. Reads local components only: a team library needs a paid plan and is not exposed. When multiple files are connected, specify fileKey.',
+    schemas.list_components.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(schemas.list_components, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, ...params } = parsed.data;
+      return renderResponse(() =>
+        node.sendWithParams("list_components", undefined, params, fileKey)
+      );
+    }
+  );
+
+  server.tool(
+    "get_component",
+    "Read one component or component set: its description, the page it sits on, and the component properties an instance of it takes — each with its full name, the short name Figma shows, its type, its default, and the values a VARIANT property accepts. A component set also reports its variants and which one is the default; a variant reports the set it belongs to and that set's properties, because a variant does not own properties of its own. Call list_components first to find the ID. When multiple files are connected, specify fileKey.",
+    schemas.get_component.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(schemas.get_component, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, nodeId } = parsed.data;
+      return renderResponse(() => node.sendWithParams("get_component", [nodeId], {}, fileKey));
+    }
+  );
+
+  server.tool(
+    "get_instance",
+    "Read one instance: the main component it follows, with the component set that component belongs to and whether it comes from a library; the value of every component property, keyed by the full property name; the instances it exposes; and the overrides made on it, as the node overridden and the fields changed on it. Use it to see how one placed component differs from its main. When multiple files are connected, specify fileKey.",
+    schemas.get_instance.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(schemas.get_instance, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, nodeId } = parsed.data;
+      return renderResponse(() => node.sendWithParams("get_instance", [nodeId], {}, fileKey));
+    }
+  );
+
   server.tool(
     "create_component",
     'Create a local component, either by converting an existing node with fromNodeId or by making an empty one from width and height. Converting keeps the node\'s children, size, position, and paint, so width, height, and fillHex belong to the empty form only. A node that is already a component, a component set, or an instance is refused, as is a node inside one — Figma cannot make a component out of those. Name the component "Property=Value" to prepare it for combine_as_variants. Local components work on a free (Starter) plan; publishing them to a team library does not and is not exposed. When multiple files are connected, specify fileKey.',
