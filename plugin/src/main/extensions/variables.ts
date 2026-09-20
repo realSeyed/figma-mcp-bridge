@@ -1,4 +1,14 @@
 import { getSceneNodeById, loadFontsForTextNode, parseHexColor } from "../shared";
+import {
+  describeValue,
+  describeWriteError,
+  describeWriteFailure,
+  messageOf,
+  readBatchArray,
+  readRequiredString,
+  runBatchWrites,
+  validationError,
+} from "./batch";
 import type { ExtensionHandler, ExtensionRequest } from "./types";
 
 /**
@@ -7,44 +17,6 @@ import type { ExtensionHandler, ExtensionRequest } from "./types";
  * Add a tool by adding one entry here. Set `edit` to true when the handler
  * writes to the file.
  */
-
-/**
- * Reads a required non-empty string parameter.
- * @param params - The request params.
- * @param key - The parameter name.
- * @param tool - The tool name, for the error message.
- * @returns The parameter value.
- */
-const readRequiredString = (params: Record<string, unknown>, key: string, tool: string): string => {
-  const value = params[key];
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(`${tool} requires ${key} as a non-empty string.`);
-  }
-  return value;
-};
-
-/**
- * Rewrites a failure from a Figma write so the message carries a correction,
- * and names the plan limit when Figma rejected the call because of one.
- * @param err - The error Figma threw.
- * @returns The sentence to report.
- */
-const describeWriteFailure = (err: unknown): string => {
-  const message = err instanceof Error ? err.message : String(err);
-  if (/\b(limit|plan|upgrade|professional|organization|enterprise|subscri\w*)\b/i.test(message)) {
-    return `${message}. This is a Figma plan limit. A free (Starter) account keeps one mode per collection and cannot publish a library or use extended collections; a paid plan lifts the limit.`;
-  }
-  return `${message}.`;
-};
-
-/**
- * Wraps a failed Figma write in an error that names what the handler was doing.
- * @param action - What the handler was doing, phrased for a message.
- * @param err - The error Figma threw.
- * @returns The error to throw on.
- */
-const describeWriteError = (action: string, err: unknown): Error =>
-  new Error(`${action}: ${describeWriteFailure(err)}`);
 
 /**
  * Looks a variable collection up by ID.
@@ -207,35 +179,6 @@ export type VariableBatchEntry = { name: string; type: SupportedVariableType };
 export type AliasLookup =
   | { source: "batch"; index: number; type: SupportedVariableType }
   | { source: "document"; variable: Variable };
-
-/**
- * Names the type of a value for an error message.
- * @param raw - The value.
- * @returns A phrase such as "a string".
- */
-const describeValue = (raw: unknown): string => {
-  if (raw === null) return "null";
-  if (Array.isArray(raw)) return "an array";
-  return `a ${typeof raw}`;
-};
-
-/**
- * Reads the message of a thrown value.
- * @param err - The thrown value.
- * @returns The message.
- */
-const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
-
-/**
- * Builds the single error a failed validation pass returns.
- * @param tool - The tool name.
- * @param problems - One line per bad item.
- * @returns The error to throw.
- */
-const validationError = (tool: string, problems: readonly string[]): Error =>
-  new Error(
-    `${tool} wrote nothing. Correct these items and call it again:\n${problems.join("\n")}`
-  );
 
 /**
  * Tests whether a type name is one this area writes.
@@ -418,29 +361,6 @@ export const findAliasByName = (
   throw new Error(
     `aliasName "${aliasName}" was not found in this batch, in the target collection, or in another local collection. Check the spelling, or use aliasId.`
   );
-};
-
-/** The most items one batch call accepts. */
-const MAX_BATCH_ITEMS = 200;
-
-/**
- * Reads the array parameter of a batch tool and checks its size.
- * @param params - The request params.
- * @param key - The parameter name.
- * @param tool - The tool name, for the error message.
- * @returns The raw items, still unexamined.
- */
-const readBatchArray = (params: Record<string, unknown>, key: string, tool: string): unknown[] => {
-  const raw = params[key];
-  if (!Array.isArray(raw) || raw.length === 0) {
-    throw new Error(`${tool} requires ${key} as an array of 1 to ${MAX_BATCH_ITEMS} items.`);
-  }
-  if (raw.length > MAX_BATCH_ITEMS) {
-    throw new Error(
-      `${tool} accepts at most ${MAX_BATCH_ITEMS} items per call, received ${raw.length}. Split the batch.`
-    );
-  }
-  return raw;
 };
 
 /** What the write phase does with the value of one item. */
@@ -688,39 +608,6 @@ const createVariables = async (req: ExtensionRequest): Promise<unknown> => {
       name: variable.name,
     })),
   };
-};
-
-/** One entry of the `results` array a batch tool returns. */
-type BatchResult = Record<string, unknown> & { index: number; ok: boolean };
-
-/**
- * Runs the write phase of a batch.
- *
- * Validation has already passed here, so a failure is Figma refusing a write.
- * The call stops at that item: the items before it keep their result, the
- * failed item carries the cause, and every item after it reports that nothing
- * was written for it.
- * @param plans - The validated items, one per input item and in input order.
- * @param write - Writes one item and returns the fields of its result.
- * @returns One result entry per item.
- */
-const runBatchWrites = async <TPlan>(
-  plans: readonly TPlan[],
-  write: (plan: TPlan) => Promise<Record<string, unknown>>
-): Promise<{ results: BatchResult[] }> => {
-  const results: BatchResult[] = [];
-  for (let index = 0; index < plans.length; index++) {
-    try {
-      results.push({ index, ok: true, ...(await write(plans[index])) });
-    } catch (err) {
-      results.push({ index, ok: false, error: describeWriteFailure(err) });
-      for (let rest = index + 1; rest < plans.length; rest++) {
-        results.push({ index: rest, ok: false, error: "not written" });
-      }
-      break;
-    }
-  }
-  return { results };
 };
 
 /**
