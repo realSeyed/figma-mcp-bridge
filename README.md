@@ -123,6 +123,11 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 | `create_instance`              | Create an instance of a component, or of one variant of a component set                                           |
 | `swap_instance`                | Point an instance at another component or variant, in place                                                       |
 | `detach_instance`              | Turn up to 200 instances into plain frames                                                                        |
+| `add_component_property`       | Add a BOOLEAN, TEXT, INSTANCE_SWAP, or VARIANT property to a component or a component set                         |
+| `edit_component_property`      | Rename a component property, or change its default value or its preferred values                                  |
+| `delete_component_property`    | Delete a component property with explicit confirmation                                                            |
+| `bind_component_property`      | Point a layer's `characters`, `visible`, or `mainComponent` at a component property, or remove the link           |
+| `set_instance_properties`      | Set the property values of one instance, including which variant of a set it is                                   |
 
 All tools accept an optional `fileKey` parameter when multiple Figma files are connected. Use `list_files` to discover connected files and their keys.
 
@@ -153,6 +158,11 @@ All tools accept an optional `fileKey` parameter when multiple Figma files are c
 - `figma.combineAsVariants` stacks every variant on one spot, so `combine_as_variants` lays the set out afterwards: `layout` picks a row or a column, `gap` sets the space between the variants, and the set is resized to fit them plus `padding`.
 - `create_instance` and `swap_instance` pick a variant with `variantProperties`, a property name mapped to its value. Every value is text in Figma, so write `24` as `"24"`. A value that matches no variant comes back with the valid values of each property; a set of values that still matches several variants comes back naming the properties that need one too, so an instance never lands on an arbitrary variant. Leave `variantProperties` out and the set's default variant is used.
 - `detach_instance` refuses an instance inside another instance: Figma detaches every instance above a nested one as well, so the call would reach further than it names. Detach the outer instance instead.
+- The property tools name a property either way: the display name Figma shows (`Label`) or the full name carrying the suffix Figma appends to keep two properties of one display name apart (`Label#12:0`). A display name that matches two properties is refused with both full names, because picking one of them would be a guess. `add_component_property` returns the full name, and so does `edit_component_property` after a rename — Figma gives a renamed property a fresh suffix, so the name to pass from then on is the one that comes back.
+- The property types these tools cover are `BOOLEAN`, `TEXT`, `INSTANCE_SWAP`, and `VARIANT`. `SLOT` properties are not supported: a slot carries a frame contract these tools do not model, and Figma refuses to set one on an instance. Use an `INSTANCE_SWAP` property to let an instance choose the component it shows.
+- A property lives on the component set rather than on one of its variants, so a variant ID is refused with the ID of its set — a property added to the set reaches every variant. A `VARIANT` property is an axis of a set: it is refused on a single component, takes no default value because the set's first variant is the default, and `delete_component_property` cannot remove it. Rename the variants so they no longer name it instead.
+- `bind_component_property` matches the field to the property type: `characters` reads a `TEXT` property and belongs to a text layer, `visible` reads a `BOOLEAN` property, and `mainComponent` reads an `INSTANCE_SWAP` property and belongs to an instance layer. The layer must sit inside the component, or inside one variant of the set, that owns the property; a layer inside an instance is refused, because the link lives on the main component. The other links on the layer are kept, and `propertyName: null` removes one and leaves the layer as it looks.
+- `set_instance_properties` checks every value against the property it names before the first write and hands them to Figma in one call, so a call with a bad value leaves the instance as it was. A `VARIANT` value the set does not have comes back with the values it does have, and the fonts of the text layers a `TEXT` property drives are loaded before the change.
 
 ### What You Can Build
 
