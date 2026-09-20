@@ -359,6 +359,18 @@ const listFontFamilies = async (): Promise<Map<string, string[]>> => {
 };
 
 /**
+ * Orders two names.
+ *
+ * A plain comparison rather than `localeCompare`: the plugin sandbox is not a
+ * browser, so its Intl support is not something to depend on, and a font list
+ * that reorders itself with the host locale is harder to test against.
+ * @param a - One name.
+ * @param b - The other name.
+ * @returns Negative when a sorts first, positive when b does, 0 when equal.
+ */
+const compareNames = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
  * Counts the characters two names open with.
  * @param a - One name.
  * @param b - The other name.
@@ -397,7 +409,7 @@ const similarFamilies = (wanted: string, families: Iterable<string>): string[] =
     scored.push({ name, score });
   }
 
-  scored.sort((a, b) => a.score - b.score || a.name.localeCompare(b.name));
+  scored.sort((a, b) => a.score - b.score || compareNames(a.name, b.name));
   return scored.slice(0, 5).map((entry) => entry.name);
 };
 
@@ -529,12 +541,27 @@ const listFonts = async (req: ExtensionRequest): Promise<unknown> => {
   const needle = typeof query === "string" ? query.trim().toLowerCase() : "";
   const matched = [...(await listFontFamilies()).entries()]
     .filter(([family]) => needle === "" || family.toLowerCase().includes(needle))
-    .sort(([a], [b]) => a.localeCompare(b));
+    .sort(([a], [b]) => compareNames(a, b));
 
   return {
     fonts: matched.slice(0, limit).map(([family, styles]) => ({ family, styles })),
     truncated: matched.length > limit,
   };
+};
+
+/**
+ * Removes a style, ignoring a failure to do so.
+ *
+ * Used to undo a half-written style: the write that failed is what the caller
+ * needs to hear about, not a second failure while cleaning up after it.
+ * @param style - The style to remove.
+ */
+const removeQuietly = (style: TextStyle): void => {
+  try {
+    style.remove();
+  } catch {
+    // Already gone, or Figma refuses; the original failure is what matters.
+  }
 };
 
 /**
@@ -575,6 +602,7 @@ const createTextStyle = async (req: ExtensionRequest): Promise<unknown> => {
     throw describeWriteError(`${tool} could not create "${name}"`, err);
   }
 
+  let failure: unknown;
   try {
     // `font` is set here: resolveFont returns undefined only after pushing a
     // problem, and a problem would have thrown above.
@@ -582,14 +610,14 @@ const createTextStyle = async (req: ExtensionRequest): Promise<unknown> => {
     style.fontName = font as FontName;
     applyStyleFields(style, fields);
   } catch (err) {
+    failure = err;
+  }
+
+  if (failure !== undefined) {
     // Take the half-written style back out, so a failure leaves the file as it
     // was rather than leaving behind a style the caller cannot use.
-    try {
-      style.remove();
-    } catch {
-      // Already gone, or Figma refuses; the original failure is what matters.
-    }
-    throw describeWriteError(`${tool} could not write "${name}"`, err);
+    removeQuietly(style);
+    throw describeWriteError(`${tool} could not write "${name}"`, failure);
   }
 
   return { id: style.id, name: style.name };
