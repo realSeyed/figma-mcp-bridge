@@ -29,6 +29,85 @@ const collectionIdField = createCollectionIdSchema().describe(
   "The variable collection ID, as reported by get_variable_defs"
 );
 
+const variableTypeField = z
+  .enum(["COLOR", "FLOAT", "STRING", "BOOLEAN"])
+  .describe("Resolved type of the variable");
+
+const variableScopeField = z.enum([
+  "ALL_SCOPES",
+  "ALL_FILLS",
+  "FRAME_FILL",
+  "SHAPE_FILL",
+  "TEXT_FILL",
+  "STROKE_COLOR",
+  "EFFECT_COLOR",
+  "TEXT_CONTENT",
+  "CORNER_RADIUS",
+  "WIDTH_HEIGHT",
+  "GAP",
+  "OPACITY",
+  "STROKE_FLOAT",
+  "EFFECT_FLOAT",
+  "FONT_WEIGHT",
+  "FONT_SIZE",
+  "LINE_HEIGHT",
+  "LETTER_SPACING",
+  "PARAGRAPH_SPACING",
+  "PARAGRAPH_INDENT",
+  "FONT_FAMILY",
+  "FONT_STYLE",
+]);
+
+/**
+ * A variable value, or an alias to another variable.
+ *
+ * Deliberately loose: a union reports only "Invalid input" when every branch
+ * fails, which would bury the reason. The plugin checks the value against the
+ * type of the item and answers with the cause and the correction instead.
+ */
+const variableValueField = z
+  .union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.object({
+      aliasId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("ID of the variable to alias, e.g. 'VariableID:1:2'"),
+      aliasName: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Name of the variable to alias. Resolved against this batch first, then the target collection, then the other local collections."
+        ),
+    }),
+  ])
+  .describe(
+    "COLOR: a hex string '#RGB', '#RRGGBB', or '#RRGGBBAA'. FLOAT: a number. STRING: a string. BOOLEAN: true or false. Any type may instead take an alias object with exactly one of aliasId or aliasName."
+  );
+
+const createVariableItem = z.object({
+  name: z
+    .string()
+    .min(1)
+    .describe(
+      "Variable name. A '/' makes a group, e.g. 'color/brand'. Must not exist in the collection already and must be unique within this call."
+    ),
+  type: variableTypeField,
+  value: variableValueField,
+  scopes: z
+    .array(variableScopeField)
+    .min(1)
+    .optional()
+    .describe(
+      "Where Figma offers the variable. Must suit the type: fill and stroke scopes for COLOR, size and spacing scopes for FLOAT, font name scopes for STRING, ALL_SCOPES for BOOLEAN. ALL_SCOPES must stand alone, and ALL_FILLS must not be combined with FRAME_FILL, SHAPE_FILL, or TEXT_FILL."
+    ),
+  description: z.string().optional().describe("Optional description, shown in Figma"),
+});
+
 /** Tool name to Zod object schema. Spread into `toolInputSchemas`. */
 export const schemas = {
   create_variable_collection: z.object({
@@ -47,6 +126,16 @@ export const schemas = {
     confirm: z.boolean().describe("Must be true to confirm deletion"),
     fileKey: fileKeyField,
   }),
+
+  create_variables: z.object({
+    collectionId: collectionIdField,
+    variables: z
+      .array(createVariableItem)
+      .min(1)
+      .max(200)
+      .describe("The variables to create, 1 to 200 per call"),
+    fileKey: fileKeyField,
+  }),
 } satisfies ExtensionSchemaMap;
 
 /** Tool name to RPC wire mapper. Spread into `rpcToArgs`. */
@@ -54,6 +143,7 @@ export const rpcToArgs = {
   create_variable_collection: (_nodeIds, params) => ({ ...params }),
   update_variable_collection: (_nodeIds, params) => ({ ...params }),
   delete_variable_collection: (_nodeIds, params) => ({ ...params }),
+  create_variables: (_nodeIds, params) => ({ ...params }),
 } satisfies ExtensionRpcMap;
 
 /**
@@ -100,6 +190,20 @@ export function register(server: McpServer, node: Node): void {
       const { fileKey, ...params } = parsed.data;
       return renderResponse(() =>
         node.sendWithParams("delete_variable_collection", undefined, params, fileKey)
+      );
+    }
+  );
+
+  server.tool(
+    "create_variables",
+    "Create up to 200 variables in one collection and write their values to the default mode of that collection. A value is a hex color, a number, a string, a boolean, or an alias to another variable by ID or by name — an alias may point at a later item of the same call. Every item is checked before the first write: a batch with a bad item writes nothing and reports every item to correct. When multiple files are connected, specify fileKey.",
+    schemas.create_variables.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(schemas.create_variables, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, ...params } = parsed.data;
+      return renderResponse(() =>
+        node.sendWithParams("create_variables", undefined, params, fileKey)
       );
     }
   );
