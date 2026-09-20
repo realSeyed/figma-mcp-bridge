@@ -115,6 +115,11 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 | `update_text_style`            | Change the name, font, metrics, or bound variables of a text style                                                |
 | `delete_text_style`            | Delete a text style with explicit confirmation                                                                    |
 | `apply_text_style`             | Apply a text style to up to 200 text nodes, or to one range of characters                                         |
+| `create_component`             | Create a local component, by converting a node or from a width and a height                                       |
+| `combine_as_variants`          | Combine 2 to 50 components into one component set, laid out in a row or a column                                  |
+| `create_instance`              | Create an instance of a component, or of one variant of a component set                                           |
+| `swap_instance`                | Point an instance at another component or variant, in place                                                       |
+| `detach_instance`              | Turn up to 200 instances into plain frames                                                                        |
 
 All tools accept an optional `fileKey` parameter when multiple Figma files are connected. Use `list_files` to discover connected files and their keys.
 
@@ -138,6 +143,12 @@ All tools accept an optional `fileKey` parameter when multiple Figma files are c
 - The font of a text style must be one Figma has. `create_text_style` and `update_text_style` check the family and the style against `list_fonts` and load the font before writing, so an unavailable font stops the call before it changes anything and comes back with the closest family names. A file that uses a font the account cannot load can still be renamed or redescribed, but not restyled.
 - `create_text_style` and `update_text_style` take `boundVariables`, a style field mapped to a variable ID: a STRING variable for `fontFamily` and `fontStyle`, a FLOAT variable for `fontSize`, `fontWeight`, `lineHeight`, `letterSpacing`, `paragraphSpacing`, and `paragraphIndent`. A binding wins over a literal value given for the same field in the same call, and `null` removes a binding and leaves the field at its last value.
 - `apply_text_style` replaces every text property of the nodes it lands on. Pass `range` to style a stretch of characters instead — one node per call — which leaves `get_node` reporting `textStyleId: "mixed"`. Pass `styleId: null` to remove the link and leave each node looking as it did. `delete_text_style` behaves the same way for the nodes that used the style.
+- The component tools work on a free (Starter) Figma plan, and they make local components only. Publishing a component to a team library and using one from another file need a paid plan and are not exposed.
+- `create_component` takes either `fromNodeId`, which converts a node in place and keeps its children, size, position, and paint, or `width` and `height`, which makes an empty component — so `fillHex` belongs to the second form only. A node that is already a component, a component set, or an instance is refused, as is a node inside one.
+- A variant carries its properties in its name: `Size=Small`, or several pairs as in `Size=Small, State=Hover`. `combine_as_variants` checks every name before the first write — all the components name the same properties, and no two repeat the same combination of values — so a call with a bad name writes nothing and reports every name to correct.
+- `figma.combineAsVariants` stacks every variant on one spot, so `combine_as_variants` lays the set out afterwards: `layout` picks a row or a column, `gap` sets the space between the variants, and the set is resized to fit them plus `padding`.
+- `create_instance` and `swap_instance` pick a variant with `variantProperties`, a property name mapped to its value. Every value is text in Figma, so write `24` as `"24"`. A value that matches no variant comes back with the valid values of each property; a set of values that still matches several variants comes back naming the properties that need one too, so an instance never lands on an arbitrary variant. Leave `variantProperties` out and the set's default variant is used.
+- `detach_instance` refuses an instance inside another instance: Figma detaches every instance above a nested one as well, so the call would reach further than it names. Detach the outer instance instead.
 
 ### What You Can Build
 
