@@ -83,7 +83,8 @@ Do these steps to add one tool:
    The form that takes an ID throws under `dynamic-page`.
 7. A batch tool accepts 200 items or less. Examine all items before the first write.
 8. Validation failure: write nothing. Return one tool error.
-   List each bad item as `items[<index>]: <cause and correction>`.
+   List each bad item as `items[<index>]: <cause and correction>`. A tool whose
+   items arrive in an object names the key: `<param>["<key>"]: <cause and correction>`.
 9. Write failure after validation: stop. Return `results` with one entry for each item:
    `{ index, ok: true, ... }`, `{ index, ok: false, error }`, or
    `{ index, ok: false, error: "not written" }`.
