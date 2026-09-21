@@ -1328,7 +1328,7 @@ const readPreferredValues = async (
   }
   if (raw.length > MAX_PREFERRED_VALUES) {
     throw new Error(
-      `${tool} accepts at most ${MAX_PREFERRED_VALUES} preferredValues, received ${raw.length}.`
+      `${tool} accepts at most ${MAX_PREFERRED_VALUES} preferredValues, received ${raw.length}. List the components the swap menu should offer first; the others stay reachable through the full list.`
     );
   }
   const values: InstanceSwapPreferredValue[] = [];

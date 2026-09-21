@@ -37,7 +37,7 @@ export const getVariableCollectionById = async (
   }
   if (!collection) {
     throw new Error(
-      `Variable collection not found: ${collectionId}. Call get_variable_defs to list the collection IDs of this file.`
+      `collectionId names no variable collection of this file: ${collectionId}. Call get_variable_defs to list the collection IDs.`
     );
   }
   return collection;
@@ -408,7 +408,9 @@ const readBatchEntry = (raw: unknown): VariableBatchEntry => {
  */
 const readScopes = (raw: unknown): VariableScope[] => {
   if (!Array.isArray(raw) || raw.length === 0) {
-    throw new Error("scopes must be a non-empty array of scope names, or must be left out.");
+    throw new Error(
+      `scopes must be a non-empty array of scope names, or must be left out, received ${describeValue(raw)}. Leaving it out keeps ALL_SCOPES.`
+    );
   }
   return raw.map((scope) => {
     if (typeof scope !== "string") {
@@ -1361,7 +1363,7 @@ const bindVariables = async (req: ExtensionRequest): Promise<unknown> => {
       const paint = current?.[plan.paint.index];
       if (!paint || paint.type !== "SOLID") {
         throw new Error(
-          `${plan.paint.property}[${plan.paint.index}] of ${plan.node.id} is no longer a solid paint`
+          `${plan.paint.property}[${plan.paint.index}] of ${plan.node.id} is no longer a SOLID paint, and a COLOR variable binds into a solid paint only. Call set_solid_fill on that node and bind it again.`
         );
       }
       const paints = [...(current as readonly Paint[])];

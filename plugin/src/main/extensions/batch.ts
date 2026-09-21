@@ -26,7 +26,9 @@ export const readRequiredString = (
 ): string => {
   const value = params[key];
   if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(`${tool} requires ${key} as a non-empty string.`);
+    throw new Error(
+      `${tool} requires ${key} as a non-empty string, received ${describeValue(value)}. Pass ${key} and call it again.`
+    );
   }
   return value;
 };
@@ -38,7 +40,7 @@ export const readRequiredString = (
  */
 export const describeValue = (raw: unknown): string => {
   if (raw === null) return "null";
-  if (Array.isArray(raw)) return "an array";
+  if (Array.isArray(raw)) return raw.length === 0 ? "an empty array" : "an array";
   return `a ${typeof raw}`;
 };
 
@@ -59,7 +61,7 @@ export const messageOf = (err: unknown): string =>
 export const describeWriteFailure = (err: unknown): string => {
   const message = messageOf(err);
   if (/\b(limit|plan|upgrade|professional|organization|enterprise|subscri\w*)\b/i.test(message)) {
-    return `${message}. This is a Figma plan limit. A free (Starter) account keeps one mode per collection and cannot publish a library or use extended collections; a paid plan lifts the limit.`;
+    return `${message}. Figma refused this because of a plan limit. A free (Starter) account gives a variable collection one mode, offers no extended collections, and publishes nothing to a team library, so these tools stay on local variables, local styles, and local components, and write the default mode only. Upgrading the file's plan lifts the limit; otherwise keep the call within the local, single-mode surface.`;
   }
   return `${message}.`;
 };
@@ -98,7 +100,9 @@ export const readBatchArray = (
 ): unknown[] => {
   const raw = params[key];
   if (!Array.isArray(raw) || raw.length === 0) {
-    throw new Error(`${tool} requires ${key} as an array of 1 to ${MAX_BATCH_ITEMS} items.`);
+    throw new Error(
+      `${tool} requires ${key} as an array of 1 to ${MAX_BATCH_ITEMS} items, received ${describeValue(raw)}. Pass at least one item.`
+    );
   }
   if (raw.length > MAX_BATCH_ITEMS) {
     throw new Error(

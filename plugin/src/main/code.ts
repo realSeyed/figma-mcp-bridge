@@ -2,7 +2,7 @@ import { serializeBoundVariableMap, serializeNode } from "./serializer";
 import type { SerializableNode } from "./serializer";
 import { addLayersToFrame } from "../html-figma/figma";
 import { getExtensionHandler } from "./extensions";
-import type { ExtensionRequestType } from "./extensions";
+import type { ExtensionHandler, ExtensionRequestType } from "./extensions";
 import {
   appendToParentIfProvided,
   ensureFont,
@@ -250,6 +250,34 @@ const requireEditorMode = (toolName: RequestType): void => {
   }
 };
 
+/**
+ * Runs an extension handler and makes sure its error names the tool.
+ *
+ * An extension throws from wherever it found the problem, and a shared helper
+ * such as the collection lookup cannot know which tool called it. Naming the
+ * tool here gives every message the same four parts — tool, field, cause, and
+ * correction — without repeating the name in the handlers that already carry
+ * it, such as the one a failed batch validation builds.
+ * @param extension - The handler to run.
+ * @param request - The request to pass to it.
+ * @returns Whatever the handler returns.
+ */
+const runExtension = async (
+  extension: ExtensionHandler,
+  request: ServerRequest
+): Promise<unknown> => {
+  try {
+    return await extension.run({
+      nodeIds: request.nodeIds,
+      params: request.params ?? {},
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes(request.type)) throw error;
+    throw new Error(`${request.type}: ${message}`);
+  }
+};
+
 const handleRequest = async (request: ServerRequest): Promise<PluginResponse> => {
   try {
     // Extension tools are dispatched through their own map, so adding one does
@@ -259,10 +287,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
       if (extension.edit) {
         requireEditorMode(request.type);
       }
-      const data = await extension.run({
-        nodeIds: request.nodeIds,
-        params: request.params ?? {},
-      });
+      const data = await runExtension(extension, request);
       return { type: request.type, requestId: request.requestId, data };
     }
 

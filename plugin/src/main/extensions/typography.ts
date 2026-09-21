@@ -307,7 +307,9 @@ const parseStyleFields = async (
   }
   if (has("description")) {
     if (typeof params.description !== "string") {
-      problems.push(`description must be a string, received ${describeValue(params.description)}.`);
+      problems.push(
+        `description must be a string, received ${describeValue(params.description)}. Pass the text Figma should show under the style, or leave description out.`
+      );
     } else {
       plan.description = params.description;
     }
@@ -526,13 +528,15 @@ const listFonts = async (req: ExtensionRequest): Promise<unknown> => {
   const { query, limit: rawLimit } = req.params;
 
   if (query !== undefined && typeof query !== "string") {
-    throw new Error(`${tool} requires query as a string, received ${describeValue(query)}.`);
+    throw new Error(
+      `${tool} requires query as a string, received ${describeValue(query)}. Pass part of a family name to filter, or leave query out to list every family.`
+    );
   }
   let limit = 50;
   if (rawLimit !== undefined) {
     if (typeof rawLimit !== "number" || !Number.isInteger(rawLimit) || rawLimit < 1) {
       throw new Error(
-        `${tool} requires limit as a whole number of 1 or more, received ${describeValue(rawLimit)}.`
+        `${tool} requires limit as a whole number of 1 or more, received ${describeValue(rawLimit)}. Leave limit out for the default of 50.`
       );
     }
     limit = Math.min(rawLimit, 200);
@@ -649,7 +653,9 @@ const updateTextStyle = async (req: ExtensionRequest): Promise<unknown> => {
   let name: string | undefined;
   if (params.name !== undefined) {
     if (typeof params.name !== "string" || params.name.trim() === "") {
-      problems.push(`name must be a non-empty string, received ${describeValue(params.name)}.`);
+      problems.push(
+        `name must be a non-empty string, received ${describeValue(params.name)}. A "/" groups the style, as in "Heading/H1".`
+      );
     } else {
       name = params.name;
       const clash = (await figma.getLocalTextStylesAsync()).some(
@@ -676,9 +682,13 @@ const updateTextStyle = async (req: ExtensionRequest): Promise<unknown> => {
     const family = params.fontFamily ?? style.fontName.family;
     const weight = params.fontStyle ?? style.fontName.style;
     if (typeof family !== "string" || family.trim() === "") {
-      problems.push(`fontFamily must be a non-empty string, received ${describeValue(family)}.`);
+      problems.push(
+        `fontFamily must be a non-empty string, received ${describeValue(family)}. Call list_fonts to see the families this file can use.`
+      );
     } else if (typeof weight !== "string" || weight.trim() === "") {
-      problems.push(`fontStyle must be a non-empty string, received ${describeValue(weight)}.`);
+      problems.push(
+        `fontStyle must be a non-empty string, received ${describeValue(weight)}. Call list_fonts to see the styles the family has, such as "Regular" or "Bold".`
+      );
     } else {
       font = await resolveFont(family, weight, problems);
     }
