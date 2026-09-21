@@ -2,6 +2,7 @@
 
 [![Pairing with Hopp](https://gethopp.app/git/hopp-shield.svg?ref=hopp-repo)](https://gethopp.app)
 
+- [Fork scope: free Figma plan](#fork-scope-free-figma-plan)
 - [Demo](#demo)
 - [Quick Start](#quick-start)
 - [Available Tools](#available-tools)
@@ -25,6 +26,35 @@ It supports **multiple Figma files connected simultaneously**; open the plugin i
 
 It also includes a small, opt-in set of **write tools** for safe agent-driven edits — see [Editing Notes](#editing-notes) below.
 
+## Fork scope: free Figma plan
+
+This fork adds component, variable, and text style tools on top of the stock bridge. Every one of them works on a free (Starter) Figma account: they use the Figma Plugin API rather than the REST API, and nothing here asks for a paid seat.
+
+The plugin is named **Figma MCP Bridge (Fork)** and the bridge listens on **port 1995**, so it runs beside a stock bridge on 1994 without a port clash. Override it with `FIGMA_BRIDGE_PORT`.
+
+### Supported
+
+| Area            | Tools                                                                                                                                                                                                                                                                                        |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Variables**   | `create_variable_collection`, `update_variable_collection`, `delete_variable_collection`, `create_variables`, `update_variables`, `delete_variables`, `bind_variables`                                                                                                                       |
+| **Text styles** | `list_fonts`, `create_text_style`, `update_text_style`, `delete_text_style`, `apply_text_style`                                                                                                                                                                                              |
+| **Components**  | `list_components`, `get_component`, `get_instance`, `create_component`, `combine_as_variants`, `create_instance`, `swap_instance`, `detach_instance`, `add_component_property`, `edit_component_property`, `delete_component_property`, `bind_component_property`, `set_instance_properties` |
+
+The read tools grew with them: `get_variable_defs` reports each collection's `defaultModeId` and each variable's `description` and `scopes`, `get_styles` reports a text style's `description`, `paragraphSpacing`, `paragraphIndent`, `textCase`, `leadingTrim`, and `boundVariables`, and a node reports its `boundVariables`, `textStyleId`, and `componentProperties`.
+
+### Not supported
+
+Everything below needs a paid Figma plan, or a Figma surface these tools deliberately do not model:
+
+- **Variable modes.** A free plan gives a collection one mode. There is no tool to add, rename, remove, or select one, and every variable value is written to the collection's default mode.
+- **Team libraries.** The plugin requests no `teamlibrary` permission, calls no `import*ByKeyAsync`, and exposes no publish option. Components, styles, and variables stay local to the file.
+- **Dev Mode and Enterprise features**, such as extended collections. Dev Mode is read-only here: an edit tool called from it stops with an error naming the editor it needs.
+- **`SLOT` component properties.** A slot carries a frame contract these tools do not model, and Figma refuses to set one on an instance. Use an `INSTANCE_SWAP` property instead.
+- **`EASING` and `TIMING` variables.** The variable tools cover `COLOR`, `FLOAT`, `STRING`, and `BOOLEAN`.
+- **The Figma REST API.** Everything runs through the Plugin API over the bridge, which is what keeps the free plan's six-requests-a-month API limit out of the picture.
+
+When Figma refuses a write because of a plan limit, the tool says so and names the limit rather than passing the raw rejection through.
+
 ## Demo
 
 [Watch a demo of building a UI in Cursor with Figma MCP Bridge](https://youtu.be/ouygIhFBx0g)
@@ -33,26 +63,43 @@ It also includes a small, opt-in set of **write tools** for safe agent-driven ed
 
 ## Quick Start
 
-### 1. Add the MCP server to your favourite AI tool
+This fork is not published to npm, so you build it from this checkout. `npx @gethopp/figma-mcp-bridge` installs the **stock** bridge instead — it listens on 1994 and has none of the component, variable, or text style tools above.
 
-Add the following to your AI tool's MCP configuration (e.g. Cursor, Windsurf, Claude Desktop):
+[Bun](https://bun.sh) is the package manager and script runner throughout. Install it first if you don't have it.
+
+### 1. Build the server and the plugin
+
+```bash
+git clone git@github.com:realSeyed/figma-mcp-bridge.git
+cd figma-mcp-bridge && bun install
+cd server && bun install && bun run build && cd ..
+cd plugin && bun install && bun run build && cd ..
+```
+
+### 2. Add the MCP server to your favourite AI tool
+
+Point your AI tool (Cursor, Windsurf, Claude Code, Claude Desktop) at the server you just built, using an absolute path:
 
 ```json
 {
   "figma-bridge": {
-    "command": "npx",
-    "args": ["-y", "@gethopp/figma-mcp-bridge"]
+    "command": "node",
+    "args": ["/path/to/figma-mcp-bridge/server/dist/index.js"]
   }
 }
 ```
 
-That's it — no binaries to download or install.
+In Claude Code that is:
 
-### 2. Add the Figma plugin
+```bash
+claude mcp add figma-dev -- node /path/to/figma-mcp-bridge/server/dist/index.js
+```
 
-Download the plugin from the [latest release](https://github.com/gethopp/figma-mcp-bridge/releases) page, then in Figma go to `Plugins > Development > Import plugin from manifest` and select the `manifest.json` file from the `plugin/` folder.
+### 3. Add the Figma plugin
 
-### 3. Start using it 🎉
+In Figma go to `Plugins > Development > Import plugin from manifest` and select `plugin/manifest.json` from this checkout. The plugin appears as **Figma MCP Bridge (Fork)**.
+
+### 4. Start using it 🎉
 
 Open a Figma file, run the plugin, and start prompting your AI tool. The MCP server will automatically connect to the plugin.
 
@@ -135,7 +182,7 @@ All tools accept an optional `fileKey` parameter when multiple Figma files are c
 
 - Edit tools work only when the plugin is opened in Figma's design editor (Dev Mode is read-only — they will return a clear error there).
 - The current user must have permission to edit the target file.
-- `delete_nodes` is intentionally gated behind `confirm: true`.
+- Every tool that deletes something is gated behind `confirm: true`, and refuses the call without it: `delete_nodes`, `delete_variable_collection`, `delete_variables`, `delete_text_style`, and `delete_component_property`.
 - Text edits automatically load the fonts currently used by the target text node before applying the new content.
 - New text nodes default to `Inter Regular` unless a font is provided.
 - `create_image` reads local paths relative to the MCP server working directory unless you pass an absolute path.
@@ -169,50 +216,23 @@ All tools accept an optional `fileKey` parameter when multiple Figma files are c
 
 With the current write surface, an agent can build a basic slide deck in a new empty Figma file: create slide frames, style titles and body copy, lay out rectangles/ellipses/lines for cards and dividers, duplicate slide templates, reparent content into the right frame, and adjust common geometry/visual properties — including solid/gradient paints, shadows and blurs, stroke geometry, and auto-layout configuration.
 
-The current version is intentionally limited — no components/instances, no style authoring, no per-segment text styling, and no vector boolean operations yet.
+This fork goes further: an agent can author a small design system in the same file. Define the tokens as variables, bind them to the layers that should follow them, name the type ramp as text styles and apply it, then build the buttons and cards as components, combine them into variant sets, add the properties that drive them, and place instances configured per slide.
+
+Still out of scope: per-segment text styling beyond `apply_text_style`'s `range`, vector boolean operations, and everything in [Not supported](#not-supported) above.
 
 ## Local development
 
-This repo uses [Bun](https://bun.sh) as its package manager and script runner throughout. Install it first if you don't have it.
+[Quick Start](#quick-start) already covers the clone, the installs, and the two builds — that is the development setup. Two more things are worth knowing.
 
-#### 1. Clone this repository locally
+The root `bun install` runs Husky's `prepare` script, which installs the pre-commit hook that formats staged files with Prettier. Run it once in the repository root, not only in `server/` and `plugin/`.
 
-```bash
-git clone git@github.com:gethopp/figma-mcp-bridge.git
-```
-
-#### 2. Install root tooling
-
-Install the root dependencies once. This runs Husky's `prepare` script, which installs the Git pre-commit hook that formats staged files with Prettier.
+### Verifying a change
 
 ```bash
-cd figma-mcp-bridge && bun install
+bun run check
 ```
 
-#### 3. Build the server
-
-```bash
-cd server && bun install && bun run build
-```
-
-#### 4. Build the plugin
-
-```bash
-cd plugin && bun install && bun run build
-```
-
-#### 5. Add the MCP server to your favourite AI tool
-
-For local development, add the following to your AI tool's MCP config:
-
-```json
-{
-  "figma-bridge": {
-    "command": "node",
-    "args": ["/path/to/figma-mcp-bridge/server/dist/index.js"]
-  }
-}
-```
+From the root, this builds the server, type-checks and builds the plugin, and verifies formatting across the repo. Run it before every commit. After changing plugin code, re-run the plugin in Figma to pick up the new `dist/code.js`; after changing server code, reconnect the MCP server in your AI tool.
 
 ### Code style
 
@@ -279,11 +299,11 @@ The MCP server is the core of the Figma MCP Bridge. It maintains a registry of W
 └─────────────────────────────────────────────────────────────────────────────┘
                                       │
                                       │ WebSocket
-                                      │ (ws://localhost:1994/ws)
+                                      │ (ws://localhost:1995/ws)
                                       ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                          PRIMARY MCP SERVER                                 │
-│                         (Leader on :1994)                                   │
+│                         (Leader on :1995)                                   │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  Bridge                                    Endpoints:               │    │
 │  │  • Manages WebSocket conn                  • /ws    (plugin)        │    │
