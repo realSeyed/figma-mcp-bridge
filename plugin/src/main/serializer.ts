@@ -254,30 +254,50 @@ const serializeText = (node: TextNode, base: SerializedNode) => {
   };
 };
 
+/**
+ * A style field is left out when it carries Figma's default.
+ *
+ * Every node used to report `opacity`, `blendMode`, `visible`, `strokes`,
+ * `strokeWeight`, `strokeAlign`, `cornerRadius`, `clipsContent`, and
+ * `constraints` whether or not any of them had been touched, which on a frame
+ * of a few hundred instances was over half the result and pushed `get_node`
+ * past what one tool call should hand an agent. Nothing is lost: a field that
+ * is absent holds the default named here, the same way `effects`, `rotation`,
+ * and `padding` have always been left out at theirs.
+ */
+const DEFAULT_BLEND_MODES = new Set(["PASS_THROUGH", "NORMAL"]);
+
 const serializeStyles = (node: SerializableNode): SerializedStyles => {
   const styles: SerializedStyles = {};
 
-  if ("opacity" in node) {
+  if ("opacity" in node && node.opacity !== 1) {
     styles.opacity = node.opacity as number;
   }
-  if ("blendMode" in node) {
+  if ("blendMode" in node && !DEFAULT_BLEND_MODES.has(node.blendMode as string)) {
     styles.blendMode = node.blendMode as string;
   }
-  if ("visible" in node) {
+  if ("visible" in node && node.visible !== true) {
     styles.visible = node.visible;
   }
 
   if ("fills" in node) {
-    styles.fills = serializePaints(node.fills);
+    const fills = serializePaints(node.fills);
+    if (fills === "mixed" || fills.length > 0) {
+      styles.fills = fills;
+    }
   }
-  if ("strokes" in node) {
-    styles.strokes = serializePaints(node.strokes);
-  }
-  if ("strokeWeight" in node) {
-    styles.strokeWeight = isMixed(node.strokeWeight) ? "mixed" : (node.strokeWeight as number);
-  }
-  if ("strokeAlign" in node) {
-    styles.strokeAlign = node.strokeAlign as string;
+  // Stroke geometry describes strokes, so with none on the node it says
+  // nothing: the weight and the alignment go out with the empty list.
+  const strokes = "strokes" in node ? serializePaints(node.strokes) : [];
+  const hasStrokes = strokes === "mixed" || strokes.length > 0;
+  if (hasStrokes) {
+    styles.strokes = strokes;
+    if ("strokeWeight" in node) {
+      styles.strokeWeight = isMixed(node.strokeWeight) ? "mixed" : (node.strokeWeight as number);
+    }
+    if ("strokeAlign" in node) {
+      styles.strokeAlign = node.strokeAlign as string;
+    }
   }
   if ("dashPattern" in node) {
     const pattern = node.dashPattern as readonly number[];
@@ -293,7 +313,7 @@ const serializeStyles = (node: SerializableNode): SerializedStyles => {
     }
   }
 
-  if ("cornerRadius" in node) {
+  if ("cornerRadius" in node && node.cornerRadius !== 0) {
     styles.cornerRadius = isMixed(node.cornerRadius) ? "mixed" : (node.cornerRadius as number);
   }
   if ("topLeftRadius" in node) {
@@ -344,7 +364,7 @@ const serializeStyles = (node: SerializableNode): SerializedStyles => {
     }
   }
 
-  if ("clipsContent" in node) {
+  if ("clipsContent" in node && node.clipsContent !== false) {
     styles.clipsContent = node.clipsContent as boolean;
   }
   if ("rotation" in node) {
@@ -355,7 +375,9 @@ const serializeStyles = (node: SerializableNode): SerializedStyles => {
   }
   if ("constraints" in node) {
     const c = node.constraints as Constraints;
-    styles.constraints = { horizontal: c.horizontal, vertical: c.vertical };
+    if (c.horizontal !== "MIN" || c.vertical !== "MIN") {
+      styles.constraints = { horizontal: c.horizontal, vertical: c.vertical };
+    }
   }
 
   return styles;
@@ -464,12 +486,14 @@ export const serializeNode = (node: SerializableNode): SerializedNode => {
   }
 
   if ("children" in node) {
-    return {
-      ...base,
-      children: node.children
-        .filter((child) => child.visible !== false)
-        .map((child) => serializeNode(child)),
-    };
+    const children = node.children
+      .filter((child) => child.visible !== false)
+      .map((child) => serializeNode(child));
+    // An empty list says only that the node takes children, which its type
+    // already says. Left out, like the style fields sitting at their default.
+    if (children.length > 0) {
+      return { ...base, children };
+    }
   }
 
   return base;
