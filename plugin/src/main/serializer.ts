@@ -542,29 +542,43 @@ export const serializeNodeWithinBudget = (
   const full = serializeNode(node);
   if (JSON.stringify(full).length <= budget) return full;
 
-  let spent = 0;
-  const walk = (current: SerializableNode): SerializedNode => {
-    const self = serializeSelf(current);
-    spent += JSON.stringify(self).length;
+  const note = `The subtree is larger than ${budget} characters, so it was cut where the budget ran out. A node whose childCount is higher than the children it carries has that many more: call get_node on it, or get_design_context with depth, to read them.`;
 
-    const visible = visibleChildrenOf(current);
-    if (visible.length === 0) return self;
+  const build = (allowance: number): SerializedNode => {
+    let spent = 0;
+    const walk = (current: SerializableNode): SerializedNode => {
+      const self = serializeSelf(current);
+      spent += JSON.stringify(self).length;
 
-    const kept: SerializedNode[] = [];
-    for (const child of visible) {
-      if (spent >= budget) break;
-      kept.push(walk(child));
-    }
-    if (kept.length === 0) return { ...self, childCount: visible.length };
-    if (kept.length < visible.length) {
-      return { ...self, children: kept, childCount: visible.length };
-    }
-    return { ...self, children: kept };
+      const visible = visibleChildrenOf(current);
+      if (visible.length === 0) return self;
+
+      const kept: SerializedNode[] = [];
+      for (const child of visible) {
+        if (spent >= allowance) break;
+        kept.push(walk(child));
+      }
+      if (kept.length === 0) return { ...self, childCount: visible.length };
+      if (kept.length < visible.length) {
+        return { ...self, children: kept, childCount: visible.length };
+      }
+      return { ...self, children: kept };
+    };
+    return { ...walk(node), truncated: true, note };
   };
 
-  return {
-    ...walk(node),
-    truncated: true,
-    note: `The subtree is larger than ${budget} characters, so it was cut where the budget ran out. A node whose childCount is higher than the children it carries has that many more: call get_node on it, or get_design_context with depth, to read them.`,
-  };
+  // The walk counts each node on its own, so the commas and the `children`
+  // brackets holding them, and this note, land on top of what it counted and
+  // carry the result past the budget. Rather than model that overhead, take
+  // the overshoot off the allowance and walk again: it converges in a step or
+  // two, and a walk is cheap next to the round trip that asked for it.
+  let allowance = budget;
+  let result = build(allowance);
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const over = JSON.stringify(result).length - budget;
+    if (over <= 0) break;
+    allowance = Math.max(0, allowance - over - 64);
+    result = build(allowance);
+  }
+  return result;
 };
