@@ -6,6 +6,7 @@
 - [Demo](#demo)
 - [Quick Start](#quick-start)
 - [Available Tools](#available-tools)
+- [Reading Notes](#reading-notes)
 - [Local development](#local-development)
 - [Structure](#structure)
 - [How it works](#how-it-works)
@@ -177,6 +178,11 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 | `set_instance_properties`      | Set the property values of one instance, including which variant of a set it is                                   |
 
 All tools accept an optional `fileKey` parameter when multiple Figma files are connected. Use `list_files` to discover connected files and their keys.
+
+### Reading Notes
+
+- A node reports only what has been set on it. A style field sitting at Figma's default — `opacity` 1, `visible` true, no strokes, `cornerRadius` 0, `clipsContent` false, `MIN`/`MIN` constraints, a blend mode that does not blend, an opaque paint — is left out, as `effects`, `rotation`, and `padding` always were, and a node with no children reports no `children`. An absent field holds its default; nothing is lost, and a frame of a few hundred instances reads back about half the size.
+- `get_node` returns the whole subtree, which for a big frame can still be more than one tool call should hand an agent. Past 50,000 characters it fills in as much as fits and says `truncated: true`. A node it stopped at reports `childCount`, the children it really has, beside the `children` it carried — read the rest with `get_node` on that node, or with `get_design_context` and a `depth`. A subtree that fits comes back whole, which is almost every call.
 
 ### Editing Notes
 

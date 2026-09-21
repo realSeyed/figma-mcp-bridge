@@ -468,7 +468,12 @@ const serializeComponentProperties = (
  */
 export type SerializableNode = SceneNode | PageNode;
 
-export const serializeNode = (node: SerializableNode, maxDepth = Infinity): SerializedNode => {
+/**
+ * Serializes one node on its own, without its children.
+ * @param node - The node.
+ * @returns The node, with no `children`.
+ */
+const serializeSelf = (node: SerializableNode): SerializedNode => {
   const base: SerializedNode = {
     id: node.id,
     name: node.name,
@@ -489,36 +494,43 @@ export const serializeNode = (node: SerializableNode, maxDepth = Infinity): Seri
     return serializeText(node, base);
   }
 
-  if ("children" in node) {
-    const visible = node.children.filter((child) => child.visible !== false);
-    // An empty list says only that the node takes children, which its type
-    // already says. Left out, like the style fields sitting at their default.
-    if (visible.length > 0) {
-      // At the limit the count stands in for the children, the same way
-      // get_design_context reports a subtree it stopped short of.
-      if (maxDepth <= 0) return { ...base, childCount: visible.length };
-      return { ...base, children: visible.map((child) => serializeNode(child, maxDepth - 1)) };
-    }
-  }
-
   return base;
+};
+
+/**
+ * The children of a node that the read tools report: the visible ones.
+ * @param node - The node.
+ * @returns Its visible children, empty when it takes none.
+ */
+const visibleChildrenOf = (node: SerializableNode): readonly SceneNode[] =>
+  "children" in node ? node.children.filter((child) => child.visible !== false) : [];
+
+export const serializeNode = (node: SerializableNode): SerializedNode => {
+  const base = serializeSelf(node);
+  const visible = visibleChildrenOf(node);
+  // An empty list says only that the node takes children, which its type
+  // already says. Left out, like the style fields sitting at their default.
+  if (visible.length === 0) return base;
+  return { ...base, children: visible.map((child) => serializeNode(child)) };
 };
 
 /** The most characters one node read hands back before it starts cutting. */
 export const MAX_NODE_RESULT_CHARS = 50_000;
 
-/** Deeper than any Figma tree in practice; stops the probe below running away. */
-const MAX_PROBE_DEPTH = 64;
-
 /**
- * Serializes a node in full, or as deep as fits when in full is too much.
+ * Serializes a node, cutting the subtree short when it will not fit.
  *
  * A node read is unbounded by nature: the result is the whole subtree, and a
  * frame holding a few hundred instances runs past what one tool call should
- * hand an agent. A tree that fits is returned untouched, which is nearly every
- * call; only one that does not is cut back, to the deepest whole level that
- * fits, and says so. The nodes it stopped at carry `childCount`, so the caller
- * can see what was left and read it with another call.
+ * hand an agent. A tree that fits comes back untouched, which is nearly every
+ * call. One that does not is filled in child by child until the budget runs
+ * out, rather than by dropping whole levels — a frame of 200 instances would
+ * otherwise have to choose between all of them and none, and none is what it
+ * would get.
+ *
+ * A node the walk stopped at reports `childCount`, the children it really has,
+ * beside the `children` it managed to carry. The two together say what is
+ * missing, and the note says which call reads it.
  * @param node - The node to serialize.
  * @param budget - The most characters to return.
  * @returns The subtree, marked `truncated` when it was cut.
@@ -530,22 +542,29 @@ export const serializeNodeWithinBudget = (
   const full = serializeNode(node);
   if (JSON.stringify(full).length <= budget) return full;
 
-  let best = serializeNode(node, 0);
-  let previous = JSON.stringify(best).length;
-  for (let depth = 1; depth <= MAX_PROBE_DEPTH; depth++) {
-    const candidate = serializeNode(node, depth);
-    const size = JSON.stringify(candidate).length;
-    if (size > budget) break;
-    best = candidate;
-    // The same size one level deeper means the tree ran out, not that it fits
-    // by luck — the full serialization above would then have fit too.
-    if (size === previous) break;
-    previous = size;
-  }
+  let spent = 0;
+  const walk = (current: SerializableNode): SerializedNode => {
+    const self = serializeSelf(current);
+    spent += JSON.stringify(self).length;
+
+    const visible = visibleChildrenOf(current);
+    if (visible.length === 0) return self;
+
+    const kept: SerializedNode[] = [];
+    for (const child of visible) {
+      if (spent >= budget) break;
+      kept.push(walk(child));
+    }
+    if (kept.length === 0) return { ...self, childCount: visible.length };
+    if (kept.length < visible.length) {
+      return { ...self, children: kept, childCount: visible.length };
+    }
+    return { ...self, children: kept };
+  };
 
   return {
-    ...best,
+    ...walk(node),
     truncated: true,
-    note: `The subtree is larger than ${budget} characters, so it was cut to the levels that fit. A node reporting childCount instead of children still has that many children: call get_node on it, or get_design_context with depth, to read them.`,
+    note: `The subtree is larger than ${budget} characters, so it was cut where the budget ran out. A node whose childCount is higher than the children it carries has that many more: call get_node on it, or get_design_context with depth, to read them.`,
   };
 };
