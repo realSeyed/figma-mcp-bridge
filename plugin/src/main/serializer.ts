@@ -290,18 +290,20 @@ const serializeStyles = (node: SerializableNode): SerializedStyles => {
       styles.fills = fills;
     }
   }
-  // Stroke geometry describes strokes, so with none on the node it says
-  // nothing: the weight and the alignment go out with the empty list.
-  const strokes = "strokes" in node ? serializePaints(node.strokes) : [];
-  const hasStrokes = strokes === "mixed" || strokes.length > 0;
-  if (hasStrokes) {
-    styles.strokes = strokes;
-    if ("strokeWeight" in node) {
-      styles.strokeWeight = isMixed(node.strokeWeight) ? "mixed" : (node.strokeWeight as number);
+  if ("strokes" in node) {
+    const strokes = serializePaints(node.strokes);
+    if (strokes === "mixed" || strokes.length > 0) {
+      styles.strokes = strokes;
     }
-    if ("strokeAlign" in node) {
-      styles.strokeAlign = node.strokeAlign as string;
-    }
+  }
+  // Weight and alignment stand on their own rather than going out with an
+  // empty stroke list: a variable binds to strokeWeight whether or not the
+  // node is painting a stroke yet, and the value it left has to read back.
+  if ("strokeWeight" in node && node.strokeWeight !== 1) {
+    styles.strokeWeight = isMixed(node.strokeWeight) ? "mixed" : (node.strokeWeight as number);
+  }
+  if ("strokeAlign" in node && node.strokeAlign !== "INSIDE") {
+    styles.strokeAlign = node.strokeAlign as string;
   }
   if ("dashPattern" in node) {
     const pattern = node.dashPattern as readonly number[];
