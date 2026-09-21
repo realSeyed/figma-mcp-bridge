@@ -1,4 +1,4 @@
-import { serializeBoundVariableMap, serializeNode } from "./serializer";
+import { serializeBoundVariableMap, serializeNode, serializeNodeWithinBudget } from "./serializer";
 import type { SerializableNode } from "./serializer";
 import { addLayersToFrame } from "../html-figma/figma";
 import { getExtensionHandler } from "./extensions";
@@ -319,7 +319,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         return {
           type: request.type,
           requestId: request.requestId,
-          data: serializeNode(node as SceneNode),
+          data: serializeNodeWithinBudget(node as SceneNode),
         };
       }
       case "get_styles": {

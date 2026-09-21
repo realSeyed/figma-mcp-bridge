@@ -105,6 +105,8 @@ type SerializedNode = {
   componentProperties?: Record<string, string | boolean>;
   children?: SerializedNode[];
   childCount?: number;
+  truncated?: boolean;
+  note?: string;
 };
 
 const isMixed = (value: unknown): value is symbol => typeof value === "symbol";
@@ -139,7 +141,9 @@ const serializePaints = (
             {
               type: "SOLID",
               color: toHex(paint.color),
-              opacity: paint.opacity,
+              // Left out at the default, like the style fields around it: a
+              // paint is opaque unless it says otherwise.
+              ...(paint.opacity === 1 ? {} : { opacity: paint.opacity }),
             },
           ];
         case "GRADIENT_LINEAR":
@@ -464,7 +468,7 @@ const serializeComponentProperties = (
  */
 export type SerializableNode = SceneNode | PageNode;
 
-export const serializeNode = (node: SerializableNode): SerializedNode => {
+export const serializeNode = (node: SerializableNode, maxDepth = Infinity): SerializedNode => {
   const base: SerializedNode = {
     id: node.id,
     name: node.name,
@@ -486,15 +490,62 @@ export const serializeNode = (node: SerializableNode): SerializedNode => {
   }
 
   if ("children" in node) {
-    const children = node.children
-      .filter((child) => child.visible !== false)
-      .map((child) => serializeNode(child));
+    const visible = node.children.filter((child) => child.visible !== false);
     // An empty list says only that the node takes children, which its type
     // already says. Left out, like the style fields sitting at their default.
-    if (children.length > 0) {
-      return { ...base, children };
+    if (visible.length > 0) {
+      // At the limit the count stands in for the children, the same way
+      // get_design_context reports a subtree it stopped short of.
+      if (maxDepth <= 0) return { ...base, childCount: visible.length };
+      return { ...base, children: visible.map((child) => serializeNode(child, maxDepth - 1)) };
     }
   }
 
   return base;
+};
+
+/** The most characters one node read hands back before it starts cutting. */
+export const MAX_NODE_RESULT_CHARS = 50_000;
+
+/** Deeper than any Figma tree in practice; stops the probe below running away. */
+const MAX_PROBE_DEPTH = 64;
+
+/**
+ * Serializes a node in full, or as deep as fits when in full is too much.
+ *
+ * A node read is unbounded by nature: the result is the whole subtree, and a
+ * frame holding a few hundred instances runs past what one tool call should
+ * hand an agent. A tree that fits is returned untouched, which is nearly every
+ * call; only one that does not is cut back, to the deepest whole level that
+ * fits, and says so. The nodes it stopped at carry `childCount`, so the caller
+ * can see what was left and read it with another call.
+ * @param node - The node to serialize.
+ * @param budget - The most characters to return.
+ * @returns The subtree, marked `truncated` when it was cut.
+ */
+export const serializeNodeWithinBudget = (
+  node: SerializableNode,
+  budget = MAX_NODE_RESULT_CHARS
+): SerializedNode => {
+  const full = serializeNode(node);
+  if (JSON.stringify(full).length <= budget) return full;
+
+  let best = serializeNode(node, 0);
+  let previous = JSON.stringify(best).length;
+  for (let depth = 1; depth <= MAX_PROBE_DEPTH; depth++) {
+    const candidate = serializeNode(node, depth);
+    const size = JSON.stringify(candidate).length;
+    if (size > budget) break;
+    best = candidate;
+    // The same size one level deeper means the tree ran out, not that it fits
+    // by luck — the full serialization above would then have fit too.
+    if (size === previous) break;
+    previous = size;
+  }
+
+  return {
+    ...best,
+    truncated: true,
+    note: `The subtree is larger than ${budget} characters, so it was cut to the levels that fit. A node reporting childCount instead of children still has that many children: call get_node on it, or get_design_context with depth, to read them.`,
+  };
 };
