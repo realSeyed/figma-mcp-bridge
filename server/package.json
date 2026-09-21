@@ -13,6 +13,7 @@
   "scripts": {
     "build": "tsc",
     "e2e": "bun scripts/e2e-free-plan.ts",
+    "perf": "bun scripts/perf-free-plan.ts",
     "prepublishOnly": "bun run build"
   },
   "keywords": [
