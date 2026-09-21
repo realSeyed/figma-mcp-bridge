@@ -360,7 +360,7 @@ export function register(server: McpServer, node: Node): void {
 
   server.tool(
     "bind_variables",
-    "Bind variables to node fields, up to 200 per call, or pass variableId: null to remove a binding and leave the field at its last value. A COLOR variable binds into one SOLID paint of fills or strokes, chosen by paintIndex; every other field takes the variable directly. The node must support the field — itemSpacing needs an auto layout frame, for example — and the variable type must match it. Every item is checked before the first write: a batch with a bad item writes nothing and reports every item to correct. When multiple files are connected, specify fileKey.",
+    "Bind variables to node fields, up to 200 per call, or pass variableId: null to remove a binding and leave the field at its last value. A COLOR variable binds into one SOLID paint of fills or strokes, chosen by paintIndex; every other field takes the variable directly. The node must support the field — itemSpacing needs an auto layout frame, for example — and the variable type must match it. Figma spreads a cornerRadius binding over the four corner radii and a strokeWeight binding over the four side weights, so get_node reports those fields rather than cornerRadius or strokeWeight; passing null for cornerRadius or strokeWeight removes the whole set again. On a text node get_node reports a text field such as fontSize as a list, one entry per styled range. Every item is checked before the first write: a batch with a bad item writes nothing and reports every item to correct. When multiple files are connected, specify fileKey.",
     schemas.bind_variables.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(schemas.bind_variables, args);

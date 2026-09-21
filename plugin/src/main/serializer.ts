@@ -105,6 +105,8 @@ type SerializedNode = {
   componentProperties?: Record<string, string | boolean>;
   children?: SerializedNode[];
   childCount?: number;
+  truncated?: boolean;
+  note?: string;
 };
 
 const isMixed = (value: unknown): value is symbol => typeof value === "symbol";
@@ -139,7 +141,9 @@ const serializePaints = (
             {
               type: "SOLID",
               color: toHex(paint.color),
-              opacity: paint.opacity,
+              // Left out at the default, like the style fields around it: a
+              // paint is opaque unless it says otherwise.
+              ...(paint.opacity === 1 ? {} : { opacity: paint.opacity }),
             },
           ];
         case "GRADIENT_LINEAR":
@@ -254,29 +258,51 @@ const serializeText = (node: TextNode, base: SerializedNode) => {
   };
 };
 
+/**
+ * A style field is left out when it carries Figma's default.
+ *
+ * Every node used to report `opacity`, `blendMode`, `visible`, `strokes`,
+ * `strokeWeight`, `strokeAlign`, `cornerRadius`, `clipsContent`, and
+ * `constraints` whether or not any of them had been touched, which on a frame
+ * of a few hundred instances was over half the result and pushed `get_node`
+ * past what one tool call should hand an agent. Nothing is lost: a field that
+ * is absent holds the default named here, the same way `effects`, `rotation`,
+ * and `padding` have always been left out at theirs.
+ */
+const DEFAULT_BLEND_MODES = new Set(["PASS_THROUGH", "NORMAL"]);
+
 const serializeStyles = (node: SerializableNode): SerializedStyles => {
   const styles: SerializedStyles = {};
 
-  if ("opacity" in node) {
+  if ("opacity" in node && node.opacity !== 1) {
     styles.opacity = node.opacity as number;
   }
-  if ("blendMode" in node) {
+  if ("blendMode" in node && !DEFAULT_BLEND_MODES.has(node.blendMode as string)) {
     styles.blendMode = node.blendMode as string;
   }
-  if ("visible" in node) {
+  if ("visible" in node && node.visible !== true) {
     styles.visible = node.visible;
   }
 
   if ("fills" in node) {
-    styles.fills = serializePaints(node.fills);
+    const fills = serializePaints(node.fills);
+    if (fills === "mixed" || fills.length > 0) {
+      styles.fills = fills;
+    }
   }
   if ("strokes" in node) {
-    styles.strokes = serializePaints(node.strokes);
+    const strokes = serializePaints(node.strokes);
+    if (strokes === "mixed" || strokes.length > 0) {
+      styles.strokes = strokes;
+    }
   }
-  if ("strokeWeight" in node) {
+  // Weight and alignment stand on their own rather than going out with an
+  // empty stroke list: a variable binds to strokeWeight whether or not the
+  // node is painting a stroke yet, and the value it left has to read back.
+  if ("strokeWeight" in node && node.strokeWeight !== 1) {
     styles.strokeWeight = isMixed(node.strokeWeight) ? "mixed" : (node.strokeWeight as number);
   }
-  if ("strokeAlign" in node) {
+  if ("strokeAlign" in node && node.strokeAlign !== "INSIDE") {
     styles.strokeAlign = node.strokeAlign as string;
   }
   if ("dashPattern" in node) {
@@ -293,7 +319,7 @@ const serializeStyles = (node: SerializableNode): SerializedStyles => {
     }
   }
 
-  if ("cornerRadius" in node) {
+  if ("cornerRadius" in node && node.cornerRadius !== 0) {
     styles.cornerRadius = isMixed(node.cornerRadius) ? "mixed" : (node.cornerRadius as number);
   }
   if ("topLeftRadius" in node) {
@@ -344,7 +370,7 @@ const serializeStyles = (node: SerializableNode): SerializedStyles => {
     }
   }
 
-  if ("clipsContent" in node) {
+  if ("clipsContent" in node && node.clipsContent !== false) {
     styles.clipsContent = node.clipsContent as boolean;
   }
   if ("rotation" in node) {
@@ -355,7 +381,9 @@ const serializeStyles = (node: SerializableNode): SerializedStyles => {
   }
   if ("constraints" in node) {
     const c = node.constraints as Constraints;
-    styles.constraints = { horizontal: c.horizontal, vertical: c.vertical };
+    if (c.horizontal !== "MIN" || c.vertical !== "MIN") {
+      styles.constraints = { horizontal: c.horizontal, vertical: c.vertical };
+    }
   }
 
   return styles;
@@ -442,7 +470,12 @@ const serializeComponentProperties = (
  */
 export type SerializableNode = SceneNode | PageNode;
 
-export const serializeNode = (node: SerializableNode): SerializedNode => {
+/**
+ * Serializes one node on its own, without its children.
+ * @param node - The node.
+ * @returns The node, with no `children`.
+ */
+const serializeSelf = (node: SerializableNode): SerializedNode => {
   const base: SerializedNode = {
     id: node.id,
     name: node.name,
@@ -463,14 +496,91 @@ export const serializeNode = (node: SerializableNode): SerializedNode => {
     return serializeText(node, base);
   }
 
-  if ("children" in node) {
-    return {
-      ...base,
-      children: node.children
-        .filter((child) => child.visible !== false)
-        .map((child) => serializeNode(child)),
-    };
-  }
-
   return base;
+};
+
+/**
+ * The children of a node that the read tools report: the visible ones.
+ * @param node - The node.
+ * @returns Its visible children, empty when it takes none.
+ */
+const visibleChildrenOf = (node: SerializableNode): readonly SceneNode[] =>
+  "children" in node ? node.children.filter((child) => child.visible !== false) : [];
+
+export const serializeNode = (node: SerializableNode): SerializedNode => {
+  const base = serializeSelf(node);
+  const visible = visibleChildrenOf(node);
+  // An empty list says only that the node takes children, which its type
+  // already says. Left out, like the style fields sitting at their default.
+  if (visible.length === 0) return base;
+  return { ...base, children: visible.map((child) => serializeNode(child)) };
+};
+
+/** The most characters one node read hands back before it starts cutting. */
+export const MAX_NODE_RESULT_CHARS = 50_000;
+
+/**
+ * Serializes a node, cutting the subtree short when it will not fit.
+ *
+ * A node read is unbounded by nature: the result is the whole subtree, and a
+ * frame holding a few hundred instances runs past what one tool call should
+ * hand an agent. A tree that fits comes back untouched, which is nearly every
+ * call. One that does not is filled in child by child until the budget runs
+ * out, rather than by dropping whole levels — a frame of 200 instances would
+ * otherwise have to choose between all of them and none, and none is what it
+ * would get.
+ *
+ * A node the walk stopped at reports `childCount`, the children it really has,
+ * beside the `children` it managed to carry. The two together say what is
+ * missing, and the note says which call reads it.
+ * @param node - The node to serialize.
+ * @param budget - The most characters to return.
+ * @returns The subtree, marked `truncated` when it was cut.
+ */
+export const serializeNodeWithinBudget = (
+  node: SerializableNode,
+  budget = MAX_NODE_RESULT_CHARS
+): SerializedNode => {
+  const full = serializeNode(node);
+  if (JSON.stringify(full).length <= budget) return full;
+
+  const note = `The subtree is larger than ${budget} characters, so it was cut where the budget ran out. A node whose childCount is higher than the children it carries has that many more: call get_node on it, or get_design_context with depth, to read them.`;
+
+  const build = (allowance: number): SerializedNode => {
+    let spent = 0;
+    const walk = (current: SerializableNode): SerializedNode => {
+      const self = serializeSelf(current);
+      spent += JSON.stringify(self).length;
+
+      const visible = visibleChildrenOf(current);
+      if (visible.length === 0) return self;
+
+      const kept: SerializedNode[] = [];
+      for (const child of visible) {
+        if (spent >= allowance) break;
+        kept.push(walk(child));
+      }
+      if (kept.length === 0) return { ...self, childCount: visible.length };
+      if (kept.length < visible.length) {
+        return { ...self, children: kept, childCount: visible.length };
+      }
+      return { ...self, children: kept };
+    };
+    return { ...walk(node), truncated: true, note };
+  };
+
+  // The walk counts each node on its own, so the commas and the `children`
+  // brackets holding them, and this note, land on top of what it counted and
+  // carry the result past the budget. Rather than model that overhead, take
+  // the overshoot off the allowance and walk again: it converges in a step or
+  // two, and a walk is cheap next to the round trip that asked for it.
+  let allowance = budget;
+  let result = build(allowance);
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const over = JSON.stringify(result).length - budget;
+    if (over <= 0) break;
+    allowance = Math.max(0, allowance - over - 64);
+    result = build(allowance);
+  }
+  return result;
 };

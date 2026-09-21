@@ -181,3 +181,6 @@ server/dist/
 .vscode/
 
 .claude/
+
+# End-to-end test output
+server/scripts/e2e-output/
