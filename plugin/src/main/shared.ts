@@ -156,3 +156,65 @@ export const pageOf = (node: BaseNode): PageNode | null => {
   }
   return null;
 };
+
+/**
+ * A container a section can sit in, and that a section's children sit in.
+ *
+ * Figma keeps a section outside the frame tree: its parent is a page or
+ * another section, never a frame, a group, a component, or an instance.
+ */
+export type SectionParent = PageNode | SectionNode;
+
+/**
+ * The absolute position a container's children measure from.
+ *
+ * Read off `absoluteTransform` rather than `absoluteBoundingBox`, which is
+ * nullable. A section does not rotate, so the two agree; a page is the canvas
+ * origin itself.
+ * @param container - The page or section.
+ * @returns Its absolute x and y.
+ */
+export const absoluteOriginOf = (container: SectionParent): { x: number; y: number } => {
+  if (container.type === "PAGE") return { x: 0, y: 0 };
+  const transform = container.absoluteTransform;
+  return { x: transform[0][2], y: transform[1][2] };
+};
+
+/**
+ * Loads a page so its children can be read and written.
+ *
+ * Under `documentAccess: "dynamic-page"` a page's contents stay unloaded until
+ * they are asked for, and a section has one.
+ * @param container - The page or section.
+ */
+export const loadIfPage = async (container: SectionParent): Promise<void> => {
+  if (container.type === "PAGE") await container.loadAsync();
+};
+
+/**
+ * Moves a node into a container and leaves it where it is on the canvas.
+ *
+ * `appendChild` keeps the node's own x and y, which are read against whatever
+ * parent it has, so a plain move slides the node by the distance between the
+ * old parent and the new one. Reading `absoluteTransform` before the move and
+ * writing it back as `relativeTransform` afterwards, less the new parent's own
+ * absolute position, puts the node back where the user left it. Neither a page
+ * nor a section rotates, so the rest of the transform carries across as it is.
+ * @param node - The node to move.
+ * @param parent - The page or section to move it into.
+ * @param at - Where to place the node in the parent's stack, topmost by default.
+ */
+export const moveKeepingCanvasPosition = (
+  node: SceneNode,
+  parent: SectionParent,
+  at?: number
+): void => {
+  const before = node.absoluteTransform;
+  if (at === undefined) parent.appendChild(node);
+  else parent.insertChild(at, node);
+  const origin = absoluteOriginOf(parent);
+  node.relativeTransform = [
+    [before[0][0], before[0][1], before[0][2] - origin.x],
+    [before[1][0], before[1][1], before[1][2] - origin.y],
+  ];
+};
