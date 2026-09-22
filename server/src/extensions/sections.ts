@@ -109,6 +109,16 @@ export const schemas = {
   }),
 
   create_section: createSectionInput,
+
+  fit_section: z.object({
+    nodeId: createFigmaNodeIdSchema().describe("The section to fit around its children"),
+    padding: z
+      .number()
+      .min(0)
+      .optional()
+      .describe("Margin left around the children on each side, in pixels, defaulting to 80"),
+    fileKey: fileKeyField,
+  }),
 } satisfies ExtensionSchemaMap;
 
 /** Tool name to RPC wire mapper. Spread into `rpcToArgs`. */
@@ -116,6 +126,7 @@ export const rpcToArgs = {
   list_sections: (_nodeIds, params) => ({ ...params }),
   get_section: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
   create_section: (nodeIds, params) => ({ nodeIds, ...params }),
+  fit_section: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
 } satisfies ExtensionRpcMap;
 
 /**
@@ -156,6 +167,18 @@ export function register(server: McpServer, node: Node): void {
       if (!parsed.success) return parsed.error;
       const { fileKey, nodeIds, ...params } = parsed.data;
       return renderResponse(() => node.sendWithParams("create_section", nodeIds, params, fileKey));
+    }
+  );
+
+  server.tool(
+    "fit_section",
+    "Draw a section tight around the children it holds, leaving padding on each side. A section is the one container that does not carry its children when it resizes, so its box and the box of its content drift apart as the content is edited; this pulls the two back together. Nothing moves on the canvas: the section takes the box of its visible content, and every child is slid back by the distance the section travelled, so the page looks the same afterwards and only the section's own frame changes. Hidden children are left out of the measurement but still slide back. A section with no visible child is refused, since there would be nothing to measure. When multiple files are connected, specify fileKey.",
+    schemas.fit_section.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(schemas.fit_section, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, nodeId, ...params } = parsed.data;
+      return renderResponse(() => node.sendWithParams("fit_section", [nodeId], params, fileKey));
     }
   );
 }

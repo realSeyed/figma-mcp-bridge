@@ -30,8 +30,8 @@ const MAX_LIST_LIMIT = 500;
 /** The most children get_section lists, and the most overflow IDs it names. */
 const MAX_CHILDREN_LISTED = 200;
 
-/** The margin create_section leaves around the nodes it wraps. */
-const DEFAULT_WRAP_PADDING = 80;
+/** The margin create_section, move_to_section, and fit_section leave around content. */
+const DEFAULT_PADDING = 80;
 
 /** The smallest side Figma accepts when a section is resized. */
 const MIN_SECTION_SIZE = 0.01;
@@ -152,6 +152,37 @@ const moveKeepingCanvasPosition = (node: SceneNode, parent: SectionParent): void
   ];
 };
 
+/** The box, on the canvas, that a section's visible children occupy. */
+type ContentBounds = { minX: number; minY: number; maxX: number; maxY: number };
+
+/**
+ * Measures the visible children of a section on the canvas.
+ *
+ * A hidden child is left out, and so is a child that reports no bounds, which
+ * is why the result is nullable rather than a zero-sized box: a section with
+ * nothing to measure is a different answer from one whose content has no size.
+ * @param section - The section to measure.
+ * @returns The absolute box, or null when nothing could be measured.
+ */
+const measureVisibleContents = (section: SectionNode): ContentBounds | null => {
+  let bounds: ContentBounds | null = null;
+  for (const child of section.children) {
+    if (!child.visible) continue;
+    const box = child.absoluteBoundingBox;
+    if (!box) continue;
+    bounds =
+      bounds === null
+        ? { minX: box.x, minY: box.y, maxX: box.x + box.width, maxY: box.y + box.height }
+        : {
+            minX: Math.min(bounds.minX, box.x),
+            minY: Math.min(bounds.minY, box.y),
+            maxX: Math.max(bounds.maxX, box.x + box.width),
+            maxY: Math.max(bounds.maxY, box.y + box.height),
+          };
+  }
+  return bounds;
+};
+
 /**
  * Lists the sections of a page or of the whole file.
  * @param req - The extension request.
@@ -240,12 +271,8 @@ const getSection = async (req: ExtensionRequest): Promise<unknown> => {
   const parent = node.parent;
   const origin = absoluteOriginOf(node);
   const children = node.children;
+  const bounds = measureVisibleContents(node);
 
-  let minX = 0;
-  let minY = 0;
-  let maxX = 0;
-  let maxY = 0;
-  let measured = 0;
   let overflowCount = 0;
   const overflowIds: string[] = [];
 
@@ -253,19 +280,6 @@ const getSection = async (req: ExtensionRequest): Promise<unknown> => {
     if (!child.visible) continue;
     const box = child.absoluteBoundingBox;
     if (!box) continue;
-
-    if (measured === 0) {
-      minX = box.x;
-      minY = box.y;
-      maxX = box.x + box.width;
-      maxY = box.y + box.height;
-    } else {
-      minX = Math.min(minX, box.x);
-      minY = Math.min(minY, box.y);
-      maxX = Math.max(maxX, box.x + box.width);
-      maxY = Math.max(maxY, box.y + box.height);
-    }
-    measured++;
 
     const escapes =
       box.x < origin.x - OVERFLOW_TOLERANCE ||
@@ -305,13 +319,13 @@ const getSection = async (req: ExtensionRequest): Promise<unknown> => {
     })),
     truncated: children.length > MAX_CHILDREN_LISTED,
     contentBounds:
-      measured === 0
+      bounds === null
         ? null
         : {
-            x: minX - origin.x,
-            y: minY - origin.y,
-            width: maxX - minX,
-            height: maxY - minY,
+            x: bounds.minX - origin.x,
+            y: bounds.minY - origin.y,
+            width: bounds.maxX - bounds.minX,
+            height: bounds.maxY - bounds.minY,
           },
     overflowCount,
     overflowIds,
@@ -507,7 +521,7 @@ const wrapInSection = async (
   // The node IDs travel in the request's own `nodeIds` field, as they do for
   // the core tools that take a list of nodes, not among the params.
   const rawNodeIds = readBatchArray({ nodeIds: req.nodeIds }, "nodeIds", tool);
-  const padding = readOptionalNumber(req.params, "padding", tool, 0) ?? DEFAULT_WRAP_PADDING;
+  const padding = readOptionalNumber(req.params, "padding", tool, 0) ?? DEFAULT_PADDING;
   const fill = fillHex === undefined ? undefined : parseHexColor(fillHex);
 
   const problems: string[] = [];
@@ -644,8 +658,89 @@ const createSection = async (req: ExtensionRequest): Promise<unknown> => {
     : await createEmptySection(req, tool, name, fillHex);
 };
 
+/**
+ * The box a section reports after a call that moved or resized it.
+ * @param section - The section.
+ * @returns The result object.
+ */
+const describeSectionBox = (section: SectionNode): Record<string, unknown> => ({
+  id: section.id,
+  x: section.x,
+  y: section.y,
+  width: section.width,
+  height: section.height,
+});
+
+/**
+ * Draws a section tight around what it holds, leaving a margin.
+ *
+ * A section carries its children when it moves but leaves them where they are
+ * when it resizes, so a fit is two writes that cancel out on the canvas: the
+ * section takes the box of its visible content grown by `padding`, and every
+ * child then slides back by the distance the section travelled. A hidden child
+ * is measured out of the box but slides back with the rest, since it would
+ * otherwise be the one thing the call moved.
+ *
+ * `move_to_section` calls this too, so the fit a move performs and the fit
+ * `fit_section` performs are the same operation.
+ * @param section - The section to fit.
+ * @param padding - The margin to leave on each side, in pixels.
+ * @param tool - The tool name, for the error message.
+ */
+const fitSectionToContents = (section: SectionNode, padding: number, tool: string): void => {
+  const bounds = measureVisibleContents(section);
+  if (bounds === null) {
+    const why =
+      section.children.length === 0
+        ? "it holds no child"
+        : `all ${section.children.length} of its children are hidden`;
+    throw new Error(
+      `${tool} sizes a section to the children it holds, and ${section.id} "${section.name}" has none to measure: ${why}. Move nodes in with move_to_section, or show a child with set_node_visibility, then call it again.`
+    );
+  }
+
+  // How far the section's own top-left travels. Neither a page nor a section
+  // rotates, so this canvas distance is also the distance in the coordinates
+  // of the parent, and in the coordinates the children are read against.
+  const origin = absoluteOriginOf(section);
+  const dx = bounds.minX - padding - origin.x;
+  const dy = bounds.minY - padding - origin.y;
+  const width = Math.max(MIN_SECTION_SIZE, bounds.maxX - bounds.minX + padding * 2);
+  const height = Math.max(MIN_SECTION_SIZE, bounds.maxY - bounds.minY + padding * 2);
+
+  try {
+    section.resizeWithoutConstraints(width, height);
+    section.x = section.x + dx;
+    section.y = section.y + dy;
+    for (const child of section.children) {
+      child.x = child.x - dx;
+      child.y = child.y - dy;
+    }
+  } catch (err) {
+    throw describeWriteError(
+      `${tool} could not fit ${section.id} "${section.name}" around its children`,
+      err
+    );
+  }
+};
+
+/**
+ * Sizes a section to the children it holds.
+ * @param req - The extension request.
+ * @returns The section's box after the fit.
+ */
+const fitSection = async (req: ExtensionRequest): Promise<unknown> => {
+  const tool = "fit_section";
+  const nodeId = readNodeId(req, tool, "the section to fit");
+  const padding = readOptionalNumber(req.params, "padding", tool, 0) ?? DEFAULT_PADDING;
+  const section = await readSectionById(nodeId, tool);
+  fitSectionToContents(section, padding, tool);
+  return describeSectionBox(section);
+};
+
 export const sectionsHandlers = {
   list_sections: { edit: false, run: listSections },
   get_section: { edit: false, run: getSection },
   create_section: { edit: true, run: createSection },
+  fit_section: { edit: true, run: fitSection },
 } satisfies Record<string, ExtensionHandler>;
