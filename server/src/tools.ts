@@ -434,7 +434,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "group_nodes",
-    "Wrap a list of nodes in a new group. Nodes must share a common parent (or supply parentId explicitly). Returns the new group's node ID.",
+    "Wrap a list of nodes in a new group. Nodes must share a common parent (or supply parentId explicitly). Returns the new group's node ID. A SECTION cannot go in a group — call create_section with nodeIds for that.",
     groupNodesInput.shape,
     async ({ nodeIds, fileKey, ...params }): Promise<ToolResult> => {
       return renderResponse(() => node.sendWithParams("group_nodes", nodeIds, params, fileKey));

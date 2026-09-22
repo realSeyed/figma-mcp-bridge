@@ -1579,6 +1579,16 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
 
         const nodes = await Promise.all(request.nodeIds.map((nodeId) => getSceneNodeById(nodeId)));
 
+        // Figma keeps a section outside the frame tree, and a group is inside
+        // it, so a group can never hold one. Refusing here names the tool that
+        // does what the caller meant.
+        const sections = nodes.filter((node) => node.type === "SECTION");
+        if (sections.length > 0) {
+          throw new Error(
+            `group_nodes cannot group ${sections.map((node) => `${node.id} "${node.name}"`).join(", ")}: a group cannot contain a SECTION, because Figma keeps a section outside the frame tree. Call create_section with nodeIds to put these nodes in a new section instead.`
+          );
+        }
+
         const explicitParentId = request.params?.parentId;
         let parent: BaseNode & ChildrenMixin;
         if (typeof explicitParentId === "string") {
