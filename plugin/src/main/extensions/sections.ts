@@ -5,6 +5,7 @@ import {
   moveKeepingCanvasPosition,
   pageOf,
   parseHexColor,
+  sectionAncestorsOf,
   supportsChildren,
 } from "../shared";
 import type { SectionParent } from "../shared";
@@ -97,24 +98,6 @@ const readSectionById = async (
     );
   }
   return node;
-};
-
-/**
- * The sections a node sits inside, nearest first.
- *
- * Only a page or another section holds a section, so for a section this chain
- * is also how deeply it is nested.
- * @param node - The node to walk up from.
- * @returns The sections around it, nearest first.
- */
-const sectionAncestorsOf = (node: SceneNode): SectionNode[] => {
-  const chain: SectionNode[] = [];
-  let current: BaseNode | null = node.parent;
-  while (current) {
-    if (current.type === "SECTION") chain.push(current);
-    current = current.parent;
-  }
-  return chain;
 };
 
 /**

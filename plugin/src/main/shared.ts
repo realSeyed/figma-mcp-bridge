@@ -173,6 +173,24 @@ export const ancestorIdsOf = (node: BaseNode): Set<string> => {
 };
 
 /**
+ * The sections a node sits inside, nearest first.
+ *
+ * Only a page or another section holds a section, so for a section this chain
+ * is also how deeply it is nested.
+ * @param node - The node to walk up from.
+ * @returns The sections around it, nearest first.
+ */
+export const sectionAncestorsOf = (node: SceneNode): SectionNode[] => {
+  const chain: SectionNode[] = [];
+  let current: BaseNode | null = node.parent;
+  while (current) {
+    if (current.type === "SECTION") chain.push(current);
+    current = current.parent;
+  }
+  return chain;
+};
+
+/**
  * A container a section can sit in, and that a section's children sit in.
  *
  * Figma keeps a section outside the frame tree: its parent is a page or

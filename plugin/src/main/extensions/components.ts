@@ -5,6 +5,7 @@ import {
   pageOf,
   parseHexColor,
   positionNode,
+  sectionAncestorsOf,
   supportsChildren,
 } from "../shared";
 import {
@@ -777,11 +778,15 @@ const detachInstance = async (req: ExtensionRequest): Promise<unknown> => {
 };
 
 /**
- * Lists the components and the component sets of a page or of the whole file.
+ * Lists the components and the component sets of a page, of one section, or of
+ * the whole file.
  *
  * A variant is not listed on its own: it belongs to its set, which carries it
  * under `variantProperties`, and a file of 4-variant sets would otherwise read
  * as five times as many entries as it has components.
+ *
+ * Each item names the nearest section that holds it, so a file that organises
+ * its components in sections can be read one section at a time.
  * @param req - The extension request.
  * @returns The items and whether the limit cut the list short.
  */
@@ -794,6 +799,7 @@ const listComponents = async (req: ExtensionRequest): Promise<unknown> => {
     );
   }
   const query = readOptionalString(req.params, "query", tool);
+  const sectionId = readOptionalString(req.params, "sectionId", tool);
 
   let limit = DEFAULT_LIST_LIMIT;
   const rawLimit = req.params.limit;
@@ -806,8 +812,30 @@ const listComponents = async (req: ExtensionRequest): Promise<unknown> => {
     limit = Math.min(rawLimit, MAX_LIST_LIMIT);
   }
 
+  let section: SectionNode | null = null;
+  if (sectionId !== undefined) {
+    const node = await figma.getNodeByIdAsync(sectionId);
+    if (!node) {
+      throw new Error(
+        `${tool} found no node with the ID ${sectionId} for sectionId. Call list_sections to list the sections of this file.`
+      );
+    }
+    if (node.type !== "SECTION") {
+      throw new Error(
+        `${tool} requires sectionId to name a SECTION, but ${sectionId} "${node.name}" is a ${node.type} node. Call list_sections for a section ID, or drop sectionId to list a whole page.`
+      );
+    }
+    section = node;
+  }
+
   let found: readonly (PageNode | SceneNode)[];
-  if (rawScope === "allPages") {
+  if (section) {
+    // A section sits on one page, so searching its own subtree answers the
+    // question whatever scope says, and reads far less of the file.
+    const page = pageOf(section);
+    if (page) await page.loadAsync();
+    found = section.findAllWithCriteria({ types: ["COMPONENT", "COMPONENT_SET"] });
+  } else if (rawScope === "allPages") {
     // Under `dynamic-page` a page's contents stay unloaded until they are
     // asked for, and searching the document is refused until every page is.
     await figma.loadAllPagesAsync();
@@ -830,12 +858,15 @@ const listComponents = async (req: ExtensionRequest): Promise<unknown> => {
 
   const items = matched.slice(0, limit).map((node) => {
     const page = pageOf(node);
+    const holder = sectionAncestorsOf(node)[0] ?? null;
     const item = {
       type: node.type,
       id: node.id,
       name: node.name,
       pageId: page ? page.id : null,
       pageName: page ? page.name : null,
+      sectionId: holder ? holder.id : null,
+      sectionName: holder ? holder.name : null,
       description: node.description,
     };
     if (node.type === "COMPONENT") return item;
