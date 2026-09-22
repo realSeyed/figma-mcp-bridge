@@ -1,11 +1,14 @@
-import { pageOf, parseHexColor } from "../shared";
+import { pageOf, parseHexColor, supportsChildren } from "../shared";
 import {
   describeValue,
   describeWriteError,
   messageOf,
   readBatchArray,
+  readOptionalBoolean,
   readOptionalNumber,
   readOptionalString,
+  readRequiredString,
+  runBatchWrites,
   validationError,
 } from "./batch";
 import type { ExtensionHandler, ExtensionRequest } from "./types";
@@ -68,16 +71,20 @@ const readNodeId = (req: ExtensionRequest, tool: string, what: string): string =
  * @param tool - The tool name, for the error message.
  * @returns The section.
  */
-const readSectionById = async (nodeId: string, tool: string): Promise<SectionNode> => {
+const readSectionById = async (
+  nodeId: string,
+  tool: string,
+  field = "nodeId"
+): Promise<SectionNode> => {
   const node = await figma.getNodeByIdAsync(nodeId);
   if (!node) {
     throw new Error(
-      `${tool} found no node with the ID ${nodeId}. Call list_sections or get_document to list the node IDs of this file.`
+      `${tool} found no node with the ID ${nodeId} for ${field}. Call list_sections or get_document to list the node IDs of this file.`
     );
   }
   if (node.type !== "SECTION") {
     throw new Error(
-      `${nodeId} "${node.name}" is a ${node.type} node, not a SECTION. ${tool} reads a section; call get_node for any other node.`
+      `${tool} requires ${field} to name a SECTION, but ${nodeId} "${node.name}" is a ${node.type} node. Call list_sections for a section ID, or get_node to read this node instead.`
     );
   }
   return node;
@@ -142,14 +149,83 @@ const loadIfPage = async (container: SectionParent): Promise<void> => {
  * @param node - The node to move.
  * @param parent - The page or section to move it into.
  */
-const moveKeepingCanvasPosition = (node: SceneNode, parent: SectionParent): void => {
+const moveKeepingCanvasPosition = (node: SceneNode, parent: SectionParent, at?: number): void => {
   const before = node.absoluteTransform;
-  parent.appendChild(node);
+  if (at === undefined) parent.appendChild(node);
+  else parent.insertChild(at, node);
   const origin = absoluteOriginOf(parent);
   node.relativeTransform = [
     [before[0][0], before[0][1], before[0][2] - origin.x],
     [before[1][0], before[1][1], before[1][2] - origin.y],
   ];
+};
+
+/**
+ * The IDs of everything a node sits inside, up to the document.
+ * @param node - The node to walk up from.
+ * @returns The ancestor IDs.
+ */
+const ancestorIdsOf = (node: BaseNode): Set<string> => {
+  const ids = new Set<string>();
+  let current: BaseNode | null = node.parent;
+  while (current) {
+    ids.add(current.id);
+    current = current.parent;
+  }
+  return ids;
+};
+
+/**
+ * The instance a node sits inside, if any.
+ * @param node - The node to walk up from.
+ * @returns The nearest instance above it, or null.
+ */
+const instanceAncestorOf = (node: SceneNode): InstanceNode | null => {
+  let current: BaseNode | null = node.parent;
+  while (current) {
+    if (current.type === "INSTANCE") return current;
+    current = current.parent;
+  }
+  return null;
+};
+
+/**
+ * Where a node sits in the stack of its page, as one index per level.
+ *
+ * The nodes of one call can come from different parents, so their stack order
+ * is only defined over the page they share. Comparing two of these paths walks
+ * them together: the first index that differs decides, and a shorter path that
+ * matches all the way belongs to an ancestor, which Figma draws below its own
+ * children.
+ * @param node - The node to place.
+ * @returns The index path, outermost first.
+ */
+const documentOrderKeyOf = (node: SceneNode): number[] => {
+  const path: number[] = [];
+  let current: BaseNode = node;
+  while (current.parent) {
+    const parent: BaseNode = current.parent;
+    const child = current;
+    path.push(
+      supportsChildren(parent) ? parent.children.findIndex((each) => each.id === child.id) : 0
+    );
+    current = parent;
+  }
+  return path.reverse();
+};
+
+/**
+ * Orders two nodes by where they sit in the stack of their page.
+ * @param a - The path of the first node.
+ * @param b - The path of the second node.
+ * @returns A negative number when the first node is drawn below the second.
+ */
+const compareDocumentOrder = (a: readonly number[], b: readonly number[]): number => {
+  const shared = Math.min(a.length, b.length);
+  for (let at = 0; at < shared; at++) {
+    if (a[at] !== b[at]) return a[at] - b[at];
+  }
+  return a.length - b.length;
 };
 
 /** The box, on the canvas, that a section's visible children occupy. */
@@ -738,9 +814,182 @@ const fitSection = async (req: ExtensionRequest): Promise<unknown> => {
   return describeSectionBox(section);
 };
 
+/** One checked node on its way into a section. */
+type MovePlan = {
+  node: SceneNode;
+  /** True when the node already hangs directly off the section. */
+  unchanged: boolean;
+  /** Where the node sat in the stack of the page, before anything moved. */
+  order: number[];
+};
+
+/**
+ * Moves nodes into a section, leaving each one where it is on the canvas.
+ *
+ * Only its own page supplies a section's children, and the nodes it can take
+ * are the ones Figma lets out of where they are: not the section itself, not
+ * anything holding it, not a layer of an instance, and not a variant, which
+ * belongs to its set. A node already hanging off the section is reported and
+ * left alone rather than re-stacked, so a second call changes nothing.
+ *
+ * The moved nodes land on top of what the section already holds, in the order
+ * the page drew them, so nodes that overlap keep overlapping the same way.
+ * @param req - The extension request.
+ * @returns One result per node, and the section's box afterwards.
+ */
+const moveToSection = async (req: ExtensionRequest): Promise<unknown> => {
+  const tool = "move_to_section";
+  const sectionId = readRequiredString(req.params, "sectionId", tool);
+  const fit = readOptionalBoolean(req.params, "fit", tool) ?? false;
+  if (!fit && req.params.padding !== undefined && req.params.padding !== null) {
+    throw new Error(
+      `${tool} takes padding only with fit: true, because padding is the margin the fit leaves around the children. Drop padding, or pass fit: true.`
+    );
+  }
+  const padding = readOptionalNumber(req.params, "padding", tool, 0) ?? DEFAULT_PADDING;
+  // The node IDs travel in the request's own `nodeIds` field, as they do for
+  // the core tools that take a list of nodes, not among the params.
+  const rawNodeIds = readBatchArray({ nodeIds: req.nodeIds }, "nodeIds", tool);
+
+  const section = await readSectionById(sectionId, tool, "sectionId");
+  const sectionPage = pageOf(section);
+  if (sectionPage) await sectionPage.loadAsync();
+  // A node holding the section would end up inside itself, and only a page or
+  // another section holds one, so the whole chain above it is off limits.
+  const holdingTheSection = ancestorIdsOf(section);
+
+  const problems: string[] = [];
+  const plans: MovePlan[] = [];
+  const seen = new Set<string>();
+
+  for (let index = 0; index < rawNodeIds.length; index++) {
+    const rawNodeId = rawNodeIds[index];
+    const fail = (problem: string): void => {
+      problems.push(`items[${index}]: ${problem}`);
+    };
+
+    if (typeof rawNodeId !== "string" || rawNodeId.trim() === "") {
+      fail(
+        `each item must be a node ID such as "4029:12345", received ${describeValue(rawNodeId)}. Call get_document or get_selection to list them.`
+      );
+      continue;
+    }
+    if (seen.has(rawNodeId)) {
+      fail(`${rawNodeId} is named more than once. Give each node one time.`);
+      continue;
+    }
+    seen.add(rawNodeId);
+
+    const node = await figma.getNodeByIdAsync(rawNodeId);
+    if (!node || node.type === "DOCUMENT" || node.type === "PAGE") {
+      fail(
+        `${rawNodeId} is no node of this file, or names a page rather than a node on one. Call get_document or get_selection to list the node IDs of this page.`
+      );
+      continue;
+    }
+    if (node.id === section.id) {
+      fail(
+        `${rawNodeId} is the section named by sectionId, and nothing holds itself. Leave it out of nodeIds, or name another section as sectionId.`
+      );
+      continue;
+    }
+    if (holdingTheSection.has(node.id)) {
+      fail(
+        `${rawNodeId} "${node.name}" is the ${node.type} that holds ${section.id} "${section.name}", so moving it in would put the section inside itself. Call move_out_of_section on the section first, or name a section outside ${rawNodeId}.`
+      );
+      continue;
+    }
+    const instance = instanceAncestorOf(node);
+    if (instance) {
+      fail(
+        `${rawNodeId} "${node.name}" is a layer of the instance ${instance.id} "${instance.name}", and Figma lets no layer leave an instance. Move the instance itself, or call detach_instance on it first.`
+      );
+      continue;
+    }
+    if (node.type === "COMPONENT" && node.parent && node.parent.type === "COMPONENT_SET") {
+      fail(
+        `${rawNodeId} "${node.name}" is a variant of the component set ${node.parent.id} "${node.parent.name}", and a variant only ever sits in its set. Pass ${node.parent.id} instead to move the whole set.`
+      );
+      continue;
+    }
+    const page = pageOf(node);
+    if (page === null || sectionPage === null || page.id !== sectionPage.id) {
+      fail(
+        `${rawNodeId} "${node.name}" is on ${page ? `the page "${page.name}"` : "no page"}, while ${section.id} "${section.name}" is on ${sectionPage ? `"${sectionPage.name}"` : "no page"}. A section holds only nodes of its own page: move the node across first, or name a section on its page.`
+      );
+      continue;
+    }
+
+    plans.push({
+      node,
+      unchanged: node.parent !== null && node.parent.id === section.id,
+      order: documentOrderKeyOf(node),
+    });
+  }
+
+  if (problems.length > 0) throw validationError(tool, problems);
+
+  // A fit with nothing to measure is refused here rather than after the moves,
+  // so a call that cannot finish writes nothing at all. Every node keeps its
+  // own visibility across a move, which makes this exact.
+  const moving = plans.filter((plan) => !plan.unchanged);
+  if (
+    fit &&
+    !section.children.some((child) => child.visible) &&
+    !moving.some((p) => p.node.visible)
+  )
+    throw new Error(
+      `${tool} wrote nothing. fit: true sizes the section to the children it holds, and none would be visible: ${section.id} "${section.name}" would hold ${section.children.length + moving.length} children, all of them hidden. Drop fit, or show a child with set_node_visibility.`
+    );
+
+  // The moved nodes go on top in the order the page drew them, which is only
+  // defined across the page, since they need not share a parent. Each insert
+  // lands the node among the ones already placed, so the group ends up in that
+  // order however the caller listed them.
+  const inStackOrder = [...moving].sort((a, b) => compareDocumentOrder(a.order, b.order));
+  const rankOf = new Map<string, number>();
+  inStackOrder.forEach((plan, rank) => rankOf.set(plan.node.id, rank));
+  const placed = new Array<boolean>(inStackOrder.length).fill(false);
+  let placedCount = 0;
+
+  const { results } = await runBatchWrites(plans, async (plan) => {
+    if (plan.unchanged) return { nodeId: plan.node.id, unchanged: true };
+    const rank = rankOf.get(plan.node.id) ?? 0;
+    let below = 0;
+    for (let lower = 0; lower < rank; lower++) if (placed[lower]) below++;
+    moveKeepingCanvasPosition(plan.node, section, section.children.length - placedCount + below);
+    placed[rank] = true;
+    placedCount++;
+    return { nodeId: plan.node.id };
+  });
+
+  // A batch that stopped leaves the section holding half the move, and a fit
+  // would then draw the box around that half. The results say what landed.
+  if (fit && results.every((entry) => entry.ok)) {
+    try {
+      fitSectionToContents(section, padding, tool);
+    } catch (err) {
+      throw new Error(
+        `${tool} moved ${plans.length === 1 ? "the node" : `all ${plans.length} nodes`} into ${section.id} "${section.name}", but could not then fit the section around them: ${messageOf(err)} Call fit_section on ${section.id} to finish.`
+      );
+    }
+  }
+
+  // Read last, because a fit slides every child, so the position a node holds
+  // the moment it lands is not the position it ends the call at.
+  for (const entry of results) {
+    if (!entry.ok) continue;
+    entry.x = plans[entry.index].node.x;
+    entry.y = plans[entry.index].node.y;
+  }
+
+  return { results, section: describeSectionBox(section) };
+};
+
 export const sectionsHandlers = {
   list_sections: { edit: false, run: listSections },
   get_section: { edit: false, run: getSection },
   create_section: { edit: true, run: createSection },
   fit_section: { edit: true, run: fitSection },
+  move_to_section: { edit: true, run: moveToSection },
 } satisfies Record<string, ExtensionHandler>;

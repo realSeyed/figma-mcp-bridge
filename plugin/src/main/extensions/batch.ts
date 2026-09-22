@@ -84,6 +84,26 @@ export const readOptionalNumber = (
 };
 
 /**
+ * Reads an optional boolean parameter.
+ * @param params - The request params.
+ * @param key - The parameter name.
+ * @param tool - The tool name, for the error message.
+ * @returns The value, or undefined when the parameter is absent.
+ */
+export const readOptionalBoolean = (
+  params: Record<string, unknown>,
+  key: string,
+  tool: string
+): boolean | undefined => {
+  const value = params[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "boolean") {
+    throw new Error(`${tool} requires ${key} as true or false, received ${describeValue(value)}.`);
+  }
+  return value;
+};
+
+/**
  * Names the type of a value for an error message.
  * @param raw - The value.
  * @returns A phrase such as "a string".

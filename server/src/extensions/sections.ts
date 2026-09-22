@@ -13,8 +13,8 @@ import type { ExtensionRpcMap, ExtensionSchemaMap } from "./types.js";
  * Importing `schema.js` or `tools.js` here would close an import cycle.
  */
 
-/** The most nodes one create_section call wraps. */
-const MAX_WRAPPED_NODES = 200;
+/** The most nodes one create_section or move_to_section call takes. */
+const MAX_NODES_PER_CALL = 200;
 
 /**
  * The two forms of `create_section`: wrapping existing nodes, or building an
@@ -27,7 +27,7 @@ const createSectionShape = z.object({
   nodeIds: z
     .array(createFigmaNodeIdSchema())
     .min(1)
-    .max(MAX_WRAPPED_NODES)
+    .max(MAX_NODES_PER_CALL)
     .optional()
     .describe(
       "1 to 200 nodes to wrap in a new section, all sharing one parent. Give this, or width and height."
@@ -80,6 +80,38 @@ const createSectionInput = createSectionShape
     "create_section takes padding only with nodeIds: padding is the margin left around the wrapped nodes"
   );
 
+/**
+ * `move_to_section`, whose `padding` belongs to its `fit` form.
+ *
+ * As above, `server.tool` takes the object's `.shape`, which a refinement
+ * would hide, so the plain object and the refined schema are kept apart.
+ */
+const moveToSectionShape = z.object({
+  sectionId: createFigmaNodeIdSchema().describe("The section to move the nodes into"),
+  nodeIds: z
+    .array(createFigmaNodeIdSchema())
+    .min(1)
+    .max(MAX_NODES_PER_CALL)
+    .describe("1 to 200 nodes to move into the section. Every one must be on the section's page."),
+  fit: z
+    .boolean()
+    .optional()
+    .describe(
+      "Size the section to what it then holds, as fit_section does. Defaults to false, which leaves the section's box alone."
+    ),
+  padding: z
+    .number()
+    .min(0)
+    .optional()
+    .describe("Margin the fit leaves on each side, in pixels, defaulting to 80. Takes fit: true."),
+  fileKey: fileKeyField,
+});
+
+const moveToSectionInput = moveToSectionShape.refine(
+  (value) => value.fit === true || value.padding === undefined,
+  "move_to_section takes padding only with fit: true: padding is the margin the fit leaves around the children"
+);
+
 /** Tool name to Zod object schema. Spread into `toolInputSchemas`. */
 export const schemas = {
   list_sections: z.object({
@@ -110,6 +142,8 @@ export const schemas = {
 
   create_section: createSectionInput,
 
+  move_to_section: moveToSectionInput,
+
   fit_section: z.object({
     nodeId: createFigmaNodeIdSchema().describe("The section to fit around its children"),
     padding: z
@@ -126,6 +160,7 @@ export const rpcToArgs = {
   list_sections: (_nodeIds, params) => ({ ...params }),
   get_section: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
   create_section: (nodeIds, params) => ({ nodeIds, ...params }),
+  move_to_section: (nodeIds, params) => ({ nodeIds, ...params }),
   fit_section: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
 } satisfies ExtensionRpcMap;
 
@@ -167,6 +202,18 @@ export function register(server: McpServer, node: Node): void {
       if (!parsed.success) return parsed.error;
       const { fileKey, nodeIds, ...params } = parsed.data;
       return renderResponse(() => node.sendWithParams("create_section", nodeIds, params, fileKey));
+    }
+  );
+
+  server.tool(
+    "move_to_section",
+    "Move nodes into a section, leaving every one of them exactly where it is on the canvas. Only a section's own page supplies its children, so each node must already be on that page; move it across first if it is not. A node that already hangs off the section is reported with unchanged: true and left alone, so a second call is a no-op, and the nodes that do move land on top of what the section holds, in the order the page drew them. Refused: the section itself, anything holding it, a layer of an instance, and a variant, which only ever sits in its set — pass the set instead. Every node is checked before the first write, so a refusal moves nothing. With fit: true the section is then sized to what it holds, as fit_section does. results gives each node's position relative to the section, and section its box after the call. When multiple files are connected, specify fileKey.",
+    moveToSectionShape.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(moveToSectionInput, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, nodeIds, ...params } = parsed.data;
+      return renderResponse(() => node.sendWithParams("move_to_section", nodeIds, params, fileKey));
     }
   );
 
