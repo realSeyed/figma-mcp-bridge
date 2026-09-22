@@ -423,7 +423,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "reparent_nodes",
-    "Move one or more nodes into a different parent container. When multiple files are connected, specify fileKey.",
+    "Move one or more nodes into a different parent container. Each node keeps its own x and y, which are read against the new parent, so it moves on the canvas when the parents sit at different places — move_to_section and move_out_of_section keep the canvas position instead. A SECTION can only be moved to a page or to another section, because Figma keeps a section outside the frame tree. Every node is checked before the first move, so a refused call moves nothing. When multiple files are connected, specify fileKey.",
     toolInputSchemas.reparent_nodes.shape,
     async ({ nodeIds, parentId, fileKey }): Promise<ToolResult> => {
       return renderResponse(() =>

@@ -158,6 +158,21 @@ export const pageOf = (node: BaseNode): PageNode | null => {
 };
 
 /**
+ * The IDs of everything a node sits inside, up to the document.
+ * @param node - The node to walk up from.
+ * @returns The ancestor IDs.
+ */
+export const ancestorIdsOf = (node: BaseNode): Set<string> => {
+  const ids = new Set<string>();
+  let current: BaseNode | null = node.parent;
+  while (current) {
+    ids.add(current.id);
+    current = current.parent;
+  }
+  return ids;
+};
+
+/**
  * A container a section can sit in, and that a section's children sit in.
  *
  * Figma keeps a section outside the frame tree: its parent is a page or

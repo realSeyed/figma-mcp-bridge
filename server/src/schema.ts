@@ -699,7 +699,9 @@ export const toolInputSchemas = {
 
   reparent_nodes: z.object({
     nodeIds: z.array(createFigmaNodeIdSchema()).min(1).describe("List of node IDs to move"),
-    parentId: createFigmaNodeIdSchema().describe("Destination parent node ID"),
+    parentId: createFigmaNodeIdSchema().describe(
+      "Destination parent node ID: a page, a frame, a group, a component, or a section. A section only accepts a page or another section as its own parent."
+    ),
     fileKey: fileKeyField,
   }),
 

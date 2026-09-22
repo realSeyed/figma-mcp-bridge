@@ -4,6 +4,7 @@ import { addLayersToFrame } from "../html-figma/figma";
 import { getExtensionHandler } from "./extensions";
 import type { ExtensionHandler, ExtensionRequestType } from "./extensions";
 import {
+  ancestorIdsOf,
   appendToParentIfProvided,
   ensureFont,
   getParentNodeById,
@@ -1506,10 +1507,54 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         }
 
         const parent = await getParentNodeById(parentId);
-        const moved = [];
+        const holdingTheParent = ancestorIdsOf(parent);
 
-        for (const nodeId of request.nodeIds) {
-          const node = await getSceneNodeById(nodeId);
+        // Every node is examined before the first move, so a batch that names
+        // one node Figma refuses leaves the whole call where it started rather
+        // than moving the nodes ahead of it and stopping half way.
+        const nodes: SceneNode[] = [];
+        const problems: string[] = [];
+        for (let index = 0; index < request.nodeIds.length; index++) {
+          const nodeId = request.nodeIds[index];
+          const fail = (problem: string) => problems.push(`nodeIds[${index}]: ${problem}`);
+
+          let node: SceneNode;
+          try {
+            node = await getSceneNodeById(nodeId);
+          } catch {
+            fail(
+              `node not found: ${nodeId}. Call get_document or get_selection to list the node IDs of this page.`
+            );
+            continue;
+          }
+          if (node.id === parent.id) {
+            fail(
+              `${nodeId} "${node.name}" is parentId itself, and a node cannot hold itself. Name a different parent.`
+            );
+            continue;
+          }
+          if (holdingTheParent.has(node.id)) {
+            fail(
+              `${nodeId} "${node.name}" already contains parentId ${parent.id} "${parent.name}", and moving it inside its own descendant would cut the tree loose. Move ${parent.id} out first, or name a parent outside ${nodeId}.`
+            );
+            continue;
+          }
+          if (node.type === "SECTION" && parent.type !== "PAGE" && parent.type !== "SECTION") {
+            fail(
+              `${nodeId} "${node.name}" is a SECTION, and Figma keeps a section outside the frame tree, so parentId must name a page or another section, not the ${parent.type} ${parent.id} "${parent.name}". Name a page or a section, or call create_section to wrap the content instead.`
+            );
+            continue;
+          }
+          nodes.push(node);
+        }
+        if (problems.length > 0) {
+          throw new Error(
+            `reparent_nodes moved nothing. Correct these nodes and call it again:\n${problems.join("\n")}`
+          );
+        }
+
+        const moved = [];
+        for (const node of nodes) {
           parent.appendChild(node);
           moved.push({
             nodeId: node.id,
