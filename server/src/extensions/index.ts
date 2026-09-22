@@ -3,6 +3,7 @@ import type { Node } from "../node.js";
 import * as variables from "./variables.js";
 import * as typography from "./typography.js";
 import * as components from "./components.js";
+import * as sections from "./sections.js";
 
 export type {
   ExtensionRegister,
@@ -23,6 +24,7 @@ export const extensionSchemas = {
   ...variables.schemas,
   ...typography.schemas,
   ...components.schemas,
+  ...sections.schemas,
 };
 
 /** Every extension RPC mapper, merged from the area files. */
@@ -30,6 +32,7 @@ export const extensionRpcToArgs = {
   ...variables.rpcToArgs,
   ...typography.rpcToArgs,
   ...components.rpcToArgs,
+  ...sections.rpcToArgs,
 };
 
 /**
@@ -41,4 +44,5 @@ export function registerExtensionTools(server: McpServer, node: Node): void {
   variables.register(server, node);
   typography.register(server, node);
   components.register(server, node);
+  sections.register(server, node);
 }

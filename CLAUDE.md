@@ -2,7 +2,7 @@
 
 ## 1. Goal
 
-This fork adds component, variable, and text style tools to the Figma MCP bridge. All of them must work on a free (Starter) Figma account.
+This fork adds component, variable, text style, and section tools to the Figma MCP bridge. All of them must work on a free (Starter) Figma account.
 
 ## 2. Scope
 
@@ -42,6 +42,7 @@ of an error that does not carry it, thus a handler throws cause and correction o
 | `plugin/src/main/extensions/variables.ts`  | Variable and variable collection handlers.                                             |
 | `plugin/src/main/extensions/typography.ts` | Text style handlers.                                                                   |
 | `plugin/src/main/extensions/components.ts` | Component and component set handlers.                                                  |
+| `plugin/src/main/extensions/sections.ts`   | Section handlers.                                                                      |
 | `plugin/src/ui/App.tsx`                    | The plugin window. Holds the WebSocket.                                                |
 | `server/src/index.ts`                      | Start. Reads `FIGMA_BRIDGE_PORT`. The default is 1995.                                 |
 | `server/src/schema.ts`                     | `toolInputSchemas` and `rpcToArgs` of the core tools.                                  |
@@ -53,6 +54,7 @@ of an error that does not carry it, thus a handler throws cause and correction o
 | `server/src/extensions/variables.ts`       | Variable and variable collection tools.                                                |
 | `server/src/extensions/typography.ts`      | Text style tools.                                                                      |
 | `server/src/extensions/components.ts`      | Component and component set tools.                                                     |
+| `server/src/extensions/sections.ts`        | Section tools.                                                                         |
 | `server/scripts/e2e-free-plan.ts`          | The end-to-end script. Drives every extension tool against a real file.                |
 
 An extension file must not import `schema.ts` or `tools.ts`; this prevents an import cycle.
@@ -84,7 +86,12 @@ It imports only `schema-common.ts`, `tool-helpers.ts`, packages, and types.
    `{ index, ok: true, ... }`, `{ index, ok: false, error }`, or `error: "not written"`.
 10. A delete tool stops with an error if `confirm` is not `true`.
 11. Load all affected fonts before a text change.
-12. Each error message gives the field, the cause, and the correction. `runExtension` adds
+12. A tool that moves a node to another parent keeps it where it is on the canvas. Read
+    the `absoluteTransform` of the node before the move. After the move, set its
+    `relativeTransform` from that value, less the absolute position of the new parent.
+    Pages and sections do not rotate. `reparent_nodes` is the exception: it calls
+    `appendChild` only.
+13. Each error message gives the field, the cause, and the correction. `runExtension` adds
     the tool name.
 
 ## 7. Commands

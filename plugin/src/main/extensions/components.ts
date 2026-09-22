@@ -2,6 +2,7 @@ import {
   getParentNodeById,
   getSceneNodeById,
   loadFontsForTextNode,
+  pageOf,
   parseHexColor,
   positionNode,
   supportsChildren,
@@ -11,6 +12,8 @@ import {
   describeWriteError,
   messageOf,
   readBatchArray,
+  readOptionalNumber,
+  readOptionalString,
   readRequiredString,
   runBatchWrites,
   validationError,
@@ -37,56 +40,6 @@ const MAX_LIST_LIMIT = 500;
 
 const VARIANT_NAME_FORM =
   'use "Property=Value", or several pairs separated by commas, as in "Size=Small, State=Hover"';
-
-/**
- * Reads an optional string parameter.
- *
- * A null arrives from a client that spells an absent field out rather than
- * omitting it, so it is read as absent instead of as a bad value.
- * @param params - The request params.
- * @param key - The parameter name.
- * @param tool - The tool name, for the error message.
- * @returns The value, or undefined when the parameter is absent.
- */
-const readOptionalString = (
-  params: Record<string, unknown>,
-  key: string,
-  tool: string
-): string | undefined => {
-  const value = params[key];
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(
-      `${tool} requires ${key} as a non-empty string, received ${describeValue(value)}.`
-    );
-  }
-  return value;
-};
-
-/**
- * Reads an optional number parameter.
- * @param params - The request params.
- * @param key - The parameter name.
- * @param tool - The tool name, for the error message.
- * @param min - The smallest value the parameter accepts, when it has one.
- * @returns The value, or undefined when the parameter is absent.
- */
-const readOptionalNumber = (
-  params: Record<string, unknown>,
-  key: string,
-  tool: string,
-  min?: number
-): number | undefined => {
-  const value = params[key];
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`${tool} requires ${key} as a number, received ${describeValue(value)}.`);
-  }
-  if (min !== undefined && value < min) {
-    throw new Error(`${tool} requires ${key} to be ${min} or more, received ${value}.`);
-  }
-  return value;
-};
 
 /** The properties a variant name carries, or the reason the name is not one. */
 type VariantNameResult =
@@ -297,20 +250,6 @@ const findInstanceAncestor = (node: SceneNode): InstanceNode | null => {
   let current: BaseNode | null = node.parent;
   while (current) {
     if (current.type === "INSTANCE") return current;
-    current = current.parent;
-  }
-  return null;
-};
-
-/**
- * Names the page a node sits on.
- * @param node - The node to check.
- * @returns The page, or null when the node hangs outside the page tree.
- */
-const pageOf = (node: BaseNode): PageNode | null => {
-  let current: BaseNode | null = node;
-  while (current) {
-    if (current.type === "PAGE") return current;
     current = current.parent;
   }
   return null;

@@ -29,7 +29,7 @@ It also includes a small, opt-in set of **write tools** for safe agent-driven ed
 
 ## Fork scope: free Figma plan
 
-This fork adds component, variable, and text style tools on top of the stock bridge. Every one of them works on a free (Starter) Figma account: they use the Figma Plugin API rather than the REST API, and nothing here asks for a paid seat.
+This fork adds component, variable, text style, and section tools on top of the stock bridge. Every one of them works on a free (Starter) Figma account: they use the Figma Plugin API rather than the REST API, and nothing here asks for a paid seat.
 
 The plugin is named **Figma MCP Bridge (Fork)** and the bridge listens on **port 1995**, so it runs beside a stock bridge on 1994 without a port clash. Override it with `FIGMA_BRIDGE_PORT`.
 
@@ -40,8 +40,9 @@ The plugin is named **Figma MCP Bridge (Fork)** and the bridge listens on **port
 | **Variables**   | `create_variable_collection`, `update_variable_collection`, `delete_variable_collection`, `create_variables`, `update_variables`, `delete_variables`, `bind_variables`                                                                                                                       |
 | **Text styles** | `list_fonts`, `create_text_style`, `update_text_style`, `delete_text_style`, `apply_text_style`                                                                                                                                                                                              |
 | **Components**  | `list_components`, `get_component`, `get_instance`, `create_component`, `combine_as_variants`, `create_instance`, `swap_instance`, `detach_instance`, `add_component_property`, `edit_component_property`, `delete_component_property`, `bind_component_property`, `set_instance_properties` |
+| **Sections**    | `list_sections`, `get_section`, `create_section`, `move_to_section`, `move_out_of_section`, `fit_section`                                                                                                                                                                                    |
 
-The read tools grew with them: `get_variable_defs` reports each collection's `defaultModeId` and each variable's `description` and `scopes`, `get_styles` reports a text style's `description`, `paragraphSpacing`, `paragraphIndent`, `textCase`, `leadingTrim`, and `boundVariables`, and a node reports its `boundVariables`, `textStyleId`, and `componentProperties`.
+The read tools grew with them: `get_variable_defs` reports each collection's `defaultModeId` and each variable's `description` and `scopes`, `get_styles` reports a text style's `description`, `paragraphSpacing`, `paragraphIndent`, `textCase`, `leadingTrim`, and `boundVariables`, and a node reports its `boundVariables`, `textStyleId`, `componentProperties`, and, on a collapsed section, `sectionContentsHidden`.
 
 ### Not supported
 
@@ -176,6 +177,12 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 | `delete_component_property`    | Delete a component property with explicit confirmation                                                            |
 | `bind_component_property`      | Point a layer's `characters`, `visible`, or `mainComponent` at a component property, or remove the link           |
 | `set_instance_properties`      | Set the property values of one instance, including which variant of a set it is                                   |
+| `list_sections`                | List the sections of the current page or of the whole file, with their nesting                                    |
+| `get_section`                  | Read one section: its children, where its content really sits, and what hangs outside it                          |
+| `create_section`               | Create a section, empty at a given size or wrapped around nodes that are already there                            |
+| `move_to_section`              | Move nodes into a section without moving them on the canvas, and optionally fit it around them                    |
+| `move_out_of_section`          | Lift nodes out of their section to whatever holds it, without moving them on the canvas                           |
+| `fit_section`                  | Draw a section tight around the children it holds, leaving padding, without moving any of them                    |
 
 All tools accept an optional `fileKey` parameter when multiple Figma files are connected. Use `list_files` to discover connected files and their keys.
 
@@ -217,6 +224,13 @@ All tools accept an optional `fileKey` parameter when multiple Figma files are c
 - A property lives on the component set rather than on one of its variants, so a variant ID is refused with the ID of its set — a property added to the set reaches every variant. A `VARIANT` property is an axis of a set: it is refused on a single component, takes no default value because the set's first variant is the default, and `delete_component_property` cannot remove it. Rename the variants so they no longer name it instead.
 - `bind_component_property` matches the field to the property type: `characters` reads a `TEXT` property and belongs to a text layer, `visible` reads a `BOOLEAN` property, and `mainComponent` reads an `INSTANCE_SWAP` property and belongs to an instance layer. The layer must sit inside the component, or inside one variant of the set, that owns the property; a layer inside an instance is refused, because the link lives on the main component. The other links on the layer are kept, and `propertyName: null` removes one and leaves the layer as it looks.
 - `set_instance_properties` checks every value against the property it names before the first write and hands them to Figma in one call, so a call with a bad value leaves the instance as it was. A `VARIANT` value the set does not have comes back with the values it does have, and the fonts of the text layers a `TEXT` property drives are loaded before the change.
+- Figma keeps a section outside the frame tree: its parent is a page or another section, never a frame, a group, a component, or an instance. `create_section` refuses a `parentId` that is one of those, and refuses to wrap a node that sits in one — move it out with `reparent_nodes` first, or wrap the frame itself.
+- `create_section` takes either `nodeIds`, which wraps nodes that already share a parent, or `width` and `height`, which makes an empty section — so `parentId`, `x`, and `y` belong to the second form only, and `padding` to the first. Wrapping keeps every node where it is on the canvas and in the stack: the section is sized to the nodes plus `padding`, takes the stack position of the lowest node, and each node's transform is rewritten against it. Every node is checked before the first write, and a Figma refusal partway through puts the moved nodes back and removes the section.
+- A section does not clip and does not carry its children when it resizes, so a child can end up wholly outside the section that owns it and still be drawn. `get_section` reports `contentBounds`, where the visible children really sit relative to the section, beside the section's own box, and `overflowIds` for the children hanging outside it.
+- `move_to_section`, `move_out_of_section`, and the wrapping form of `create_section` all leave the canvas alone: a node's `x` and `y` are read against its parent, so plain reparenting slides it by the distance between the two containers. Each of these reads the node's `absoluteTransform` before the move and writes it back as `relativeTransform` afterwards, less the new parent's own absolute position. `reparent_nodes` does not — it is the tool for putting a node somewhere, not for keeping it where it is.
+- `move_to_section` takes only nodes on the section's own page, and refuses the section itself, anything holding it, a layer of an instance, and a variant, which only ever sits in its set. A node already hanging off the section comes back with `unchanged: true` and is left alone, so a second call is a no-op; the nodes that do move land on top, ordered by where the page drew them rather than by the order they were listed in. `move_out_of_section` is the way back: each node rises to whatever holds its section and lands directly above it in the stack, and nodes that shared a section keep the order they had inside it.
+- `fit_section` draws a section tight around the children it holds, and `move_to_section` runs the same fit with `fit: true`. A section is the one container that does not carry its children when it resizes, so its box and the box of its content drift apart as the content is edited; fitting pulls them back together without moving anything on the canvas — the section takes the box of its visible content plus `padding`, and every child slides back by the distance the section travelled. Hidden children are measured out of the box but slide back with the rest. A section with no visible child is refused, since there would be nothing to measure.
+- `sectionContentsHidden` is reported, never written: collapsing a section is a FigJam feature, and this plugin runs in Figma Design. `devStatus` — Figma's "Ready for dev" and "Completed" — is a Dev Mode feature and is neither read nor written.
 
 ### What You Can Build
 
