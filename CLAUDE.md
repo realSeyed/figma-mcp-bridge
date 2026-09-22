@@ -56,6 +56,7 @@ of an error that does not carry it, thus a handler throws cause and correction o
 | `server/src/extensions/components.ts`      | Component and component set tools.                                                     |
 | `server/src/extensions/sections.ts`        | Section tools.                                                                         |
 | `server/scripts/e2e-free-plan.ts`          | The end-to-end script. Drives every extension tool against a real file.                |
+| `server/scripts/perf-free-plan.ts`         | The measurement script. Holds each tool to 30 seconds and 50,000 characters.           |
 
 An extension file must not import `schema.ts` or `tools.ts`; this prevents an import cycle.
 It imports only `schema-common.ts`, `tool-helpers.ts`, packages, and types.
@@ -101,13 +102,14 @@ It imports only `schema-common.ts`, `tool-helpers.ts`, packages, and types.
 | `bun install`   | Install. Run it in the root, in `server/`, and in `plugin/`.                 |
 | `bun run check` | The server build, the plugin type check, the plugin build, the format check. |
 | `bun run e2e`   | In `server/`. The end-to-end script. Needs the plugin open in a real file.   |
+| `bun run perf`  | In `server/`. The measurement script. Reads `FIGMA_READ_FILE_KEY` as well.   |
 
 Run `bun run check` before each commit. Commit only if the check passes.
 
 ## 8. Live test
 
 1. Run `bun run check`.
-2. The user runs the plugin again in Figma. The user reconnects the `figma-dev` server with `/mcp`.
+2. The user runs the plugin again in Figma. The user reconnects the `figma-bridge` server with `/mcp`.
 3. Use the `fileKey` of the test file in each call.
 4. Put each test node on the page `MCP Test`. Start each test name with `mcp-test/`.
 5. Examine the results with the read tools and with `get_screenshot`.
