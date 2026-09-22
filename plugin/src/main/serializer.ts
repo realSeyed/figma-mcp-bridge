@@ -103,6 +103,7 @@ type SerializedNode = {
   styles?: SerializedStyles;
   boundVariables?: SerializedBoundVariables;
   componentProperties?: Record<string, string | boolean>;
+  sectionContentsHidden?: boolean;
   children?: SerializedNode[];
   childCount?: number;
   truncated?: boolean;
@@ -490,6 +491,13 @@ const serializeSelf = (node: SerializableNode): SerializedNode => {
   if (node.type === "INSTANCE") {
     const componentProperties = serializeComponentProperties(node);
     if (componentProperties) base.componentProperties = componentProperties;
+  }
+
+  // A FigJam flag, and this plugin runs in Figma Design, so it is reported and
+  // never written. False is Figma's default and is left out with the rest of
+  // them; true says the section is collapsed and hides what it holds.
+  if (node.type === "SECTION" && node.sectionContentsHidden) {
+    base.sectionContentsHidden = true;
   }
 
   if (node.type === "TEXT") {
