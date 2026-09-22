@@ -196,13 +196,13 @@ export const absoluteOriginOf = (container: SectionParent): { x: number; y: numb
 };
 
 /**
- * Loads a page so its children can be read and written.
+ * Loads a container that is a page, so its children can be read and written.
  *
  * Under `documentAccess: "dynamic-page"` a page's contents stay unloaded until
- * they are asked for, and a section has one.
- * @param container - The page or section.
+ * they are asked for. Anything else is already readable, so this is a no-op.
+ * @param container - The container to load.
  */
-export const loadIfPage = async (container: SectionParent): Promise<void> => {
+export const loadIfPage = async (container: BaseNode): Promise<void> => {
   if (container.type === "PAGE") await container.loadAsync();
 };
 

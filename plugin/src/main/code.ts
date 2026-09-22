@@ -1479,7 +1479,20 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
           if (!("clone" in node) || typeof node.clone !== "function") {
             throw new Error(`Node does not support duplication: ${node.id}`);
           }
+          const parent = node.parent;
+          const before = node.relativeTransform;
           const clone = node.clone();
+          // `clone()` parents the copy to the open page, so a copy of a node
+          // inside a section or a frame lands somewhere else entirely. Putting
+          // it back directly above its source keeps the pair together in the
+          // layer list, and restoring the transform lands it on the source
+          // rather than wherever the page put it.
+          if (parent && supportsChildren(parent)) {
+            await loadIfPage(parent);
+            const at = parent.children.findIndex((child) => child.id === node.id);
+            parent.insertChild(at + 1, clone);
+            clone.relativeTransform = before;
+          }
           duplicates.push({
             sourceNodeId: node.id,
             nodeId: clone.id,

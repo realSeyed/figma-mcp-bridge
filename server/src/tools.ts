@@ -412,7 +412,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "duplicate_nodes",
-    "Duplicate one or more nodes in place. The duplicates remain under the same parent as the originals. When multiple files are connected, specify fileKey.",
+    "Duplicate one or more nodes in place. Each copy goes into the parent of its source, directly above it in the stack and on top of it on the canvas, so a node inside a section or a frame is copied where it stands. When multiple files are connected, specify fileKey.",
     toolInputSchemas.duplicate_nodes.shape,
     async ({ nodeIds, fileKey }): Promise<ToolResult> => {
       return renderResponse(() =>
