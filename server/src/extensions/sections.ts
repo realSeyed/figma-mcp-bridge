@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Node } from "../node.js";
-import { createFigmaNodeIdSchema, fileKeyField } from "../schema-common.js";
+import { createFigmaNodeIdSchema, createHexColorSchema, fileKeyField } from "../schema-common.js";
 import { parseToolInput, renderResponse } from "../tool-helpers.js";
 import type { ToolResult } from "../tool-helpers.js";
 import type { ExtensionRpcMap, ExtensionSchemaMap } from "./types.js";
@@ -12,6 +12,73 @@ import type { ExtensionRpcMap, ExtensionSchemaMap } from "./types.js";
  * Import only from `schema-common.js`, `tool-helpers.js`, packages, and types.
  * Importing `schema.js` or `tools.js` here would close an import cycle.
  */
+
+/** The most nodes one create_section call wraps. */
+const MAX_WRAPPED_NODES = 200;
+
+/**
+ * The two forms of `create_section`: wrapping existing nodes, or building an
+ * empty section from a size.
+ *
+ * `server.tool` takes the object's `.shape`, which a refinement would hide, so
+ * the plain object and the refined schema are kept apart.
+ */
+const createSectionShape = z.object({
+  nodeIds: z
+    .array(createFigmaNodeIdSchema())
+    .min(1)
+    .max(MAX_WRAPPED_NODES)
+    .optional()
+    .describe(
+      "1 to 200 nodes to wrap in a new section, all sharing one parent. Give this, or width and height."
+    ),
+  padding: z
+    .number()
+    .min(0)
+    .optional()
+    .describe("Margin left around the wrapped nodes, in pixels, defaulting to 80. Takes nodeIds."),
+  width: z.number().min(0.01).optional().describe("Width of a new empty section, in pixels"),
+  height: z.number().min(0.01).optional().describe("Height of a new empty section, in pixels"),
+  name: z.string().min(1).optional().describe("The section name"),
+  parentId: createFigmaNodeIdSchema()
+    .optional()
+    .describe(
+      "The page or the section to put the new section in, defaulting to the current page. A frame, a group, a component, and an instance are refused. Takes no nodeIds."
+    ),
+  x: z
+    .number()
+    .optional()
+    .describe("Position on the x axis, within the parent, defaulting to 0. Takes no nodeIds."),
+  y: z
+    .number()
+    .optional()
+    .describe("Position on the y axis, within the parent, defaulting to 0. Takes no nodeIds."),
+  fillHex: createHexColorSchema()
+    .optional()
+    .describe("Background of the section, e.g. '#F5F5F5'. Without it, Figma's own is kept."),
+  fileKey: fileKeyField,
+});
+
+const createSectionInput = createSectionShape
+  .refine(
+    (value) =>
+      value.nodeIds !== undefined || (value.width !== undefined && value.height !== undefined),
+    "create_section needs nodeIds to wrap existing nodes, or width and height to make an empty section"
+  )
+  .refine(
+    (value) =>
+      value.nodeIds === undefined ||
+      (value.width === undefined &&
+        value.height === undefined &&
+        value.parentId === undefined &&
+        value.x === undefined &&
+        value.y === undefined),
+    "create_section takes nodeIds, or parentId, x, y, width, and height, not both: the wrapped nodes decide where the section goes and how big it is"
+  )
+  .refine(
+    (value) => value.nodeIds !== undefined || value.padding === undefined,
+    "create_section takes padding only with nodeIds: padding is the margin left around the wrapped nodes"
+  );
 
 /** Tool name to Zod object schema. Spread into `toolInputSchemas`. */
 export const schemas = {
@@ -40,12 +107,15 @@ export const schemas = {
     nodeId: createFigmaNodeIdSchema().describe("The section to read"),
     fileKey: fileKeyField,
   }),
+
+  create_section: createSectionInput,
 } satisfies ExtensionSchemaMap;
 
 /** Tool name to RPC wire mapper. Spread into `rpcToArgs`. */
 export const rpcToArgs = {
   list_sections: (_nodeIds, params) => ({ ...params }),
   get_section: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
+  create_section: (nodeIds, params) => ({ nodeIds, ...params }),
 } satisfies ExtensionRpcMap;
 
 /**
@@ -75,6 +145,17 @@ export function register(server: McpServer, node: Node): void {
       if (!parsed.success) return parsed.error;
       const { fileKey, nodeId } = parsed.data;
       return renderResponse(() => node.sendWithParams("get_section", [nodeId], {}, fileKey));
+    }
+  );
+  server.tool(
+    "create_section",
+    "Create a section: Figma's top-level container for organising a page. Give width and height for an empty one, or nodeIds to wrap nodes that are already there. Wrapping keeps every node exactly where it is on the canvas and in the stack, and sizes the section to the nodes plus padding, so the page looks the same afterwards. The nodes must share one parent, and that parent must be a page or another section — Figma keeps a section outside the frame tree, so nothing inside a frame, a group, a component, or an instance can be wrapped where it stands, and parentId, x, y, width, and height belong to the empty form only. Every node is checked before the first write, and a write that fails afterwards is undone: the nodes go back to their old parent, stack position, and position, and the section is removed. When multiple files are connected, specify fileKey.",
+    createSectionShape.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(createSectionInput, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, nodeIds, ...params } = parsed.data;
+      return renderResponse(() => node.sendWithParams("create_section", nodeIds, params, fileKey));
     }
   );
 }
