@@ -86,7 +86,12 @@ It imports only `schema-common.ts`, `tool-helpers.ts`, packages, and types.
    `{ index, ok: true, ... }`, `{ index, ok: false, error }`, or `error: "not written"`.
 10. A delete tool stops with an error if `confirm` is not `true`.
 11. Load all affected fonts before a text change.
-12. Each error message gives the field, the cause, and the correction. `runExtension` adds
+12. A tool that moves a node to another parent keeps it where it is on the canvas. Read
+    the `absoluteTransform` of the node before the move. After the move, set its
+    `relativeTransform` from that value, less the absolute position of the new parent.
+    Pages and sections do not rotate. `reparent_nodes` is the exception: it calls
+    `appendChild` only.
+13. Each error message gives the field, the cause, and the correction. `runExtension` adds
     the tool name.
 
 ## 7. Commands
