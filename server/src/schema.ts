@@ -220,7 +220,7 @@ export const groupNodesInput = z.object({
 
 export const ungroupNodeInput = z.object({
   nodeId: createFigmaNodeIdSchema().describe(
-    "Group or frame to ungroup. Children move up to its parent and the wrapper is removed."
+    "Group, frame, or section to ungroup. Children move up to its parent and the wrapper is removed."
   ),
   fileKey: fileKeyField,
 });

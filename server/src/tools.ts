@@ -443,7 +443,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "ungroup_node",
-    "Ungroup a group or frame — its children move up to its parent and the wrapper is removed. Returns the IDs of the orphaned children in their new parent.",
+    "Ungroup a group, a frame, or a section — its children move up to its parent and the wrapper is removed. Returns the IDs of the orphaned children in their new parent. The children keep their stack order and take the stack position the wrapper held. Ungrouping a section keeps every child exactly where it is on the canvas; its parent is a page or another section, because Figma keeps a section outside the frame tree.",
     ungroupNodeInput.shape,
     async ({ nodeId, fileKey }): Promise<ToolResult> => {
       return renderResponse(() =>

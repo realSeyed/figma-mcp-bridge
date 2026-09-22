@@ -12,6 +12,8 @@ import {
   isSceneNode,
   isTextNode,
   loadFontsForTextNode,
+  loadIfPage,
+  moveKeepingCanvasPosition,
   parseHexColor,
   positionNode,
   resizeNodeIfSupported,
@@ -276,6 +278,35 @@ const runExtension = async (
     if (message.includes(request.type)) throw error;
     throw new Error(`${request.type}: ${message}`);
   }
+};
+
+/**
+ * Ungroups a section: its children move up to its parent and it is removed.
+ *
+ * `figma.ungroup` handles a group and a frame, and both sit inside the frame
+ * tree. A section does not: its parent is a page or another section, so the
+ * move is made by hand here, through the same helper the section tools use to
+ * keep a node where it is on the canvas. The children are inserted one after
+ * another at the stack position the section held, which keeps their order
+ * among themselves and leaves them drawn where the section was.
+ * @param section - The section to ungroup.
+ * @returns The children, in the order they were placed.
+ */
+const ungroupSection = async (section: SectionNode): Promise<SceneNode[]> => {
+  const parent = section.parent;
+  if (!parent || (parent.type !== "PAGE" && parent.type !== "SECTION")) {
+    throw new Error(
+      `ungroup_node cannot ungroup the section ${section.id} "${section.name}": it has no page or section to move its children into. Move it onto a page with reparent_nodes first.`
+    );
+  }
+  await loadIfPage(parent);
+
+  // Snapshot before the first move: the list shrinks as each child leaves.
+  const orphans = [...section.children];
+  const at = parent.children.findIndex((child) => child.id === section.id);
+  orphans.forEach((child, offset) => moveKeepingCanvasPosition(child, parent, at + offset));
+  section.remove();
+  return orphans;
 };
 
 const handleRequest = async (request: ServerRequest): Promise<PluginResponse> => {
@@ -1545,12 +1576,14 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         }
 
         const node = await getSceneNodeById(nodeId);
-        if (node.type !== "GROUP" && node.type !== "FRAME") {
-          throw new Error(`ungroup_node only works on GROUP or FRAME nodes, got ${node.type}`);
+        if (node.type !== "GROUP" && node.type !== "FRAME" && node.type !== "SECTION") {
+          throw new Error(
+            `ungroup_node requires nodeId to name a GROUP, a FRAME, or a SECTION, but ${nodeId} "${node.name}" is a ${node.type} node. Only a container can be ungrouped; call get_node to read this node instead.`
+          );
         }
 
         const parentId = node.parent?.id;
-        const orphans = figma.ungroup(node as GroupNode | FrameNode);
+        const orphans = node.type === "SECTION" ? await ungroupSection(node) : figma.ungroup(node);
 
         return {
           type: request.type,
