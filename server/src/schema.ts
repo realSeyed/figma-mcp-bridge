@@ -212,7 +212,7 @@ export const groupNodesInput = z.object({
   parentId: createFigmaNodeIdSchema()
     .optional()
     .describe(
-      "Optional explicit parent for the new group. Defaults to the shared parent of the input nodes."
+      "Optional explicit parent for the new group: a page, a frame, a group, a component, or a section. Defaults to the shared parent of the input nodes."
     ),
   name: z.string().optional().describe("Optional name for the new group"),
   fileKey: fileKeyField,
@@ -327,7 +327,9 @@ export const createFrameInput = z.object({
   name: z.string().optional().describe("Optional frame name"),
   parentId: createFigmaNodeIdSchema()
     .optional()
-    .describe("Optional parent node ID to append the frame into"),
+    .describe(
+      "Optional parent node ID: a page, a frame, a group, a component, or a section. x and y are relative to it. Defaults to the current page."
+    ),
   x: z.number().optional().describe("Optional x position"),
   y: z.number().optional().describe("Optional y position"),
   width: z.number().positive().optional().describe("Frame width"),
@@ -429,7 +431,9 @@ export const createTextShape = z.object({
   name: z.string().optional().describe("Optional text node name"),
   parentId: createFigmaNodeIdSchema()
     .optional()
-    .describe("Optional parent node ID to append the text into"),
+    .describe(
+      "Optional parent node ID: a page, a frame, a group, a component, or a section. x and y are relative to it. Defaults to the current page."
+    ),
   characters: z.string().optional().describe("Initial text content"),
   fontFamily: z.string().optional().describe("Font family, defaults to Inter"),
   fontStyle: z.string().optional().describe("Font style, defaults to Regular"),
@@ -460,7 +464,9 @@ export const createShapeShape = z.object({
   name: z.string().optional().describe("Optional shape name"),
   parentId: createFigmaNodeIdSchema()
     .optional()
-    .describe("Optional parent node ID to append the shape into"),
+    .describe(
+      "Optional parent node ID: a page, a frame, a group, a component, or a section. x and y are relative to it. Defaults to the current page."
+    ),
   x: z.number().optional().describe("Optional x position"),
   y: z.number().optional().describe("Optional y position"),
   width: z.number().positive().optional().describe("Optional width"),
@@ -512,7 +518,9 @@ export const createImageInput = z.object({
   name: z.string().optional().describe("Optional image node name"),
   parentId: createFigmaNodeIdSchema()
     .optional()
-    .describe("Optional parent node ID to append the image into"),
+    .describe(
+      "Optional parent node ID: a page, a frame, a group, a component, or a section. x and y are relative to it. Defaults to the current page."
+    ),
   x: z.number().optional().describe("Optional x position"),
   y: z.number().optional().describe("Optional y position"),
   width: z.number().positive().optional().describe("Optional width"),
@@ -548,7 +556,7 @@ export const importHtmlLayersInput = z.object({
   parentId: createFigmaNodeIdSchema()
     .optional()
     .describe(
-      "Optional parent node ID (frame/section) to append the wrapper frame into. x/y become relative to that parent."
+      "Optional parent node ID: a page, a frame, a group, a component, or a section. x and y are relative to it. Defaults to the current page."
     ),
   x: z.number().optional().describe("Optional x position of the wrapper frame"),
   y: z.number().optional().describe("Optional y position of the wrapper frame"),

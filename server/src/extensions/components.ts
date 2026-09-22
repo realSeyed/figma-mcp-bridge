@@ -48,7 +48,9 @@ const createComponentShape = z.object({
     ),
   parentId: createFigmaNodeIdSchema()
     .optional()
-    .describe("The frame, group, or page to put the component in, defaulting to the current page"),
+    .describe(
+      "The page, frame, group, component, or section to put the component in, defaulting to the current page. x and y are relative to it."
+    ),
   x: z.number().optional().describe("Position on the x axis, within the parent"),
   y: z.number().optional().describe("Position on the y axis, within the parent"),
   fillHex: createHexColorSchema()
@@ -181,7 +183,7 @@ export const schemas = {
     parentId: createFigmaNodeIdSchema()
       .optional()
       .describe(
-        "The frame, group, or page to put the set in, defaulting to where the components already are"
+        "The page, frame, group, component, or section to put the set in, defaulting to where the components already are"
       ),
     layout: z
       .enum(["ROW", "COLUMN"])
@@ -201,7 +203,9 @@ export const schemas = {
     variantProperties: variantPropertiesField,
     parentId: createFigmaNodeIdSchema()
       .optional()
-      .describe("The frame, group, or page to put the instance in, defaulting to the current page"),
+      .describe(
+        "The page, frame, group, component, or section to put the instance in, defaulting to the current page. x and y are relative to it."
+      ),
     x: z.number().optional().describe("Position on the x axis, within the parent"),
     y: z.number().optional().describe("Position on the y axis, within the parent"),
     fileKey: fileKeyField,
