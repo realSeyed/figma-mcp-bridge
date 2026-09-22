@@ -986,10 +986,140 @@ const moveToSection = async (req: ExtensionRequest): Promise<unknown> => {
   return { results, section: describeSectionBox(section) };
 };
 
+/** One checked node on its way out of the section that holds it. */
+type ExitPlan = {
+  node: SceneNode;
+  section: SectionNode;
+  /** What holds the section: the page, or the section around it. */
+  destination: SectionParent;
+  /** Where the node sat inside its section, before anything moved. */
+  stackIndex: number;
+};
+
+/**
+ * Lifts nodes out of the sections holding them, one level.
+ *
+ * A section's parent is the only place its children can go without leaving the
+ * shape of the page behind, so each node rises to it: the page, or the section
+ * around it. Each node also lands directly above the section it left, which is
+ * where the eye expects it, and the nodes of one section keep the order they
+ * had inside it.
+ *
+ * Nodes from several sections travel in one call, each to its own
+ * destination, so the insert position is read afresh per node rather than
+ * cached: the sections below one already moved have shifted by then.
+ * @param req - The extension request.
+ * @returns One result per node.
+ */
+const moveOutOfSection = async (req: ExtensionRequest): Promise<unknown> => {
+  const tool = "move_out_of_section";
+  // The node IDs travel in the request's own `nodeIds` field, as they do for
+  // the core tools that take a list of nodes, not among the params.
+  const rawNodeIds = readBatchArray({ nodeIds: req.nodeIds }, "nodeIds", tool);
+
+  const problems: string[] = [];
+  const plans: ExitPlan[] = [];
+  const seen = new Set<string>();
+
+  for (let index = 0; index < rawNodeIds.length; index++) {
+    const rawNodeId = rawNodeIds[index];
+    const fail = (problem: string): void => {
+      problems.push(`items[${index}]: ${problem}`);
+    };
+
+    if (typeof rawNodeId !== "string" || rawNodeId.trim() === "") {
+      fail(
+        `each item must be a node ID such as "4029:12345", received ${describeValue(rawNodeId)}. Call get_document or get_selection to list them.`
+      );
+      continue;
+    }
+    if (seen.has(rawNodeId)) {
+      fail(`${rawNodeId} is named more than once. Give each node one time.`);
+      continue;
+    }
+    seen.add(rawNodeId);
+
+    const node = await figma.getNodeByIdAsync(rawNodeId);
+    if (!node || node.type === "DOCUMENT" || node.type === "PAGE") {
+      fail(
+        `${rawNodeId} is no node of this file, or names a page rather than a node on one. Call get_document or get_selection to list the node IDs of this page.`
+      );
+      continue;
+    }
+
+    const section = node.parent;
+    if (!section || section.type !== "SECTION") {
+      fail(
+        `${rawNodeId} "${node.name}" hangs off ${section ? `the ${section.type} ${section.id} "${section.name}"` : "nothing"}, not off a section, so there is no section to leave. ${tool} lifts a node out of the section holding it; call reparent_nodes to take a node out of a frame, a group, or a component.`
+      );
+      continue;
+    }
+    const destination = section.parent;
+    if (!destination || (destination.type !== "PAGE" && destination.type !== "SECTION")) {
+      fail(
+        `${rawNodeId} "${node.name}" sits in the section ${section.id} "${section.name}", which hangs off ${destination ? `a ${destination.type}` : "nothing"}, so the node has nowhere to rise to. Read the page with get_document before calling it again.`
+      );
+      continue;
+    }
+    await loadIfPage(destination);
+
+    plans.push({
+      node,
+      section,
+      destination,
+      stackIndex: section.children.findIndex((child) => child.id === node.id),
+    });
+  }
+
+  if (problems.length > 0) throw validationError(tool, problems);
+
+  // Within one section the nodes keep the order they had, so each is ranked
+  // by where it sat and then inserted among the ones already lifted out of
+  // that same section. Sections are ranked apart, since each group lands above
+  // its own section.
+  const rankOf = new Map<string, number>();
+  const placedPerSection = new Map<string, boolean[]>();
+  const bySection = new Map<string, ExitPlan[]>();
+  for (const plan of plans) {
+    const group = bySection.get(plan.section.id);
+    if (group) group.push(plan);
+    else bySection.set(plan.section.id, [plan]);
+  }
+  for (const [sectionId, group] of bySection) {
+    [...group]
+      .sort((a, b) => a.stackIndex - b.stackIndex)
+      .forEach((plan, rank) => rankOf.set(plan.node.id, rank));
+    placedPerSection.set(sectionId, new Array<boolean>(group.length).fill(false));
+  }
+
+  return await runBatchWrites(plans, async (plan) => {
+    const placed = placedPerSection.get(plan.section.id) ?? [];
+    const rank = rankOf.get(plan.node.id) ?? 0;
+    let below = 0;
+    for (let lower = 0; lower < rank; lower++) if (placed[lower]) below++;
+
+    // The section it left is normally still where it was, and the nodes
+    // already lifted sit right above it. A section that has itself moved out
+    // in this same call is no longer here, and the node then goes on top.
+    const found = plan.destination.children.findIndex((child) => child.id === plan.section.id);
+    const at = found < 0 ? plan.destination.children.length : found + 1 + below;
+    moveKeepingCanvasPosition(plan.node, plan.destination, at);
+    placed[rank] = true;
+
+    return {
+      nodeId: plan.node.id,
+      parentId: plan.destination.id,
+      x: plan.node.x,
+      y: plan.node.y,
+    };
+  });
+};
+
 export const sectionsHandlers = {
   list_sections: { edit: false, run: listSections },
   get_section: { edit: false, run: getSection },
   create_section: { edit: true, run: createSection },
   fit_section: { edit: true, run: fitSection },
   move_to_section: { edit: true, run: moveToSection },
+  move_out_of_section: { edit: true, run: moveOutOfSection },
 } satisfies Record<string, ExtensionHandler>;

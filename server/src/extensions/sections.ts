@@ -144,6 +144,15 @@ export const schemas = {
 
   move_to_section: moveToSectionInput,
 
+  move_out_of_section: z.object({
+    nodeIds: z
+      .array(createFigmaNodeIdSchema())
+      .min(1)
+      .max(MAX_NODES_PER_CALL)
+      .describe("1 to 200 nodes to lift out of the sections holding them"),
+    fileKey: fileKeyField,
+  }),
+
   fit_section: z.object({
     nodeId: createFigmaNodeIdSchema().describe("The section to fit around its children"),
     padding: z
@@ -161,6 +170,7 @@ export const rpcToArgs = {
   get_section: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
   create_section: (nodeIds, params) => ({ nodeIds, ...params }),
   move_to_section: (nodeIds, params) => ({ nodeIds, ...params }),
+  move_out_of_section: (nodeIds, params) => ({ nodeIds, ...params }),
   fit_section: (nodeIds, params) => ({ ...params, nodeId: nodeIds?.[0] }),
 } satisfies ExtensionRpcMap;
 
@@ -214,6 +224,18 @@ export function register(server: McpServer, node: Node): void {
       if (!parsed.success) return parsed.error;
       const { fileKey, nodeIds, ...params } = parsed.data;
       return renderResponse(() => node.sendWithParams("move_to_section", nodeIds, params, fileKey));
+    }
+  );
+
+  server.tool(
+    "move_out_of_section",
+    "Lift nodes out of the sections holding them, one level, leaving every one of them exactly where it is on the canvas. Each node rises to whatever holds its section — the page, or the section around it — and lands directly above that section in the stack, where the eye expects it; nodes that came from one section keep the order they had inside it. Every node's parent must be a section: to take a node out of a frame, a group, or a component, call reparent_nodes instead. Nodes from several sections travel in one call, each to its own destination. Every node is checked before the first write, so a refusal moves nothing. When multiple files are connected, specify fileKey.",
+    schemas.move_out_of_section.shape,
+    async (args): Promise<ToolResult> => {
+      const parsed = parseToolInput(schemas.move_out_of_section, args);
+      if (!parsed.success) return parsed.error;
+      const { fileKey, nodeIds } = parsed.data;
+      return renderResponse(() => node.sendWithParams("move_out_of_section", nodeIds, {}, fileKey));
     }
   );
 
