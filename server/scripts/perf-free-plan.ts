@@ -730,6 +730,14 @@ const measureWrites = async (load: Load): Promise<void> => {
     nodeIds: rectangleIds,
     fit: true,
   });
+
+  // get_section lists at most 200 children, and this section holds exactly
+  // that many, so this is the largest result it can return. It is measured
+  // here rather than only against the read file, because a file is free to
+  // hold no section at all and the cap still has to be held to the budget.
+  await measure("get_section", `${BATCH} children, the listing cap`, "get_section", {
+    nodeId: sectionId,
+  });
 };
 
 // ---------------------------------------------------------------------------
