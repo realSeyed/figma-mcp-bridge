@@ -282,6 +282,26 @@ const runExtension = async (
 };
 
 /**
+ * The error for a property the node does not carry.
+ *
+ * A section draws most of these. It takes a name, a position, a size, a fill,
+ * a stroke, and a corner radius, which reads as a container that should take
+ * the rest as well, and Figma gives it no effects, no rotation, no opacity,
+ * and no auto layout. None of them can be added, so the way through is always
+ * a frame inside the section.
+ * @param tool - The tool the caller asked for.
+ * @param node - The node it was pointed at.
+ * @param property - The property, spelled as the caller would say it.
+ * @returns The error to throw.
+ */
+const unsupportedProperty = (tool: RequestType, node: SceneNode, property: string): Error =>
+  new Error(
+    node.type === "SECTION"
+      ? `${tool} cannot set ${property} on ${node.id} "${node.name}": a SECTION has no ${property}. Call create_frame with this section as parentId and set ${property} on the frame instead.`
+      : `${tool} cannot set ${property} on ${node.id} "${node.name}": a ${node.type} node has no ${property}. Call get_node to read the properties this node carries.`
+  );
+
+/**
  * Ungroups a section: its children move up to its parent and it is removed.
  *
  * `figma.ungroup` handles a group and a frame, and both sit inside the frame
@@ -785,7 +805,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
 
         if (typeof params.rotation === "number") {
           if (!("rotation" in node)) {
-            throw new Error(`Node does not support rotation: ${node.id}`);
+            throw unsupportedProperty("set_node_properties", node, "rotation");
           }
           node.rotation = params.rotation;
           applied.rotation = node.rotation;
@@ -793,7 +813,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
 
         if (typeof params.opacity === "number") {
           if (!("opacity" in node)) {
-            throw new Error(`Node does not support opacity: ${node.id}`);
+            throw unsupportedProperty("set_node_properties", node, "opacity");
           }
           node.opacity = params.opacity;
           applied.opacity = node.opacity;
@@ -920,7 +940,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
 
         const node = await getSceneNodeById(nodeId);
         if (!("effects" in node)) {
-          throw new Error(`Node does not support effects: ${node.id}`);
+          throw unsupportedProperty("set_effects", node, "effects");
         }
 
         const params = request.params ?? {};
@@ -1058,7 +1078,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
 
         const node = await getSceneNodeById(nodeId);
         if (!("layoutMode" in node)) {
-          throw new Error(`Node does not support auto-layout: ${node.id}`);
+          throw unsupportedProperty("set_auto_layout", node, "auto layout");
         }
         const frame = node as FrameNode;
         const params = request.params ?? {};
