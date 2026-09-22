@@ -1481,6 +1481,27 @@ const sectionOrigin = async (sectionId: string): Promise<{ x: number; y: number 
 };
 
 /**
+ * Where a node sits inside the parent holding it.
+ *
+ * The serializer carries a position under `bounds` rather than on the node
+ * itself, so this is where a step comparing positions reads it from.
+ * @param nodeId - The node.
+ * @returns Its box within its parent.
+ */
+const nodeBounds = async (
+  nodeId: string
+): Promise<{ x: number; y: number; width: number; height: number }> => {
+  const node = await okRecord("get_node", { nodeId });
+  const bounds = readRecord(node.bounds, `${nodeId} bounds`);
+  return {
+    x: readNumber(bounds.x, `${nodeId} bounds.x`),
+    y: readNumber(bounds.y, `${nodeId} bounds.y`),
+    width: readNumber(bounds.width, `${nodeId} bounds.width`),
+    height: readNumber(bounds.height, `${nodeId} bounds.height`),
+  };
+};
+
+/**
  * Builds a section, wraps nodes in one, nests one inside another, and drives
  * every tool that carries a node across a section boundary.
  *
@@ -1578,18 +1599,9 @@ const runSectionSteps = async (): Promise<void> => {
     // wrapping had to rewrite their positions or they would have slid.
     const origin = await sectionOrigin(need("wrapSectionId"));
     for (const entry of boxes) {
-      const nodeId = need(entry.key);
-      const child = await okRecord("get_node", { nodeId });
-      atPosition(
-        origin.x + readNumber(child.x, `${nodeId} x`),
-        entry.box.x,
-        `box-${entry.label} on the canvas, in x`
-      );
-      atPosition(
-        origin.y + readNumber(child.y, `${nodeId} y`),
-        entry.box.y,
-        `box-${entry.label} on the canvas, in y`
-      );
+      const child = await nodeBounds(need(entry.key));
+      atPosition(origin.x + child.x, entry.box.x, `box-${entry.label} on the canvas, in x`);
+      atPosition(origin.y + child.y, entry.box.y, `box-${entry.label} on the canvas, in y`);
     }
   });
 
@@ -1747,17 +1759,9 @@ const runSectionSteps = async (): Promise<void> => {
     );
 
     const origin = await sectionOrigin(need("emptySectionId"));
-    const child = await okRecord("get_node", { nodeId: need("movedId") });
-    atPosition(
-      origin.x + readNumber(child.x, "the x of the moved node"),
-      MOVED_BOX.x,
-      "the moved node on the canvas, in x"
-    );
-    atPosition(
-      origin.y + readNumber(child.y, "the y of the moved node"),
-      MOVED_BOX.y,
-      "the moved node on the canvas, in y"
-    );
+    const child = await nodeBounds(need("movedId"));
+    atPosition(origin.x + child.x, MOVED_BOX.x, "the moved node on the canvas, in x");
+    atPosition(origin.y + child.y, MOVED_BOX.y, "the moved node on the canvas, in y");
   });
 
   await step("S6 fit_section redraws a section without moving its child", async () => {
@@ -1794,26 +1798,15 @@ const runSectionSteps = async (): Promise<void> => {
     );
 
     const after = await sectionOrigin(need("emptySectionId"));
-    const child = await okRecord("get_node", { nodeId: need("movedId") });
-    atPosition(
-      after.x + readNumber(child.x, "the x of the child"),
-      onCanvas.x,
-      "the child on the canvas, in x"
-    );
-    atPosition(
-      after.y + readNumber(child.y, "the y of the child"),
-      onCanvas.y,
-      "the child on the canvas, in y"
-    );
+    const child = await nodeBounds(need("movedId"));
+    atPosition(after.x + child.x, onCanvas.x, "the child on the canvas, in x");
+    atPosition(after.y + child.y, onCanvas.y, "the child on the canvas, in y");
   });
 
   await step("S7 move_out_of_section lifts a node back to the page", async () => {
     const origin = await sectionOrigin(need("emptySectionId"));
-    const child = await okRecord("get_node", { nodeId: need("movedId") });
-    const onCanvas = {
-      x: origin.x + readNumber(child.x, "the x of the child"),
-      y: origin.y + readNumber(child.y, "the y of the child"),
-    };
+    const child = await nodeBounds(need("movedId"));
+    const onCanvas = { x: origin.x + child.x, y: origin.y + child.y };
 
     const data = await ok("move_out_of_section", { nodeIds: [need("movedId")] });
     const results = allWritten(data, "move_out_of_section", 1);
@@ -1847,7 +1840,7 @@ const runSectionSteps = async (): Promise<void> => {
     ctx.nestedBoxId = readString(made.nodeId, "create_shape.nodeId");
     const onCanvas = { x: nestedOrigin.x + offset.x, y: nestedOrigin.y + offset.y };
 
-    const data = await okRecord("ungroup_node", { nodeIds: [need("nestedSectionId")] });
+    const data = await okRecord("ungroup_node", { nodeId: need("nestedSectionId") });
     check(
       data.parentId === need("wrapSectionId"),
       `the children rose to ${show(data.parentId)}, expected the section that held the nested one`
@@ -1859,17 +1852,9 @@ const runSectionSteps = async (): Promise<void> => {
     );
 
     const wrapOrigin = await sectionOrigin(need("wrapSectionId"));
-    const freed = await okRecord("get_node", { nodeId: need("nestedBoxId") });
-    atPosition(
-      wrapOrigin.x + readNumber(freed.x, "the x of the freed node"),
-      onCanvas.x,
-      "the freed node on the canvas, in x"
-    );
-    atPosition(
-      wrapOrigin.y + readNumber(freed.y, "the y of the freed node"),
-      onCanvas.y,
-      "the freed node on the canvas, in y"
-    );
+    const freed = await nodeBounds(need("nestedBoxId"));
+    atPosition(wrapOrigin.x + freed.x, onCanvas.x, "the freed node on the canvas, in x");
+    atPosition(wrapOrigin.y + freed.y, onCanvas.y, "the freed node on the canvas, in y");
 
     const listed = await okRecord("list_sections", { query: PREFIX });
     const ids = readRecords(listed.items, "list_sections.items").map((item) => String(item.id));
