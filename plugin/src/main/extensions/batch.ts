@@ -34,6 +34,56 @@ export const readRequiredString = (
 };
 
 /**
+ * Reads an optional string parameter.
+ *
+ * A null arrives from a client that spells an absent field out rather than
+ * omitting it, so it is read as absent instead of as a bad value.
+ * @param params - The request params.
+ * @param key - The parameter name.
+ * @param tool - The tool name, for the error message.
+ * @returns The value, or undefined when the parameter is absent.
+ */
+export const readOptionalString = (
+  params: Record<string, unknown>,
+  key: string,
+  tool: string
+): string | undefined => {
+  const value = params[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(
+      `${tool} requires ${key} as a non-empty string, received ${describeValue(value)}.`
+    );
+  }
+  return value;
+};
+
+/**
+ * Reads an optional number parameter.
+ * @param params - The request params.
+ * @param key - The parameter name.
+ * @param tool - The tool name, for the error message.
+ * @param min - The smallest value the parameter accepts, when it has one.
+ * @returns The value, or undefined when the parameter is absent.
+ */
+export const readOptionalNumber = (
+  params: Record<string, unknown>,
+  key: string,
+  tool: string,
+  min?: number
+): number | undefined => {
+  const value = params[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${tool} requires ${key} as a number, received ${describeValue(value)}.`);
+  }
+  if (min !== undefined && value < min) {
+    throw new Error(`${tool} requires ${key} to be ${min} or more, received ${value}.`);
+  }
+  return value;
+};
+
+/**
  * Names the type of a value for an error message.
  * @param raw - The value.
  * @returns A phrase such as "a string".

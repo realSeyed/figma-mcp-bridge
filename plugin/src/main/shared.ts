@@ -142,3 +142,17 @@ export const serializeVariableValue = (value: VariableValue): unknown => {
   }
   return value;
 };
+
+/**
+ * Names the page a node sits on.
+ * @param node - The node to check.
+ * @returns The page, or null when the node hangs outside the page tree.
+ */
+export const pageOf = (node: BaseNode): PageNode | null => {
+  let current: BaseNode | null = node;
+  while (current) {
+    if (current.type === "PAGE") return current;
+    current = current.parent;
+  }
+  return null;
+};
