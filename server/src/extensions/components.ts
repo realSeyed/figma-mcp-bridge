@@ -35,7 +35,7 @@ const createComponentShape = z.object({
   fromNodeId: createFigmaNodeIdSchema()
     .optional()
     .describe(
-      "A node to convert into a component in place, keeping its children, size, position, and paint. Give this, or width and height."
+      "A node to convert into a component in place, keeping its children, size, position, and paint. A SECTION is refused: put the content in a frame and convert the frame. Give this, or width and height."
     ),
   width: z.number().min(0.01).optional().describe("Width of a new empty component, in pixels"),
   height: z.number().min(0.01).optional().describe("Height of a new empty component, in pixels"),

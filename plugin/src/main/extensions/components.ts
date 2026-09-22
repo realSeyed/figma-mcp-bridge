@@ -403,6 +403,11 @@ const createComponent = async (req: ExtensionRequest): Promise<unknown> => {
         `${fromNodeId} "${source.name}" is already a ${source.type}, so there is nothing to convert. Pass the ID of a frame or another plain node.`
       );
     }
+    if (source.type === "SECTION") {
+      throw new Error(
+        `${fromNodeId} "${source.name}" is a SECTION, and Figma makes a component out of a node in the frame tree, which a section sits outside of. Call create_frame to make a frame, move the content into it with reparent_nodes, and convert that frame instead.`
+      );
+    }
     if (source.type === "INSTANCE") {
       throw new Error(
         `${fromNodeId} "${source.name}" is an INSTANCE, which already follows a main component. Call detach_instance first to turn it into a frame, then convert that frame.`
