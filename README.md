@@ -40,9 +40,9 @@ The plugin is named **Figma MCP Bridge (Fork)** and the bridge listens on **port
 | **Variables**   | `create_variable_collection`, `update_variable_collection`, `delete_variable_collection`, `create_variables`, `update_variables`, `delete_variables`, `bind_variables`                                                                                                                       |
 | **Text styles** | `list_fonts`, `create_text_style`, `update_text_style`, `delete_text_style`, `apply_text_style`                                                                                                                                                                                              |
 | **Components**  | `list_components`, `get_component`, `get_instance`, `create_component`, `combine_as_variants`, `create_instance`, `swap_instance`, `detach_instance`, `add_component_property`, `edit_component_property`, `delete_component_property`, `bind_component_property`, `set_instance_properties` |
-| **Sections**    | `list_sections`, `get_section`, `create_section`, `move_to_section`, `move_out_of_section`, `fit_section`                                                                                                                                                                                    |
+| **Sections**    | `list_sections`, `get_section`, `create_section`, `move_to_section`, `move_out_of_section`, `fit_section`. The core `ungroup_node` takes a section as well as a group or a frame.                                                                                                            |
 
-The read tools grew with them: `get_variable_defs` reports each collection's `defaultModeId` and each variable's `description` and `scopes`, `get_styles` reports a text style's `description`, `paragraphSpacing`, `paragraphIndent`, `textCase`, `leadingTrim`, and `boundVariables`, and a node reports its `boundVariables`, `textStyleId`, `componentProperties`, and, on a collapsed section, `sectionContentsHidden`.
+The read tools grew with them: `get_variable_defs` reports each collection's `defaultModeId` and each variable's `description` and `scopes`, `get_styles` reports a text style's `description`, `paragraphSpacing`, `paragraphIndent`, `textCase`, `leadingTrim`, and `boundVariables`, `list_components` names the nearest section holding each component as `sectionId` and `sectionName`, and a node reports its `boundVariables`, `textStyleId`, `componentProperties`, and, on a collapsed section, `sectionContentsHidden`.
 
 ### Not supported
 
@@ -51,6 +51,8 @@ Everything below needs a paid Figma plan, or a Figma surface these tools deliber
 - **Variable modes.** A free plan gives a collection one mode. There is no tool to add, rename, remove, or select one, and every variable value is written to the collection's default mode.
 - **Team libraries.** The plugin requests no `teamlibrary` permission, calls no `import*ByKeyAsync`, and exposes no publish option. Components, styles, and variables stay local to the file.
 - **Dev Mode and Enterprise features**, such as extended collections. Dev Mode is read-only here: an edit tool called from it stops with an error naming the editor it needs.
+- **`devStatus`.** Figma's "Ready for dev" and "Completed" are a Dev Mode feature. The tools neither read it nor write it.
+- **Hidden section contents.** Collapsing a section is a FigJam feature, and this plugin runs in Figma Design. The read tools report `sectionContentsHidden`; nothing writes it.
 - **`SLOT` component properties.** A slot carries a frame contract these tools do not model, and Figma refuses to set one on an instance. Use an `INSTANCE_SWAP` property instead.
 - **`EASING` and `TIMING` variables.** The variable tools cover `COLOR`, `FLOAT`, `STRING`, and `BOOLEAN`.
 - **The Figma REST API.** Everything runs through the Plugin API over the bridge, which is what keeps the free plan's six-requests-a-month API limit out of the picture.
@@ -94,7 +96,7 @@ Point your AI tool (Cursor, Windsurf, Claude Code, Claude Desktop) at the server
 In Claude Code that is:
 
 ```bash
-claude mcp add figma-dev -- node /path/to/figma-mcp-bridge/server/dist/index.js
+claude mcp add figma-bridge -- node /path/to/figma-mcp-bridge/server/dist/index.js
 ```
 
 ### 3. Add the Figma plugin
@@ -145,10 +147,10 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 | `create_shape`                 | Create a rectangle, ellipse, or line                                                                              |
 | `create_image`                 | Create an image-backed rectangle from a local path, URL, or data URI                                              |
 | `import_html_layers`           | Bulk-import an html-figma layer tree (JSON) as frames, text, rectangles, and vectors                              |
-| `duplicate_nodes`              | Duplicate nodes in place                                                                                          |
+| `duplicate_nodes`              | Duplicate nodes in place — each copy lands in its source's parent, directly above it                              |
 | `reparent_nodes`               | Move nodes into another parent                                                                                    |
 | `group_nodes`                  | Wrap a list of nodes (sharing a parent) in a new group                                                            |
-| `ungroup_node`                 | Ungroup a group or frame — children move up to its parent                                                         |
+| `ungroup_node`                 | Ungroup a group, a frame, or a section — children move up to its parent                                           |
 | `set_selection`                | Set the page selection to a list of node IDs (works in Dev Mode)                                                  |
 | `scroll_and_zoom_into_view`    | Frame the viewport around the given nodes (works in Dev Mode)                                                     |
 | `delete_nodes`                 | Delete nodes with explicit confirmation                                                                           |
@@ -164,7 +166,7 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 | `update_text_style`            | Change the name, font, metrics, or bound variables of a text style                                                |
 | `delete_text_style`            | Delete a text style with explicit confirmation                                                                    |
 | `apply_text_style`             | Apply a text style to up to 200 text nodes, or to one range of characters                                         |
-| `list_components`              | List the local components and component sets of the current page or of the whole file                             |
+| `list_components`              | List the local components and component sets of a page, of one section, or of the whole file                      |
 | `get_component`                | Read one component or component set: its properties, its variants, and its default variant                        |
 | `get_instance`                 | Read one instance: its main component, its property values, and its overrides                                     |
 | `create_component`             | Create a local component, by converting a node or from a width and a height                                       |
@@ -227,9 +229,14 @@ All tools accept an optional `fileKey` parameter when multiple Figma files are c
 - Figma keeps a section outside the frame tree: its parent is a page or another section, never a frame, a group, a component, or an instance. `create_section` refuses a `parentId` that is one of those, and refuses to wrap a node that sits in one — move it out with `reparent_nodes` first, or wrap the frame itself.
 - `create_section` takes either `nodeIds`, which wraps nodes that already share a parent, or `width` and `height`, which makes an empty section — so `parentId`, `x`, and `y` belong to the second form only, and `padding` to the first. Wrapping keeps every node where it is on the canvas and in the stack: the section is sized to the nodes plus `padding`, takes the stack position of the lowest node, and each node's transform is rewritten against it. Every node is checked before the first write, and a Figma refusal partway through puts the moved nodes back and removes the section.
 - A section does not clip and does not carry its children when it resizes, so a child can end up wholly outside the section that owns it and still be drawn. `get_section` reports `contentBounds`, where the visible children really sit relative to the section, beside the section's own box, and `overflowIds` for the children hanging outside it.
-- `move_to_section`, `move_out_of_section`, and the wrapping form of `create_section` all leave the canvas alone: a node's `x` and `y` are read against its parent, so plain reparenting slides it by the distance between the two containers. Each of these reads the node's `absoluteTransform` before the move and writes it back as `relativeTransform` afterwards, less the new parent's own absolute position. `reparent_nodes` does not — it is the tool for putting a node somewhere, not for keeping it where it is.
+- The `x` and `y` of a child are read against the section holding it, not against the page, so carrying a node across a section boundary slides it by the distance between the two containers unless something puts it back. Five tools do, and leave the canvas exactly as it was: the wrapping form of `create_section`, `move_to_section`, `move_out_of_section`, `fit_section`, and `ungroup_node` on a section. Each reads the node's `absoluteTransform` before the move and writes it back as `relativeTransform` afterwards, less the new parent's own absolute position. `reparent_nodes` does not — it is the tool for putting a node somewhere, not for keeping it where it is.
 - `move_to_section` takes only nodes on the section's own page, and refuses the section itself, anything holding it, a layer of an instance, and a variant, which only ever sits in its set. A node already hanging off the section comes back with `unchanged: true` and is left alone, so a second call is a no-op; the nodes that do move land on top, ordered by where the page drew them rather than by the order they were listed in. `move_out_of_section` is the way back: each node rises to whatever holds its section and lands directly above it in the stack, and nodes that shared a section keep the order they had inside it.
 - `fit_section` draws a section tight around the children it holds, and `move_to_section` runs the same fit with `fit: true`. A section is the one container that does not carry its children when it resizes, so its box and the box of its content drift apart as the content is edited; fitting pulls them back together without moving anything on the canvas — the section takes the box of its visible content plus `padding`, and every child slides back by the distance the section travelled. Hidden children are measured out of the box but slide back with the rest. A section with no visible child is refused, since there would be nothing to measure.
+- The core tools know about sections too. `ungroup_node` takes one and moves its children up to the page or section that held it, at the stack position the section had and without moving anything on the canvas. `reparent_nodes` checks every node before the first move, so a refused call moves nothing, and it refuses a section bound for a frame, a node bound for itself, and a node bound for its own descendant. `group_nodes` refuses a section outright, since a group lives inside the frame tree and a section does not — `create_section` with `nodeIds` is the tool for that. `create_component` refuses a section as `fromNodeId` for the same reason: put the content in a frame and convert the frame.
+- `duplicate_nodes` puts each copy in its source's own parent, directly above it in the stack and on top of it on the canvas. Figma's `clone()` parents a copy to the open page, which scattered copies of anything living inside a section or a frame; the tool now moves each copy back and restores its transform.
+- A section takes a fill, a stroke, a corner radius, a name, a position, and a size, and nothing else: no effects, no rotation, no opacity, and no auto layout. `set_effects`, `set_auto_layout`, and `set_node_properties` say so and point at the way through, which is always a frame inside the section.
+- `bind_variables` binds `fills` and `strokes` (COLOR), `visible` (BOOLEAN), and `width`, `height`, `cornerRadius`, the four corner radii, and `strokeWeight` (FLOAT) on a section. `minWidth`, `maxWidth`, `minHeight`, and `maxHeight` are refused: the plugin typings give them to every node through `DimensionAndPositionMixin`, but a live section does not carry them. `strokeWeight` stays a single field on a section rather than spreading over four side weights, because a section has no individual stroke weights.
+- `list_components` names the nearest section holding each component as `sectionId` and `sectionName`, and `sectionId` narrows the listing to one section at any depth. It searches that section's own subtree rather than a page, so it takes the place of `scope`.
 - `sectionContentsHidden` is reported, never written: collapsing a section is a FigJam feature, and this plugin runs in Figma Design. `devStatus` — Figma's "Ready for dev" and "Completed" — is a Dev Mode feature and is neither read nor written.
 
 ### What You Can Build
@@ -265,7 +272,7 @@ bun run format:check  # verify formatting without writing (useful in CI)
 
 ### End-to-end test
 
-`server/scripts/e2e-free-plan.ts` drives every variable, text style, and component tool against a real Figma file on a free (Starter) plan, asserting on the parsed results rather than on the absence of an error. It starts its own `node dist/index.js`, which joins the running bridge as a follower, so it covers the follower-to-leader `/rpc` path as well as the tools.
+`server/scripts/e2e-free-plan.ts` drives every variable, text style, component, and section tool against a real Figma file on a free (Starter) plan, asserting on the parsed results rather than on the absence of an error. It starts its own `node dist/index.js`, which joins the running bridge as a follower, so it covers the follower-to-leader `/rpc` path as well as the tools.
 
 Before running it, build the server, open the plugin in the file you want to test against, and make `MCP E2E` the active page in Figma — the script creates that page on the first run, and `list_components` reads whichever page is open.
 

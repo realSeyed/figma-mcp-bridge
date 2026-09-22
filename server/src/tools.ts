@@ -412,7 +412,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "duplicate_nodes",
-    "Duplicate one or more nodes in place. The duplicates remain under the same parent as the originals. When multiple files are connected, specify fileKey.",
+    "Duplicate one or more nodes in place. Each copy goes into the parent of its source, directly above it in the stack and on top of it on the canvas, so a node inside a section or a frame is copied where it stands. When multiple files are connected, specify fileKey.",
     toolInputSchemas.duplicate_nodes.shape,
     async ({ nodeIds, fileKey }): Promise<ToolResult> => {
       return renderResponse(() =>
@@ -423,7 +423,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "reparent_nodes",
-    "Move one or more nodes into a different parent container. When multiple files are connected, specify fileKey.",
+    "Move one or more nodes into a different parent container. Each node keeps its own x and y, which are read against the new parent, so it moves on the canvas when the parents sit at different places — move_to_section and move_out_of_section keep the canvas position instead. A SECTION can only be moved to a page or to another section, because Figma keeps a section outside the frame tree. Every node is checked before the first move, so a refused call moves nothing. When multiple files are connected, specify fileKey.",
     toolInputSchemas.reparent_nodes.shape,
     async ({ nodeIds, parentId, fileKey }): Promise<ToolResult> => {
       return renderResponse(() =>
@@ -434,7 +434,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "group_nodes",
-    "Wrap a list of nodes in a new group. Nodes must share a common parent (or supply parentId explicitly). Returns the new group's node ID.",
+    "Wrap a list of nodes in a new group. Nodes must share a common parent (or supply parentId explicitly). Returns the new group's node ID. A SECTION cannot go in a group — call create_section with nodeIds for that.",
     groupNodesInput.shape,
     async ({ nodeIds, fileKey, ...params }): Promise<ToolResult> => {
       return renderResponse(() => node.sendWithParams("group_nodes", nodeIds, params, fileKey));
@@ -443,7 +443,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "ungroup_node",
-    "Ungroup a group or frame — its children move up to its parent and the wrapper is removed. Returns the IDs of the orphaned children in their new parent.",
+    "Ungroup a group, a frame, or a section — its children move up to its parent and the wrapper is removed. Returns the IDs of the orphaned children in their new parent. The children keep their stack order and take the stack position the wrapper held. Ungrouping a section keeps every child exactly where it is on the canvas; its parent is a page or another section, because Figma keeps a section outside the frame tree.",
     ungroupNodeInput.shape,
     async ({ nodeId, fileKey }): Promise<ToolResult> => {
       return renderResponse(() =>

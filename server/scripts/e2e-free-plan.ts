@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * End-to-end test of this fork's variable, text style, and component tools
- * against a live Figma file on a free (Starter) plan.
+ * End-to-end test of this fork's variable, text style, component, and section
+ * tools against a live Figma file on a free (Starter) plan.
  *
  * Run it from `server/` with `bun run e2e`, with the Figma plugin connected.
  * The script starts its own `node dist/index.js`. That process joins the
@@ -183,6 +183,32 @@ const near = (actual: number, expected: number, what: string): void =>
   check(Math.abs(actual - expected) <= 0.005, `${what} is ${actual}, expected about ${expected}`);
 
 /**
+ * Fails the step when two positions differ by more than a rounding step.
+ *
+ * Every tool that moves a node across a section boundary rewrites its
+ * transform, so what is checked is that the node came back to the same place
+ * on the canvas rather than to the same bit pattern.
+ * @param actual - The position read back.
+ * @param expected - Where it should be.
+ * @param what - What the number is, for the message.
+ */
+const atPosition = (actual: number, expected: number, what: string): void =>
+  check(Math.abs(actual - expected) <= 0.01, `${what} is ${actual}, expected about ${expected}`);
+
+/**
+ * Finds one item of a listing by its ID.
+ * @param items - The listed items.
+ * @param id - The ID to find.
+ * @param what - What the listing is, for the message.
+ * @returns The item.
+ */
+const itemById = (items: readonly Json[], id: string, what: string): Json => {
+  const found = items.find((item) => item.id === id);
+  check(found !== undefined, `${what} ${show(items.map((item) => item.id))} does not carry ${id}`);
+  return found as Json;
+};
+
+/**
  * Compares two lists as sets. Figma reorders `scopes` on read, so the order a
  * call sent them in is not the order it gets back.
  * @param actual - The list read back.
@@ -319,6 +345,15 @@ type Context = {
   boundFrameId: string;
   boundTextId: string;
   styledTextId: string;
+  emptySectionId: string;
+  wrapSectionId: string;
+  boxAId: string;
+  boxBId: string;
+  movedId: string;
+  nestedSectionId: string;
+  nestedBoxId: string;
+  sectionComponentId: string;
+  innerSectionId: string;
 };
 
 const ctx: Partial<Context> = {};
@@ -1403,6 +1438,523 @@ const runReadSteps = async (): Promise<void> => {
 };
 
 // ---------------------------------------------------------------------------
+// T2.7 Sections
+// ---------------------------------------------------------------------------
+
+/**
+ * Where the section steps build, clear of the component root frame at the
+ * origin so a screenshot of either one shows only its own work.
+ */
+const SECTION_ORIGIN_X = 1200;
+
+/** The empty section S1 makes, and S5 to S7 then fill and drain. */
+const EMPTY_SECTION = { x: SECTION_ORIGIN_X, y: 0, width: 400, height: 300 };
+
+/** The two boxes S2 wraps, on the page, at the positions they have to keep. */
+const BOX_A = { x: 1700, y: 100, width: 120, height: 80 };
+const BOX_B = { x: 1900, y: 220, width: 120, height: 80 };
+
+/** The node S5 moves into a section, S6 fits around, and S7 lifts back out. */
+const MOVED_BOX = { x: SECTION_ORIGIN_X + 40, y: 400, width: 100, height: 100 };
+
+/** The margin S2 asks the wrapping form of `create_section` for. */
+const WRAP_PADDING = 40;
+
+/** The margin `create_section`, `move_to_section`, and `fit_section` leave by default. */
+const DEFAULT_SECTION_PADDING = 80;
+
+/**
+ * Where a section top-left sits on the canvas.
+ *
+ * A child carries `x` and `y` read against the section holding it, so this is
+ * what a canvas position is measured from. Neither a page nor a section
+ * rotates, which is what makes the addition enough.
+ * @param sectionId - The section.
+ * @returns Its absolute position.
+ */
+const sectionOrigin = async (sectionId: string): Promise<{ x: number; y: number }> => {
+  const section = await okRecord("get_section", { nodeId: sectionId });
+  return {
+    x: readNumber(section.absoluteX, `${sectionId} absoluteX`),
+    y: readNumber(section.absoluteY, `${sectionId} absoluteY`),
+  };
+};
+
+/**
+ * Where a node sits inside the parent holding it.
+ *
+ * The serializer carries a position under `bounds` rather than on the node
+ * itself, so this is where a step comparing positions reads it from.
+ * @param nodeId - The node.
+ * @returns Its box within its parent.
+ */
+const nodeBounds = async (
+  nodeId: string
+): Promise<{ x: number; y: number; width: number; height: number }> => {
+  const node = await okRecord("get_node", { nodeId });
+  const bounds = readRecord(node.bounds, `${nodeId} bounds`);
+  return {
+    x: readNumber(bounds.x, `${nodeId} bounds.x`),
+    y: readNumber(bounds.y, `${nodeId} bounds.y`),
+    width: readNumber(bounds.width, `${nodeId} bounds.width`),
+    height: readNumber(bounds.height, `${nodeId} bounds.height`),
+  };
+};
+
+/**
+ * Builds a section, wraps nodes in one, nests one inside another, and drives
+ * every tool that carries a node across a section boundary.
+ *
+ * Figma keeps a section outside the frame tree and reads a child position
+ * against it, so each step that moves a node also checks the node stayed where
+ * it was drawn.
+ */
+const runSectionSteps = async (): Promise<void> => {
+  await step("S1 create_section makes an empty section", async () => {
+    const made = await okRecord("create_section", {
+      name: `${PREFIX}section/empty`,
+      parentId: need("pageId"),
+      fillHex: "#F2F4F8",
+      ...EMPTY_SECTION,
+    });
+    ctx.emptySectionId = readString(made.id, "create_section.id");
+
+    check(made.name === `${PREFIX}section/empty`, `the section is named ${show(made.name)}`);
+    check(
+      made.parentId === need("pageId"),
+      `the section hangs off ${show(made.parentId)}, expected the test page`
+    );
+    atPosition(readNumber(made.x, "create_section.x"), EMPTY_SECTION.x, "the section x");
+    atPosition(readNumber(made.y, "create_section.y"), EMPTY_SECTION.y, "the section y");
+    atPosition(
+      readNumber(made.width, "create_section.width"),
+      EMPTY_SECTION.width,
+      "the section width"
+    );
+    atPosition(
+      readNumber(made.height, "create_section.height"),
+      EMPTY_SECTION.height,
+      "the section height"
+    );
+    check(
+      readArray(made.childIds, "create_section.childIds").length === 0,
+      `the new empty section already holds ${show(made.childIds)}`
+    );
+  });
+
+  await step("S2 create_section wraps nodes and leaves them on the canvas", async () => {
+    const boxes: Array<{
+      key: "boxAId" | "boxBId";
+      label: string;
+      box: typeof BOX_A;
+      fill: string;
+    }> = [
+      { key: "boxAId", label: "a", box: BOX_A, fill: "#3366FF" },
+      { key: "boxBId", label: "b", box: BOX_B, fill: "#FF7755" },
+    ];
+    for (const entry of boxes) {
+      const shape = await okRecord("create_shape", {
+        shapeType: "RECTANGLE",
+        name: `${PREFIX}section/box-${entry.label}`,
+        parentId: need("pageId"),
+        fillHex: entry.fill,
+        ...entry.box,
+      });
+      ctx[entry.key] = readString(shape.nodeId, "create_shape.nodeId");
+    }
+
+    const made = await okRecord("create_section", {
+      nodeIds: [need("boxAId"), need("boxBId")],
+      name: `${PREFIX}section/wrap`,
+      padding: WRAP_PADDING,
+    });
+    ctx.wrapSectionId = readString(made.id, "create_section.id");
+
+    check(
+      made.parentId === need("pageId"),
+      `the wrapping section hangs off ${show(made.parentId)}, expected the parent its nodes shared`
+    );
+    sameMembers(
+      readArray(made.childIds, "create_section.childIds").map(String),
+      [need("boxAId"), need("boxBId")],
+      "the wrapped children"
+    );
+
+    // The section is drawn around the two boxes plus the padding. Its own
+    // parent is the page, so its x and y are already canvas coordinates.
+    atPosition(readNumber(made.x, "create_section.x"), BOX_A.x - WRAP_PADDING, "the section x");
+    atPosition(readNumber(made.y, "create_section.y"), BOX_A.y - WRAP_PADDING, "the section y");
+    atPosition(
+      readNumber(made.width, "create_section.width"),
+      BOX_B.x + BOX_B.width - BOX_A.x + WRAP_PADDING * 2,
+      "the section width"
+    );
+    atPosition(
+      readNumber(made.height, "create_section.height"),
+      BOX_B.y + BOX_B.height - BOX_A.y + WRAP_PADDING * 2,
+      "the section height"
+    );
+
+    // What the step is really about: the boxes hang off the section now, so
+    // wrapping had to rewrite their positions or they would have slid.
+    const origin = await sectionOrigin(need("wrapSectionId"));
+    for (const entry of boxes) {
+      const child = await nodeBounds(need(entry.key));
+      atPosition(origin.x + child.x, entry.box.x, `box-${entry.label} on the canvas, in x`);
+      atPosition(origin.y + child.y, entry.box.y, `box-${entry.label} on the canvas, in y`);
+    }
+  });
+
+  await step("S3 get_section reports the children, contentBounds, and overflowIds", async () => {
+    // A section does not clip, so a child pushed past its edge is still drawn
+    // and still belongs to it. get_section is what tells an agent that.
+    const outsideX = 500;
+    await ok("set_node_properties", { nodeId: need("boxBId"), x: outsideX });
+
+    const section = await okRecord("get_section", { nodeId: need("wrapSectionId") });
+    check(
+      section.contentsHidden === false,
+      `contentsHidden is ${show(section.contentsHidden)}, expected false in Figma Design`
+    );
+    check(
+      section.childCount === 2,
+      `the section holds ${show(section.childCount)} children, expected 2`
+    );
+    check(section.truncated === false, "the section reports more than 200 direct children");
+
+    const children = readRecords(section.children, "get_section.children");
+    sameMembers(
+      children.map((child) => String(child.id)),
+      [need("boxAId"), need("boxBId")],
+      "the children listed"
+    );
+    const boxB = itemById(children, need("boxBId"), "the children listed");
+    check(boxB.type === "RECTANGLE", `box-b is listed as ${show(boxB.type)}`);
+    check(boxB.visible === true, `box-b is listed as visible ${show(boxB.visible)}`);
+    atPosition(readNumber(boxB.x, "the x of box-b"), outsideX, "box-b inside the section, in x");
+
+    check(
+      section.overflowCount === 1,
+      `overflowCount is ${show(section.overflowCount)}, expected 1`
+    );
+    sameMembers(
+      readArray(section.overflowIds, "get_section.overflowIds").map(String),
+      [need("boxBId")],
+      "the children hanging outside the section"
+    );
+
+    // Measured over the children rather than over the box of the section, so
+    // it reaches past the right edge with box-b.
+    const bounds = readRecord(section.contentBounds, "get_section.contentBounds");
+    const maxX = outsideX + BOX_B.width;
+    const maxY = BOX_B.y - BOX_A.y + WRAP_PADDING + BOX_B.height;
+    atPosition(readNumber(bounds.x, "contentBounds.x"), WRAP_PADDING, "contentBounds.x");
+    atPosition(readNumber(bounds.y, "contentBounds.y"), WRAP_PADDING, "contentBounds.y");
+    atPosition(
+      readNumber(bounds.width, "contentBounds.width"),
+      maxX - WRAP_PADDING,
+      "contentBounds.width"
+    );
+    atPosition(
+      readNumber(bounds.height, "contentBounds.height"),
+      maxY - WRAP_PADDING,
+      "contentBounds.height"
+    );
+  });
+
+  await step("S4 list_sections reports a nested section at depth 1", async () => {
+    const made = await okRecord("create_section", {
+      name: `${PREFIX}section/nested`,
+      parentId: need("wrapSectionId"),
+      x: WRAP_PADDING,
+      y: 160,
+      width: 160,
+      height: 120,
+      fillHex: "#E4ECE0",
+    });
+    ctx.nestedSectionId = readString(made.id, "create_section.id");
+    check(
+      made.parentId === need("wrapSectionId"),
+      `the nested section hangs off ${show(made.parentId)}, expected the wrapping section`
+    );
+
+    const listed = await okRecord("list_sections", { query: PREFIX });
+    const items = readRecords(listed.items, "list_sections.items");
+
+    const wrap = itemById(items, need("wrapSectionId"), "list_sections");
+    check(wrap.depth === 0, `the wrapping section reports depth ${show(wrap.depth)}, expected 0`);
+    check(
+      wrap.parentSectionId === null,
+      `the wrapping section reports parentSectionId ${show(wrap.parentSectionId)}, expected null`
+    );
+    check(wrap.childCount === 3, `the wrapping section reports ${show(wrap.childCount)} children`);
+
+    const nested = itemById(items, need("nestedSectionId"), "list_sections");
+    check(nested.depth === 1, `the nested section reports depth ${show(nested.depth)}, expected 1`);
+    check(
+      nested.parentSectionId === need("wrapSectionId"),
+      `the nested section reports parentSectionId ${show(nested.parentSectionId)}`
+    );
+    check(
+      nested.pageId === need("pageId"),
+      `the nested section is listed on the page ${show(nested.pageId)}`
+    );
+    check(
+      nested.contentsHidden === false,
+      `the nested section reports contentsHidden ${show(nested.contentsHidden)}`
+    );
+
+    // Document order, so a nested section follows the one holding it and one
+    // call is enough to read the shape of the page.
+    const order = items.map((item) => String(item.id));
+    check(
+      order.indexOf(need("nestedSectionId")) > order.indexOf(need("wrapSectionId")),
+      `the nested section is listed before the section holding it: ${show(order)}`
+    );
+  });
+
+  await step("S5 move_to_section takes a node in and fits the section round it", async () => {
+    const made = await okRecord("create_shape", {
+      shapeType: "ELLIPSE",
+      name: `${PREFIX}section/moved`,
+      parentId: need("pageId"),
+      fillHex: "#8855CC",
+      ...MOVED_BOX,
+    });
+    ctx.movedId = readString(made.nodeId, "create_shape.nodeId");
+
+    const data = await okRecord("move_to_section", {
+      sectionId: need("emptySectionId"),
+      nodeIds: [need("movedId")],
+      fit: true,
+    });
+    const results = allWritten(data, "move_to_section", 1);
+    check(
+      results[0].nodeId === need("movedId"),
+      `move_to_section reports moving ${show(results[0].nodeId)}`
+    );
+
+    // The fit draws the section round the one node it holds now, padding and
+    // all, and slides the node back so nothing changes on the canvas.
+    const box = readRecord(data.section, "move_to_section.section");
+    atPosition(
+      readNumber(box.x, "the section x"),
+      MOVED_BOX.x - DEFAULT_SECTION_PADDING,
+      "the fitted section, in x"
+    );
+    atPosition(
+      readNumber(box.y, "the section y"),
+      MOVED_BOX.y - DEFAULT_SECTION_PADDING,
+      "the fitted section, in y"
+    );
+    atPosition(
+      readNumber(box.width, "the section width"),
+      MOVED_BOX.width + DEFAULT_SECTION_PADDING * 2,
+      "the fitted section width"
+    );
+    atPosition(
+      readNumber(box.height, "the section height"),
+      MOVED_BOX.height + DEFAULT_SECTION_PADDING * 2,
+      "the fitted section height"
+    );
+
+    const origin = await sectionOrigin(need("emptySectionId"));
+    const child = await nodeBounds(need("movedId"));
+    atPosition(origin.x + child.x, MOVED_BOX.x, "the moved node on the canvas, in x");
+    atPosition(origin.y + child.y, MOVED_BOX.y, "the moved node on the canvas, in y");
+  });
+
+  await step("S6 fit_section redraws a section without moving its child", async () => {
+    // Slide the child inside the section, so the box of the section and the
+    // box of its content come apart: a section does not carry its children
+    // when it resizes, which is the drift a fit exists to undo.
+    const inside = { x: 200, y: 150 };
+    await ok("set_node_properties", { nodeId: need("movedId"), x: inside.x, y: inside.y });
+
+    const before = await sectionOrigin(need("emptySectionId"));
+    const onCanvas = { x: before.x + inside.x, y: before.y + inside.y };
+
+    const box = await okRecord("fit_section", { nodeId: need("emptySectionId") });
+    check(box.id === need("emptySectionId"), `fit_section reports ${show(box.id)}`);
+    atPosition(
+      readNumber(box.x, "fit_section.x"),
+      onCanvas.x - DEFAULT_SECTION_PADDING,
+      "the fitted section, in x"
+    );
+    atPosition(
+      readNumber(box.y, "fit_section.y"),
+      onCanvas.y - DEFAULT_SECTION_PADDING,
+      "the fitted section, in y"
+    );
+    atPosition(
+      readNumber(box.width, "fit_section.width"),
+      MOVED_BOX.width + DEFAULT_SECTION_PADDING * 2,
+      "the fitted section width"
+    );
+    atPosition(
+      readNumber(box.height, "fit_section.height"),
+      MOVED_BOX.height + DEFAULT_SECTION_PADDING * 2,
+      "the fitted section height"
+    );
+
+    const after = await sectionOrigin(need("emptySectionId"));
+    const child = await nodeBounds(need("movedId"));
+    atPosition(after.x + child.x, onCanvas.x, "the child on the canvas, in x");
+    atPosition(after.y + child.y, onCanvas.y, "the child on the canvas, in y");
+  });
+
+  await step("S7 move_out_of_section lifts a node back to the page", async () => {
+    const origin = await sectionOrigin(need("emptySectionId"));
+    const child = await nodeBounds(need("movedId"));
+    const onCanvas = { x: origin.x + child.x, y: origin.y + child.y };
+
+    const data = await ok("move_out_of_section", { nodeIds: [need("movedId")] });
+    const results = allWritten(data, "move_out_of_section", 1);
+    check(
+      results[0].parentId === need("pageId"),
+      `the node rose to ${show(results[0].parentId)}, expected the page holding its section`
+    );
+    // The origin of a page is the origin of the canvas, so the position the
+    // call reports is where the node is drawn.
+    atPosition(readNumber(results[0].x, "the x reported"), onCanvas.x, "the lifted node, in x");
+    atPosition(readNumber(results[0].y, "the y reported"), onCanvas.y, "the lifted node, in y");
+
+    const emptied = await okRecord("get_section", { nodeId: need("emptySectionId") });
+    check(emptied.childCount === 0, `the section still holds ${show(emptied.childCount)} children`);
+    check(emptied.contentBounds === null, "the emptied section still reports contentBounds");
+  });
+
+  await step("S8 ungroup_node takes a nested section apart", async () => {
+    const offset = { x: 20, y: 20 };
+    const nestedOrigin = await sectionOrigin(need("nestedSectionId"));
+    const made = await okRecord("create_shape", {
+      shapeType: "RECTANGLE",
+      name: `${PREFIX}section/nested-box`,
+      parentId: need("nestedSectionId"),
+      fillHex: "#11AA88",
+      x: offset.x,
+      y: offset.y,
+      width: 60,
+      height: 40,
+    });
+    ctx.nestedBoxId = readString(made.nodeId, "create_shape.nodeId");
+    const onCanvas = { x: nestedOrigin.x + offset.x, y: nestedOrigin.y + offset.y };
+
+    const data = await okRecord("ungroup_node", { nodeId: need("nestedSectionId") });
+    check(
+      data.parentId === need("wrapSectionId"),
+      `the children rose to ${show(data.parentId)}, expected the section that held the nested one`
+    );
+    sameMembers(
+      readArray(data.orphanIds, "ungroup_node.orphanIds").map(String),
+      [need("nestedBoxId")],
+      "the children the ungroup freed"
+    );
+
+    const wrapOrigin = await sectionOrigin(need("wrapSectionId"));
+    const freed = await nodeBounds(need("nestedBoxId"));
+    atPosition(wrapOrigin.x + freed.x, onCanvas.x, "the freed node on the canvas, in x");
+    atPosition(wrapOrigin.y + freed.y, onCanvas.y, "the freed node on the canvas, in y");
+
+    const listed = await okRecord("list_sections", { query: PREFIX });
+    const ids = readRecords(listed.items, "list_sections.items").map((item) => String(item.id));
+    check(
+      !ids.includes(need("nestedSectionId")),
+      `list_sections still carries the ungrouped section: ${show(ids)}`
+    );
+  });
+
+  await step("S9 list_components narrows to one section", async () => {
+    const made = await okRecord("create_component", {
+      name: `${PREFIX}section/part`,
+      parentId: need("wrapSectionId"),
+      x: 240,
+      y: 20,
+      width: 40,
+      height: 40,
+      fillHex: "#88AA55",
+    });
+    ctx.sectionComponentId = readString(made.id, "create_component.id");
+
+    const listed = await okRecord("list_components", { sectionId: need("wrapSectionId") });
+    const items = readRecords(listed.items, "list_components.items");
+    const part = itemById(items, need("sectionComponentId"), "the section listing");
+    check(
+      part.sectionId === need("wrapSectionId"),
+      `the component reports sectionId ${show(part.sectionId)}`
+    );
+    check(
+      part.sectionName === `${PREFIX}section/wrap`,
+      `the component reports sectionName ${show(part.sectionName)}`
+    );
+
+    // sectionId searches the subtree of the section rather than a page, so the
+    // components sitting outside it are gone from the listing.
+    const ids = items.map((item) => String(item.id));
+    check(
+      !ids.includes(need("setId")),
+      `the section listing carries the set, which sits outside it: ${show(ids)}`
+    );
+    check(
+      !ids.includes(need("iconId")),
+      `the section listing carries the icon, which sits outside it: ${show(ids)}`
+    );
+
+    // A component in no section reports null rather than nothing, so one
+    // listing tells the two cases apart.
+    const page = await okRecord("list_components", { scope: "currentPage", query: PREFIX });
+    const icon = itemById(
+      readRecords(page.items, "list_components.items"),
+      need("iconId"),
+      "the page listing"
+    );
+    check(icon.sectionId === null, `the icon reports sectionId ${show(icon.sectionId)}`);
+    check(icon.sectionName === null, `the icon reports sectionName ${show(icon.sectionName)}`);
+  });
+
+  await step("S10 duplicate_nodes copies a nested section into its own parent", async () => {
+    const inner = { x: 240, y: 120, width: 120, height: 100 };
+    const made = await okRecord("create_section", {
+      name: `${PREFIX}section/inner`,
+      parentId: need("wrapSectionId"),
+      fillHex: "#F0E0D0",
+      ...inner,
+    });
+    ctx.innerSectionId = readString(made.id, "create_section.id");
+
+    const data = await okRecord("duplicate_nodes", { nodeIds: [need("innerSectionId")] });
+    const duplicates = readRecords(data.duplicates, "duplicate_nodes.duplicates");
+    check(duplicates.length === 1, `duplicate_nodes made ${duplicates.length} copies, expected 1`);
+    const copyId = readString(duplicates[0].nodeId, "duplicate_nodes.duplicates[0].nodeId");
+    check(
+      duplicates[0].parentId === need("wrapSectionId"),
+      `the copy landed in ${show(duplicates[0].parentId)}: Figma clone() parents a copy to the open page, so the tool has to put it back beside its source`
+    );
+
+    const copy = await okRecord("get_section", { nodeId: copyId });
+    check(
+      copy.parentId === need("wrapSectionId"),
+      `get_section reports the parent of the copy as ${show(copy.parentId)}`
+    );
+    check(
+      copy.parentType === "SECTION",
+      `get_section reports the parent type of the copy as ${show(copy.parentType)}`
+    );
+    atPosition(readNumber(copy.x, "the x of the copy"), inner.x, "the copy, in x");
+    atPosition(readNumber(copy.y, "the y of the copy"), inner.y, "the copy, in y");
+
+    const listed = await okRecord("list_sections", { query: PREFIX });
+    const items = readRecords(listed.items, "list_sections.items");
+    const nested = itemById(items, copyId, "list_sections");
+    check(nested.depth === 1, `the copy reports depth ${show(nested.depth)}, expected 1`);
+    check(
+      nested.parentSectionId === need("wrapSectionId"),
+      `the copy reports parentSectionId ${show(nested.parentSectionId)}`
+    );
+  });
+};
+
+// ---------------------------------------------------------------------------
 // T2.8 Negative tests
 // ---------------------------------------------------------------------------
 
@@ -1506,6 +2058,37 @@ const runNegativeSteps = async (): Promise<void> => {
       ["a variant owns no properties of its own", need("setId")]
     );
   });
+
+  await step("H10 create_section refuses a frame as parentId", async () => {
+    await rejects(
+      "create_section",
+      { name: `${PREFIX}section/refused`, width: 100, height: 100, parentId: need("rootId") },
+      ["requires parentId to name a page or a SECTION", "is a FRAME node"]
+    );
+  });
+
+  await step("H11 reparent_nodes refuses a section bound for a frame", async () => {
+    await rejects(
+      "reparent_nodes",
+      { nodeIds: [need("wrapSectionId")], parentId: need("rootId") },
+      ["moved nothing", "nodeIds[0]", "is a SECTION"]
+    );
+  });
+
+  await step("H12 group_nodes refuses a section", async () => {
+    await rejects("group_nodes", { nodeIds: [need("wrapSectionId")] }, [
+      "a group cannot contain a SECTION",
+      "create_section with nodeIds",
+    ]);
+  });
+
+  await step("H13 move_out_of_section refuses a node hanging off the page", async () => {
+    await rejects("move_out_of_section", { nodeIds: [need("rootId")] }, [
+      "wrote nothing",
+      "items[0]",
+      "not off a section",
+    ]);
+  });
 };
 
 // ---------------------------------------------------------------------------
@@ -1520,6 +2103,7 @@ const runScenario = async (): Promise<void> => {
   await runInstanceSteps();
   await runBindingSteps();
   await runReadSteps();
+  await runSectionSteps();
   await runNegativeSteps();
 };
 

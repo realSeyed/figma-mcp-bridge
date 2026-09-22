@@ -391,7 +391,24 @@ const buildReadLoad = async (load: Load): Promise<ReadTargets> => {
     defaultValue: true,
   });
 
+  // A section for the section reads to land on. It is made before the
+  // components it ends up holding, because the teardown removes the load
+  // newest first and a container has to go out after its children.
+  const section = asRecord(
+    await ok("create_section", {
+      name: `${PREFIX}kit-section`,
+      parentId: load.pageId,
+      x: 0,
+      y: 0,
+      width: 600,
+      height: 400,
+    }),
+    "create_section result"
+  );
+  load.nodeIds.push(asId(section.id, "section id"));
+
   // Loose components, to fill list_components' default page.
+  const looseIds: string[] = [];
   for (let index = 0; index < LOOSE_COMPONENTS; index++) {
     const made = asRecord(
       await ok("create_component", {
@@ -403,8 +420,14 @@ const buildReadLoad = async (load: Load): Promise<ReadTargets> => {
       }),
       "create_component result"
     );
+    looseIds.push(asId(made.id, "component id"));
     load.nodeIds.push(asId(made.id, "component id"));
   }
+  await ok("move_to_section", {
+    sectionId: asId(section.id, "section id"),
+    nodeIds: looseIds,
+    fit: true,
+  });
 
   // A frame of instances: what an agent reading one screen lands on.
   const frame = asRecord(
@@ -437,6 +460,46 @@ const buildReadLoad = async (load: Load): Promise<ReadTargets> => {
 // ---------------------------------------------------------------------------
 // Read measurements
 // ---------------------------------------------------------------------------
+
+/**
+ * Measures the section reads against the read file.
+ *
+ * The listing is also what finds the section worth reading, so the two calls
+ * are measured in the order an agent would make them. A file with no section
+ * skips the second rather than reporting a call it never made.
+ */
+const measureSectionReads = async (): Promise<void> => {
+  const listed = await measure(
+    "list_sections",
+    'scope: "allPages"',
+    "list_sections",
+    { scope: "allPages" },
+    readKey
+  );
+  if (listed === undefined) return;
+
+  // The section holding the most children: the one whose get_section result
+  // has the most to carry.
+  let biggest: { id: string; name: string; children: number } | undefined;
+  for (const item of asList(asRecord(listed, "list_sections result").items, "items")) {
+    const children = typeof item.childCount === "number" ? item.childCount : 0;
+    if (biggest === undefined || children > biggest.children) {
+      biggest = { id: asId(item.id, "section id"), name: String(item.name), children };
+    }
+  }
+  if (biggest === undefined) {
+    console.log("skip  get_section - the read file has no section");
+    return;
+  }
+
+  await measure(
+    "get_section",
+    `largest section: "${biggest.name}" (${biggest.children} children)`,
+    "get_section",
+    { nodeId: biggest.id },
+    readKey
+  );
+};
 
 /**
  * Measures the read tools against the read file.
@@ -479,6 +542,8 @@ const measureReads = async (targets?: ReadTargets): Promise<void> => {
       readKey
     );
   }
+
+  await measureSectionReads();
 
   let frame = targets?.frame;
   if (frame === undefined) {
@@ -643,6 +708,35 @@ const measureWrites = async (load: Load): Promise<void> => {
   await measure("apply_text_style", `${BATCH} text nodes`, "apply_text_style", {
     styleId: load.styleId,
     nodeIds: textIds,
+  });
+
+  const wrapped = await measure("create_section", `wrapping ${BATCH} nodes`, "create_section", {
+    nodeIds: rectangleIds,
+    name: `${PREFIX}load-section`,
+  });
+  if (wrapped === undefined) return;
+  const sectionId = asId(asRecord(wrapped, "create_section result").id, "section id");
+  // Recorded ahead of the load rather than after it: the teardown removes the
+  // load newest first, and this section wraps rectangles that were made
+  // before it, so it has to be the last thing to go.
+  load.nodeIds.unshift(sectionId);
+
+  await measure("move_out_of_section", `${BATCH} nodes`, "move_out_of_section", {
+    nodeIds: rectangleIds,
+  });
+
+  await measure("move_to_section", `${BATCH} nodes, fit: true`, "move_to_section", {
+    sectionId,
+    nodeIds: rectangleIds,
+    fit: true,
+  });
+
+  // get_section lists at most 200 children, and this section holds exactly
+  // that many, so this is the largest result it can return. It is measured
+  // here rather than only against the read file, because a file is free to
+  // hold no section at all and the cap still has to be held to the budget.
+  await measure("get_section", `${BATCH} children, the listing cap`, "get_section", {
+    nodeId: sectionId,
   });
 };
 

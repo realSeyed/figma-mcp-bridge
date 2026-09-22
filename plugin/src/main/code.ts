@@ -4,6 +4,7 @@ import { addLayersToFrame } from "../html-figma/figma";
 import { getExtensionHandler } from "./extensions";
 import type { ExtensionHandler, ExtensionRequestType } from "./extensions";
 import {
+  ancestorIdsOf,
   appendToParentIfProvided,
   ensureFont,
   getParentNodeById,
@@ -12,6 +13,8 @@ import {
   isSceneNode,
   isTextNode,
   loadFontsForTextNode,
+  loadIfPage,
+  moveKeepingCanvasPosition,
   parseHexColor,
   positionNode,
   resizeNodeIfSupported,
@@ -276,6 +279,55 @@ const runExtension = async (
     if (message.includes(request.type)) throw error;
     throw new Error(`${request.type}: ${message}`);
   }
+};
+
+/**
+ * The error for a property the node does not carry.
+ *
+ * A section draws most of these. It takes a name, a position, a size, a fill,
+ * a stroke, and a corner radius, which reads as a container that should take
+ * the rest as well, and Figma gives it no effects, no rotation, no opacity,
+ * and no auto layout. None of them can be added, so the way through is always
+ * a frame inside the section.
+ * @param tool - The tool the caller asked for.
+ * @param node - The node it was pointed at.
+ * @param property - The property, spelled as the caller would say it.
+ * @returns The error to throw.
+ */
+const unsupportedProperty = (tool: RequestType, node: SceneNode, property: string): Error =>
+  new Error(
+    node.type === "SECTION"
+      ? `${tool} cannot set ${property} on ${node.id} "${node.name}": a SECTION has no ${property}. Call create_frame with this section as parentId and set ${property} on the frame instead.`
+      : `${tool} cannot set ${property} on ${node.id} "${node.name}": a ${node.type} node has no ${property}. Call get_node to read the properties this node carries.`
+  );
+
+/**
+ * Ungroups a section: its children move up to its parent and it is removed.
+ *
+ * `figma.ungroup` handles a group and a frame, and both sit inside the frame
+ * tree. A section does not: its parent is a page or another section, so the
+ * move is made by hand here, through the same helper the section tools use to
+ * keep a node where it is on the canvas. The children are inserted one after
+ * another at the stack position the section held, which keeps their order
+ * among themselves and leaves them drawn where the section was.
+ * @param section - The section to ungroup.
+ * @returns The children, in the order they were placed.
+ */
+const ungroupSection = async (section: SectionNode): Promise<SceneNode[]> => {
+  const parent = section.parent;
+  if (!parent || (parent.type !== "PAGE" && parent.type !== "SECTION")) {
+    throw new Error(
+      `ungroup_node cannot ungroup the section ${section.id} "${section.name}": it has no page or section to move its children into. Move it onto a page with reparent_nodes first.`
+    );
+  }
+  await loadIfPage(parent);
+
+  // Snapshot before the first move: the list shrinks as each child leaves.
+  const orphans = [...section.children];
+  const at = parent.children.findIndex((child) => child.id === section.id);
+  orphans.forEach((child, offset) => moveKeepingCanvasPosition(child, parent, at + offset));
+  section.remove();
+  return orphans;
 };
 
 const handleRequest = async (request: ServerRequest): Promise<PluginResponse> => {
@@ -753,7 +805,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
 
         if (typeof params.rotation === "number") {
           if (!("rotation" in node)) {
-            throw new Error(`Node does not support rotation: ${node.id}`);
+            throw unsupportedProperty("set_node_properties", node, "rotation");
           }
           node.rotation = params.rotation;
           applied.rotation = node.rotation;
@@ -761,7 +813,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
 
         if (typeof params.opacity === "number") {
           if (!("opacity" in node)) {
-            throw new Error(`Node does not support opacity: ${node.id}`);
+            throw unsupportedProperty("set_node_properties", node, "opacity");
           }
           node.opacity = params.opacity;
           applied.opacity = node.opacity;
@@ -888,7 +940,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
 
         const node = await getSceneNodeById(nodeId);
         if (!("effects" in node)) {
-          throw new Error(`Node does not support effects: ${node.id}`);
+          throw unsupportedProperty("set_effects", node, "effects");
         }
 
         const params = request.params ?? {};
@@ -1026,7 +1078,7 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
 
         const node = await getSceneNodeById(nodeId);
         if (!("layoutMode" in node)) {
-          throw new Error(`Node does not support auto-layout: ${node.id}`);
+          throw unsupportedProperty("set_auto_layout", node, "auto layout");
         }
         const frame = node as FrameNode;
         const params = request.params ?? {};
@@ -1447,7 +1499,20 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
           if (!("clone" in node) || typeof node.clone !== "function") {
             throw new Error(`Node does not support duplication: ${node.id}`);
           }
+          const parent = node.parent;
+          const before = node.relativeTransform;
           const clone = node.clone();
+          // `clone()` parents the copy to the open page, so a copy of a node
+          // inside a section or a frame lands somewhere else entirely. Putting
+          // it back directly above its source keeps the pair together in the
+          // layer list, and restoring the transform lands it on the source
+          // rather than wherever the page put it.
+          if (parent && supportsChildren(parent)) {
+            await loadIfPage(parent);
+            const at = parent.children.findIndex((child) => child.id === node.id);
+            parent.insertChild(at + 1, clone);
+            clone.relativeTransform = before;
+          }
           duplicates.push({
             sourceNodeId: node.id,
             nodeId: clone.id,
@@ -1475,10 +1540,54 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         }
 
         const parent = await getParentNodeById(parentId);
-        const moved = [];
+        const holdingTheParent = ancestorIdsOf(parent);
 
-        for (const nodeId of request.nodeIds) {
-          const node = await getSceneNodeById(nodeId);
+        // Every node is examined before the first move, so a batch that names
+        // one node Figma refuses leaves the whole call where it started rather
+        // than moving the nodes ahead of it and stopping half way.
+        const nodes: SceneNode[] = [];
+        const problems: string[] = [];
+        for (let index = 0; index < request.nodeIds.length; index++) {
+          const nodeId = request.nodeIds[index];
+          const fail = (problem: string) => problems.push(`nodeIds[${index}]: ${problem}`);
+
+          let node: SceneNode;
+          try {
+            node = await getSceneNodeById(nodeId);
+          } catch {
+            fail(
+              `node not found: ${nodeId}. Call get_document or get_selection to list the node IDs of this page.`
+            );
+            continue;
+          }
+          if (node.id === parent.id) {
+            fail(
+              `${nodeId} "${node.name}" is parentId itself, and a node cannot hold itself. Name a different parent.`
+            );
+            continue;
+          }
+          if (holdingTheParent.has(node.id)) {
+            fail(
+              `${nodeId} "${node.name}" already contains parentId ${parent.id} "${parent.name}", and moving it inside its own descendant would cut the tree loose. Move ${parent.id} out first, or name a parent outside ${nodeId}.`
+            );
+            continue;
+          }
+          if (node.type === "SECTION" && parent.type !== "PAGE" && parent.type !== "SECTION") {
+            fail(
+              `${nodeId} "${node.name}" is a SECTION, and Figma keeps a section outside the frame tree, so parentId must name a page or another section, not the ${parent.type} ${parent.id} "${parent.name}". Name a page or a section, or call create_section to wrap the content instead.`
+            );
+            continue;
+          }
+          nodes.push(node);
+        }
+        if (problems.length > 0) {
+          throw new Error(
+            `reparent_nodes moved nothing. Correct these nodes and call it again:\n${problems.join("\n")}`
+          );
+        }
+
+        const moved = [];
+        for (const node of nodes) {
           parent.appendChild(node);
           moved.push({
             nodeId: node.id,
@@ -1502,6 +1611,16 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         }
 
         const nodes = await Promise.all(request.nodeIds.map((nodeId) => getSceneNodeById(nodeId)));
+
+        // Figma keeps a section outside the frame tree, and a group is inside
+        // it, so a group can never hold one. Refusing here names the tool that
+        // does what the caller meant.
+        const sections = nodes.filter((node) => node.type === "SECTION");
+        if (sections.length > 0) {
+          throw new Error(
+            `group_nodes cannot group ${sections.map((node) => `${node.id} "${node.name}"`).join(", ")}: a group cannot contain a SECTION, because Figma keeps a section outside the frame tree. Call create_section with nodeIds to put these nodes in a new section instead.`
+          );
+        }
 
         const explicitParentId = request.params?.parentId;
         let parent: BaseNode & ChildrenMixin;
@@ -1545,12 +1664,14 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         }
 
         const node = await getSceneNodeById(nodeId);
-        if (node.type !== "GROUP" && node.type !== "FRAME") {
-          throw new Error(`ungroup_node only works on GROUP or FRAME nodes, got ${node.type}`);
+        if (node.type !== "GROUP" && node.type !== "FRAME" && node.type !== "SECTION") {
+          throw new Error(
+            `ungroup_node requires nodeId to name a GROUP, a FRAME, or a SECTION, but ${nodeId} "${node.name}" is a ${node.type} node. Only a container can be ungrouped; call get_node to read this node instead.`
+          );
         }
 
         const parentId = node.parent?.id;
-        const orphans = figma.ungroup(node as GroupNode | FrameNode);
+        const orphans = node.type === "SECTION" ? await ungroupSection(node) : figma.ungroup(node);
 
         return {
           type: request.type,

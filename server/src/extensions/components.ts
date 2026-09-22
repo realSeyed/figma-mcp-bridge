@@ -35,7 +35,7 @@ const createComponentShape = z.object({
   fromNodeId: createFigmaNodeIdSchema()
     .optional()
     .describe(
-      "A node to convert into a component in place, keeping its children, size, position, and paint. Give this, or width and height."
+      "A node to convert into a component in place, keeping its children, size, position, and paint. A SECTION is refused: put the content in a frame and convert the frame. Give this, or width and height."
     ),
   width: z.number().min(0.01).optional().describe("Width of a new empty component, in pixels"),
   height: z.number().min(0.01).optional().describe("Height of a new empty component, in pixels"),
@@ -48,7 +48,9 @@ const createComponentShape = z.object({
     ),
   parentId: createFigmaNodeIdSchema()
     .optional()
-    .describe("The frame, group, or page to put the component in, defaulting to the current page"),
+    .describe(
+      "The page, frame, group, component, or section to put the component in, defaulting to the current page. x and y are relative to it."
+    ),
   x: z.number().optional().describe("Position on the x axis, within the parent"),
   y: z.number().optional().describe("Position on the y axis, within the parent"),
   fillHex: createHexColorSchema()
@@ -136,7 +138,12 @@ export const schemas = {
       .enum(["currentPage", "allPages"])
       .optional()
       .describe(
-        "Which components to list: currentPage reads the page open in Figma, allPages the whole file. currentPage."
+        "Which components to list: currentPage reads the page open in Figma, allPages the whole file. currentPage. Ignored when sectionId is given."
+      ),
+    sectionId: createFigmaNodeIdSchema()
+      .optional()
+      .describe(
+        "Keeps only the components inside this section, at any depth. Must name a SECTION; call list_sections for the ID."
       ),
     query: z
       .string()
@@ -176,7 +183,7 @@ export const schemas = {
     parentId: createFigmaNodeIdSchema()
       .optional()
       .describe(
-        "The frame, group, or page to put the set in, defaulting to where the components already are"
+        "The page, frame, group, component, or section to put the set in, defaulting to where the components already are"
       ),
     layout: z
       .enum(["ROW", "COLUMN"])
@@ -196,7 +203,9 @@ export const schemas = {
     variantProperties: variantPropertiesField,
     parentId: createFigmaNodeIdSchema()
       .optional()
-      .describe("The frame, group, or page to put the instance in, defaulting to the current page"),
+      .describe(
+        "The page, frame, group, component, or section to put the instance in, defaulting to the current page. x and y are relative to it."
+      ),
     x: z.number().optional().describe("Position on the x axis, within the parent"),
     y: z.number().optional().describe("Position on the y axis, within the parent"),
     fileKey: fileKeyField,
@@ -300,7 +309,7 @@ export const rpcToArgs = {
 export function register(server: McpServer, node: Node): void {
   server.tool(
     "list_components",
-    'List the local components and component sets of the current page, or of the whole file with scope: "allPages". Each item carries its ID, name, page, and description; a component set also carries how many variants it holds and every variant property with the values it takes, so one call is enough to know what create_instance can ask for. A variant is not listed on its own — it belongs to the set that reports it. Filter by name with query, and cap the list with limit; truncated says whether more matched than were returned. Reads local components only: a team library needs a paid plan and is not exposed. When multiple files are connected, specify fileKey.',
+    'List the local components and component sets of the current page, or of the whole file with scope: "allPages". Each item carries its ID, name, page, the nearest section that holds it as sectionId and sectionName, and its description; a component set also carries how many variants it holds and every variant property with the values it takes, so one call is enough to know what create_instance can ask for. A variant is not listed on its own — it belongs to the set that reports it. Narrow to one section with sectionId, which searches that section at any depth and takes the place of scope. Filter by name with query, and cap the list with limit; truncated says whether more matched than were returned. Reads local components only: a team library needs a paid plan and is not exposed. When multiple files are connected, specify fileKey.',
     schemas.list_components.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(schemas.list_components, args);
