@@ -75,7 +75,11 @@ export class Leader {
       const server = http.createServer((req, res) => {
         if (req.url === "/ping" && req.method === "GET") {
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ status: "ok", version: VERSION, ...this.identityReport() }));
+          // The leader answers, so its commit is the bridgeCommit of /ping.
+          const { bridgeCommit, leaderStartedAt, files } = this.identityReport();
+          res.end(
+            JSON.stringify({ status: "ok", version: VERSION, bridgeCommit, leaderStartedAt, files })
+          );
           return;
         }
 
