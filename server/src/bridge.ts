@@ -14,12 +14,15 @@ interface ConnectionEntry {
   ws: WebSocket;
   fileKey: string;
   fileName: string;
+  pluginBuild: string;
   isAlive: boolean;
 }
 
 export class Bridge {
   private wss: WebSocketServer;
   private connections = new Map<string, ConnectionEntry>();
+  /** The epoch of each file key. It lives in memory: a new leader starts again. */
+  private epochs = new Map<string, number>();
   private pending = new Map<string, PendingRequest>();
   private counter = 0;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -52,7 +55,7 @@ export class Bridge {
     }
 
     const url = new URL(request.url, "http://localhost");
-    const { fileKey, fileName = "Unknown" } = Object.fromEntries(url.searchParams);
+    const { fileKey, fileName = "Unknown", pluginBuild } = Object.fromEntries(url.searchParams);
 
     if (!fileKey) {
       console.error("Plugin connected without fileKey, rejecting");
@@ -61,20 +64,30 @@ export class Bridge {
     }
 
     this.wss.handleUpgrade(request, socket, head, (ws) => {
-      this.handleConnection(ws, fileKey, fileName);
+      this.handleConnection(ws, fileKey, fileName, pluginBuild?.trim().slice(0, 200) || "unknown");
     });
   }
 
-  private handleConnection(ws: WebSocket, fileKey: string, fileName: string): void {
+  private handleConnection(
+    ws: WebSocket,
+    fileKey: string,
+    fileName: string,
+    pluginBuild: string
+  ): void {
     // Replace existing connection for the same file
     const existing = this.connections.get(fileKey);
     if (existing) {
       existing.ws.close();
     }
+    // Count before the connection is stored, so no read sees the new
+    // connection with the old epoch.
+    const epoch = (this.epochs.get(fileKey) ?? 0) + 1;
+    this.epochs.set(fileKey, epoch);
     this.connections.set(fileKey, {
       ws,
       fileKey,
       fileName,
+      pluginBuild,
       isAlive: true,
     });
     console.error(`Plugin connected: ${fileName} (${fileKey})`);
@@ -166,6 +179,8 @@ export class Bridge {
     return [...this.connections.values()].map((entry) => ({
       fileKey: entry.fileKey,
       fileName: entry.fileName,
+      pluginBuild: entry.pluginBuild,
+      epoch: this.epochs.get(entry.fileKey) ?? 0,
     }));
   }
 

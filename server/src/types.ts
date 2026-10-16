@@ -27,6 +27,14 @@ export interface RPCResponse {
 export interface ConnectedFile {
   fileKey: string;
   fileName: string;
+  /** The build of the plugin that holds the connection, or "unknown". */
+  pluginBuild: string;
+  /**
+   * How many times a plugin has connected for this file key since the leader
+   * started. A connection that replaces a live one counts too. A disconnect and
+   * a read leave it as it is.
+   */
+  epoch: number;
 }
 
 export enum Role {
