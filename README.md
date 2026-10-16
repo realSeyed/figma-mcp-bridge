@@ -157,11 +157,11 @@ The leader listens on `127.0.0.1` only, and `/rpc` runs a tool only for a reques
 
 ### The endpoints of the leader
 
-| Endpoint | Used by                    | Rules                                                                                                                                                                                                  |
-| -------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/ws`    | the plugin                 | WebSocket upgrade. Reachable from this machine only, through the bind on `127.0.0.1`. The plugin names its `fileKey`.                                                                                  |
-| `/ping`  | discovery, leader election | `GET`. Open to each local caller; it needs no token. Answers `{ status, version, bridgeCommit, leaderStartedAt, files }`; see [Instrument identity](#instrument-identity).                             |
-| `/rpc`   | follower server processes  | `POST` only. Needs `Content-Type: application/json` (a `charset` parameter is allowed), else 415. Needs `Authorization: Bearer <token>`, else 401. A wrong token gets 403. Each other method gets 405. |
+| Endpoint | Used by                    | Rules                                                                                                                                                                                                                                                                                                                  |
+| -------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/ws`    | the plugin                 | WebSocket upgrade. Reachable from this machine only, through the bind on `127.0.0.1`. The plugin names its `fileKey`.                                                                                                                                                                                                  |
+| `/ping`  | discovery, leader election | `GET`. Open to each local caller; it needs no token. Answers `{ status, version, bridgeCommit, leaderStartedAt, files }`; see [Instrument identity](#instrument-identity).                                                                                                                                             |
+| `/rpc`   | follower server processes  | `POST` only. Needs `Content-Type: application/json` (a `charset` parameter is allowed), else 415. Needs `Authorization: Bearer <token>`, else 401. A wrong token gets 403. Each other method gets 405. A request with `X-Figma-Bridge-Role: auditor` may call the tools of [the auditor role](#the-auditor-role) only. |
 
 The leader checks the headers before it reads the body, so a refused request runs no tool. No answer carries an `Access-Control-Allow-*` header: a browser page must send a preflight for a cross-origin JSON POST, and the leader refuses the preflight.
 
@@ -172,6 +172,35 @@ curl -s -X POST http://127.0.0.1:1995/rpc -H "Content-Type: application/json" -H
 ```
 
 On macOS or Linux, read `~/.config/figma-mcp-bridge/rpc-token` instead. Use `127.0.0.1`, not `localhost`: `localhost` can resolve to `::1`, where the leader does not listen.
+
+### The auditor role
+
+An audit only reads. `FIGMA_BRIDGE_ROLE=auditor` makes a server process register these 15 tools, and no other tool, also no other read tool:
+
+`list_files`, `get_document`, `get_metadata`, `get_node`, `get_instance`, `get_component`, `list_components`, `get_variable_defs`, `get_styles`, `list_fonts`, `list_sections`, `get_section`, `dump_nodes`, `save_screenshots`, `scroll_and_zoom_into_view`
+
+`get_screenshot` is not on the list: the auditor process saves captures with `save_screenshots`.
+
+| Variable            | Meaning                                                                                     | When unset or empty |
+| ------------------- | ------------------------------------------------------------------------------------------- | ------------------- |
+| `FIGMA_BRIDGE_ROLE` | `auditor`: the process registers the 15 tools above. No other value is allowed (see below). | The full tool set.  |
+
+- **Fail closed.** A value other than exactly `auditor`, for example `Auditor` or `x`, stops the process at start with an error that names the variable. The process never starts with the full tool set after a typo.
+- **The mark.** Each `/rpc` request that an auditor process sends carries the header `X-Figma-Bridge-Role: auditor`.
+- **The rule of the leader.** For a request with the mark, the leader runs the 15 tools and the two internal commands behind `dump_nodes` and `save_screenshots` (`dump_nodes_chunk` and `get_screenshot`), and nothing else. Another tool gets 403, with an error that names the tool and the role, and the plugin receives nothing. A header value other than `auditor` gets 400.
+- **The relay.** A request without the header runs as before, whatever the role of the leader process is. The role governs the tools and the requests of its own process only. When the auditor process is the leader, it still relays each request of the executor process, so the writes of the executor do not fail when the auditor session starts first.
+- **The limit.** The role keeps an agent in check. It is not a sandbox: a local process that can read the install token can still send a request without the mark.
+
+The auditor process and the executor process are two entries in the MCP configuration. The auditor entry adds the role and an output root. Keep `command` and `args` as in [Quick Start](#2-add-the-mcp-server-to-your-favourite-ai-tool):
+
+```json
+"env": {
+  "FIGMA_BRIDGE_ROLE": "auditor",
+  "FIGMA_BRIDGE_OUTPUT_ROOT": "C:\audit-output"
+}
+```
+
+The executor process has no role, and its own output root outside the root of the auditor.
 
 ### Instrument identity
 
@@ -416,7 +445,7 @@ Before running it, build the server, open the plugin in the file you want to tes
 cd server && FIGMA_FILE_KEY='<key>' bun run e2e
 ```
 
-`FIGMA_FILE_KEY` is required, and must name a connected file. Without it the script refuses to start, lists each connected file with its key and its name, and exits with code 1; it writes nothing before that check. `bun run perf` follows the same rule, and also takes an optional `FIGMA_READ_FILE_KEY`. Everything the e2e script makes is named `mcp-e2e/…` and is removed again in a `finally` block, after a failure as well. It sets the output root of its server to `server/scripts/e2e-output/` (git-ignored), where the screenshots and the dumps of the test frame land; the dump group removes its own folder again. A failed step exits with code 1.
+`FIGMA_FILE_KEY` is required, and must name a connected file. Without it the script refuses to start, lists each connected file with its key and its name, and exits with code 1; it writes nothing before that check. `bun run perf` follows the same rule, and also takes an optional `FIGMA_READ_FILE_KEY`. Everything the e2e script makes is named `mcp-e2e/…` and is removed again in a `finally` block, after a failure as well. It sets the output root of its server to `server/scripts/e2e-output/` (git-ignored), where the screenshots and the dumps of the test frame land; the dump group removes its own folder again. Group K starts a second server process with `FIGMA_BRIDGE_ROLE=auditor` and its own output root under that folder, checks its 15 tools, runs `dump_nodes` and `save_screenshots` through it, and checks that the leader refuses a marked `delete_nodes`; it removes the process and its root at the end. A failed step exits with code 1.
 
 ## Structure
 
@@ -430,6 +459,7 @@ Figma-MCP-Bridge/
         ├── leader.ts     # Leader: HTTP server + bridge
         ├── follower.ts   # Follower: proxies to leader via HTTP
         ├── rpc-token.ts  # The install token that each /rpc request carries
+        ├── role.ts       # The auditor role: its 15 tools and the request mark
         ├── identity.ts   # File selection and the identity of one file
         ├── evidence.ts   # Canonical JSON, SHA-256, and the write of evidence files
         ├── build-info.ts # The commit of this build, from dist/build-info.json
