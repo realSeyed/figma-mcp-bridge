@@ -14,6 +14,7 @@
     "build": "tsc",
     "e2e": "bun scripts/e2e-free-plan.ts",
     "perf": "bun scripts/perf-free-plan.ts",
+    "test": "bun test",
     "prepublishOnly": "bun run build"
   },
   "keywords": [

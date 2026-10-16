@@ -1,0 +1,122 @@
+/**
+ * A real server process: `node dist/index.js`, driven through the MCP client
+ * over stdio. Run `bun run build` in `server/` first; `bun run test` does.
+ */
+
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const SERVER_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const SERVER_ENTRY = join(SERVER_ROOT, "dist", "index.js");
+
+/** How long a process has to log its role. */
+const ROLE_TIMEOUT_MS = 15_000;
+
+export interface ServerOptions {
+  port: number;
+  /** The working directory of the process. */
+  cwd: string;
+  /**
+   * Changes to the environment of this test process. A value of `undefined`
+   * removes the variable. `FIGMA_BRIDGE_OUTPUT_ROOT` is removed unless it is
+   * given here, so a variable of the developer does not leak into a test.
+   */
+  env?: Record<string, string | undefined>;
+}
+
+export type ToolOutcome = { ok: true; data: unknown } | { ok: false; error: string };
+
+export interface ServerProcess {
+  role: "LEADER" | "FOLLOWER";
+  /** Each line the process wrote to standard error. */
+  stderr: string[];
+  /** Calls one tool and parses its text content as JSON. */
+  callTool(name: string, args?: Record<string, unknown>): Promise<ToolOutcome>;
+  close(): Promise<void>;
+}
+
+/**
+ * Starts the server and waits until it logs `Became LEADER` or `Became FOLLOWER`.
+ * @param options - Port, working directory, and environment changes.
+ * @returns The running process.
+ */
+export async function startServer(options: ServerOptions): Promise<ServerProcess> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && key !== "FIGMA_BRIDGE_OUTPUT_ROOT") env[key] = value;
+  }
+  env.FIGMA_BRIDGE_PORT = String(options.port);
+  for (const [key, value] of Object.entries(options.env ?? {})) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+
+  const transport = new StdioClientTransport({
+    command: "node",
+    args: [SERVER_ENTRY],
+    cwd: options.cwd,
+    env,
+    stderr: "pipe",
+  });
+  const stderr: string[] = [];
+  transport.stderr?.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split(/\r?\n/)) {
+      if (line.trim() !== "") stderr.push(line.trim());
+    }
+  });
+
+  const client = new Client({ name: "figma-bridge-test", version: "1.0.0" }, { capabilities: {} });
+  let closed = false;
+  const close = async (): Promise<void> => {
+    if (closed) return;
+    closed = true;
+    await client.close();
+  };
+
+  try {
+    await client.connect(transport);
+    const role = await waitForRole(stderr);
+    return {
+      role,
+      stderr,
+      close,
+      async callTool(name, args = {}) {
+        const result = await client.callTool({ name, arguments: args }, undefined, {
+          timeout: 30_000,
+        });
+        const text = ((result.content ?? []) as Array<{ type: string; text?: string }>)
+          .filter((part) => part.type === "text")
+          .map((part) => part.text ?? "")
+          .join("\n");
+        if (result.isError === true) return { ok: false, error: text };
+        try {
+          return { ok: true, data: JSON.parse(text) as unknown };
+        } catch {
+          return { ok: false, error: `${name} returned text that is not JSON: ${text}` };
+        }
+      },
+    };
+  } catch (err) {
+    await close().catch(() => undefined);
+    const log = stderr.length > 0 ? `\nserver log:\n${stderr.join("\n")}` : "";
+    throw new Error(
+      `Could not start ${SERVER_ENTRY} (run \`bun run build\` in server/): ${
+        err instanceof Error ? err.message : String(err)
+      }${log}`
+    );
+  }
+}
+
+async function waitForRole(stderr: string[]): Promise<"LEADER" | "FOLLOWER"> {
+  const deadline = Date.now() + ROLE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    for (const line of stderr) {
+      if (line.includes("Became LEADER")) return "LEADER";
+      if (line.includes("Became FOLLOWER")) return "FOLLOWER";
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`no role after ${ROLE_TIMEOUT_MS} ms`);
+}
