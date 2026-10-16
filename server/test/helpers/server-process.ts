@@ -12,7 +12,11 @@ const SERVER_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..")
 export const SERVER_ENTRY = join(SERVER_ROOT, "dist", "index.js");
 
 /** The variables of the developer that never leak into a test process. */
-const STRIPPED_VARIABLES = ["FIGMA_BRIDGE_OUTPUT_ROOT", "FIGMA_BRIDGE_TOKEN_FILE"];
+const STRIPPED_VARIABLES = [
+  "FIGMA_BRIDGE_OUTPUT_ROOT",
+  "FIGMA_BRIDGE_TOKEN_FILE",
+  "FIGMA_BRIDGE_DUMP_CHUNK_NODES",
+];
 
 /** How long a process has to log its role. */
 const ROLE_TIMEOUT_MS = 15_000;
@@ -25,9 +29,10 @@ export interface ServerOptions {
   cwd: string;
   /**
    * Changes to the environment of this test process. A value of `undefined`
-   * removes the variable. `FIGMA_BRIDGE_OUTPUT_ROOT` and
-   * `FIGMA_BRIDGE_TOKEN_FILE` are removed unless they are given here, so a
-   * variable of the developer does not leak into a test.
+   * removes the variable. `FIGMA_BRIDGE_OUTPUT_ROOT`,
+   * `FIGMA_BRIDGE_TOKEN_FILE`, and `FIGMA_BRIDGE_DUMP_CHUNK_NODES` are removed
+   * unless they are given here, so a variable of the developer does not leak
+   * into a test.
    * `FIGMA_BRIDGE_TOKEN_FILE` is required: no test reads the real token file.
    */
   env?: Record<string, string | undefined>;

@@ -20,7 +20,21 @@ type SerializedImagePaint = {
   opacity?: number;
 };
 
-type SerializedPaint = SerializedSolidPaint | SerializedGradientPaint | SerializedImagePaint;
+/**
+ * What a dump adds to a paint or an effect. The read tools write neither: they
+ * leave a hidden entry out, and they keep the bindings at node level only.
+ */
+type DumpMarkers = {
+  /** Only on a hidden entry, which only a dump keeps. */
+  visible?: false;
+  /** The own bindings of the paint, as field to variable ID. */
+  boundVariables?: SerializedBoundVariables;
+};
+
+export type SerializedPaint = (
+  SerializedSolidPaint | SerializedGradientPaint | SerializedImagePaint
+) &
+  DumpMarkers;
 
 // --- Serialized effect types ---
 type SerializedShadowEffect = {
@@ -38,7 +52,8 @@ type SerializedBlurEffect = {
   radius: number;
 };
 
-type SerializedEffect = SerializedShadowEffect | SerializedBlurEffect;
+type SerializedEffect = (SerializedShadowEffect | SerializedBlurEffect) &
+  Pick<DumpMarkers, "visible">;
 
 // --- Serialized auto-layout ---
 type SerializedAutoLayout = {
@@ -93,7 +108,7 @@ type SerializedBounds = {
   height: number;
 };
 
-type SerializedNode = {
+export type SerializedNode = {
   id: string;
   name: string;
   type: string;
@@ -110,7 +125,27 @@ type SerializedNode = {
   note?: string;
 };
 
-const isMixed = (value: unknown): value is symbol => typeof value === "symbol";
+/**
+ * How a serialization treats what the read tools leave out.
+ *
+ * Each option is off by default, and with each one off the output is that of
+ * the read tools, byte for byte. Only the dump turns them on.
+ */
+export type SerializeOptions = {
+  /**
+   * Keep each hidden paint and each hidden effect, marked `visible: false`. A
+   * visible entry carries no `visible` field either way.
+   */
+  includeHidden?: boolean;
+  /**
+   * Write the own `boundVariables` of each paint. The node-level
+   * `boundVariables.fills` drops the unbound entries, so it cannot say which
+   * paint a variable is bound to.
+   */
+  paintBindings?: boolean;
+};
+
+export const isMixed = (value: unknown): value is symbol => typeof value === "symbol";
 
 const toHex = (color: RGB): string => {
   const clamp = (value: number) => Math.min(255, Math.max(0, Math.round(value * 255)));
@@ -127,81 +162,140 @@ const serializeGradientStops = (
     position: stop.position,
   }));
 
-const serializePaints = (
-  paints: readonly Paint[] | symbol | undefined
+/**
+ * Marks a hidden paint or effect, when the serialization keeps hidden ones.
+ * @param serialized - The entry as the read tools write it.
+ * @param source - The Figma paint or effect.
+ * @param options - The serialization options.
+ * @returns The entry, the same object when it is visible or the option is off.
+ */
+const markHidden = <T extends object>(
+  serialized: T,
+  source: { visible?: boolean },
+  options: SerializeOptions
+): T =>
+  options.includeHidden && source.visible === false
+    ? { ...serialized, visible: false }
+    : serialized;
+
+/**
+ * Adds the own bindings of a paint, when the serialization asks for them.
+ * @param serialized - The paint as the read tools write it.
+ * @param paint - The Figma paint.
+ * @param options - The serialization options.
+ * @returns The paint, the same object when it binds nothing or the option is off.
+ */
+const withPaintBindings = (
+  serialized: SerializedPaint,
+  paint: Paint,
+  options: SerializeOptions
+): SerializedPaint => {
+  if (!options.paintBindings || !("boundVariables" in paint) || !paint.boundVariables) {
+    return serialized;
+  }
+  const bound = serializeBoundVariableMap(paint.boundVariables as Record<string, unknown>);
+  return bound ? { ...serialized, boundVariables: bound } : serialized;
+};
+
+/**
+ * Serializes one paint as the read tools write it.
+ * @param paint - The Figma paint.
+ * @returns The paint, or nothing for a paint type the read tools do not report.
+ */
+const serializePaint = (paint: Paint): SerializedPaint[] => {
+  switch (paint.type) {
+    case "SOLID":
+      return [
+        {
+          type: "SOLID",
+          color: toHex(paint.color),
+          // Left out at the default, like the style fields around it: a
+          // paint is opaque unless it says otherwise.
+          ...(paint.opacity === 1 ? {} : { opacity: paint.opacity }),
+        },
+      ];
+    case "GRADIENT_LINEAR":
+    case "GRADIENT_RADIAL":
+    case "GRADIENT_ANGULAR":
+    case "GRADIENT_DIAMOND":
+      return [
+        {
+          type: paint.type,
+          gradientStops: serializeGradientStops(paint.gradientStops),
+          gradientTransform: paint.gradientTransform,
+          opacity: paint.opacity,
+        },
+      ];
+    case "IMAGE":
+      return [
+        {
+          type: "IMAGE",
+          scaleMode: paint.scaleMode,
+          imageHash: paint.imageHash,
+          imageTransform: paint.imageTransform,
+          opacity: paint.opacity,
+        },
+      ];
+    default:
+      return [];
+  }
+};
+
+export const serializePaints = (
+  paints: readonly Paint[] | symbol | undefined,
+  options: SerializeOptions = {}
 ): SerializedPaint[] | "mixed" => {
   if (isMixed(paints)) return "mixed";
   if (!paints || !Array.isArray(paints)) return [];
 
   return paints
-    .filter((paint) => paint.visible !== false)
-    .flatMap((paint): SerializedPaint[] => {
-      switch (paint.type) {
-        case "SOLID":
-          return [
-            {
-              type: "SOLID",
-              color: toHex(paint.color),
-              // Left out at the default, like the style fields around it: a
-              // paint is opaque unless it says otherwise.
-              ...(paint.opacity === 1 ? {} : { opacity: paint.opacity }),
-            },
-          ];
-        case "GRADIENT_LINEAR":
-        case "GRADIENT_RADIAL":
-        case "GRADIENT_ANGULAR":
-        case "GRADIENT_DIAMOND":
-          return [
-            {
-              type: paint.type,
-              gradientStops: serializeGradientStops(paint.gradientStops),
-              gradientTransform: paint.gradientTransform,
-              opacity: paint.opacity,
-            },
-          ];
-        case "IMAGE":
-          return [
-            {
-              type: "IMAGE",
-              scaleMode: paint.scaleMode,
-              imageHash: paint.imageHash,
-              imageTransform: paint.imageTransform,
-              opacity: paint.opacity,
-            },
-          ];
-        default:
-          return [];
-      }
-    });
+    .filter((paint) => options.includeHidden || paint.visible !== false)
+    .flatMap((paint) =>
+      serializePaint(paint).map((serialized) =>
+        withPaintBindings(markHidden(serialized, paint, options), paint, options)
+      )
+    );
 };
 
-const serializeEffects = (effects: readonly Effect[]): SerializedEffect[] =>
-  effects
-    .filter((effect) => effect.visible !== false)
-    .flatMap((effect): SerializedEffect[] => {
-      switch (effect.type) {
-        case "DROP_SHADOW":
-        case "INNER_SHADOW":
-          return [
-            {
-              type: effect.type,
-              color: toHex(effect.color),
-              opacity: effect.color.a,
-              offset: effect.offset,
-              radius: effect.radius,
-              spread: effect.spread,
-              blendMode: effect.blendMode,
-            },
-          ];
-        case "LAYER_BLUR":
-        case "BACKGROUND_BLUR":
-          return [{ type: effect.type, radius: effect.radius }];
-        default:
-          return [];
-      }
-    });
+/**
+ * Serializes one effect as the read tools write it.
+ * @param effect - The Figma effect.
+ * @returns The effect, or nothing for an effect type the read tools do not report.
+ */
+const serializeEffect = (effect: Effect): SerializedEffect[] => {
+  switch (effect.type) {
+    case "DROP_SHADOW":
+    case "INNER_SHADOW":
+      return [
+        {
+          type: effect.type,
+          color: toHex(effect.color),
+          opacity: effect.color.a,
+          offset: effect.offset,
+          radius: effect.radius,
+          spread: effect.spread,
+          blendMode: effect.blendMode,
+        },
+      ];
+    case "LAYER_BLUR":
+    case "BACKGROUND_BLUR":
+      return [{ type: effect.type, radius: effect.radius }];
+    default:
+      return [];
+  }
+};
 
-const serializeLineHeight = (lineHeight: LineHeight | symbol) => {
+export const serializeEffects = (
+  effects: readonly Effect[],
+  options: SerializeOptions = {}
+): SerializedEffect[] =>
+  effects
+    .filter((effect) => options.includeHidden || effect.visible !== false)
+    .flatMap((effect) =>
+      serializeEffect(effect).map((serialized) => markHidden(serialized, effect, options))
+    );
+
+export const serializeLineHeight = (lineHeight: LineHeight | symbol) => {
   if (isMixed(lineHeight)) return "mixed";
   if ("value" in lineHeight) {
     return { value: lineHeight.value, unit: lineHeight.unit };
@@ -209,7 +303,7 @@ const serializeLineHeight = (lineHeight: LineHeight | symbol) => {
   return { unit: lineHeight.unit };
 };
 
-const serializeLetterSpacing = (letterSpacing: LetterSpacing | symbol) => {
+export const serializeLetterSpacing = (letterSpacing: LetterSpacing | symbol) => {
   if (isMixed(letterSpacing)) return "mixed";
   return { value: letterSpacing.value, unit: letterSpacing.unit };
 };
@@ -272,7 +366,10 @@ const serializeText = (node: TextNode, base: SerializedNode) => {
  */
 const DEFAULT_BLEND_MODES = new Set(["PASS_THROUGH", "NORMAL"]);
 
-const serializeStyles = (node: SerializableNode): SerializedStyles => {
+const serializeStyles = (
+  node: SerializableNode,
+  options: SerializeOptions = {}
+): SerializedStyles => {
   const styles: SerializedStyles = {};
 
   if ("opacity" in node && node.opacity !== 1) {
@@ -286,13 +383,13 @@ const serializeStyles = (node: SerializableNode): SerializedStyles => {
   }
 
   if ("fills" in node) {
-    const fills = serializePaints(node.fills);
+    const fills = serializePaints(node.fills, options);
     if (fills === "mixed" || fills.length > 0) {
       styles.fills = fills;
     }
   }
   if ("strokes" in node) {
-    const strokes = serializePaints(node.strokes);
+    const strokes = serializePaints(node.strokes, options);
     if (strokes === "mixed" || strokes.length > 0) {
       styles.strokes = strokes;
     }
@@ -316,7 +413,7 @@ const serializeStyles = (node: SerializableNode): SerializedStyles => {
   if ("effects" in node) {
     const effects = node.effects as readonly Effect[];
     if (effects.length > 0) {
-      styles.effects = serializeEffects(effects);
+      styles.effects = serializeEffects(effects, options);
     }
   }
 
@@ -473,16 +570,23 @@ export type SerializableNode = SceneNode | PageNode;
 
 /**
  * Serializes one node on its own, without its children.
+ *
+ * The options reach each paint and effect of the node, those of the text path
+ * included, which reads its fills through the same styles.
  * @param node - The node.
+ * @param options - The serialization options; the read tools pass none.
  * @returns The node, with no `children`.
  */
-const serializeSelf = (node: SerializableNode): SerializedNode => {
+export const serializeSelf = (
+  node: SerializableNode,
+  options: SerializeOptions = {}
+): SerializedNode => {
   const base: SerializedNode = {
     id: node.id,
     name: node.name,
     type: node.type,
     bounds: getBounds(node),
-    styles: serializeStyles(node),
+    styles: serializeStyles(node, options),
   };
 
   const boundVariables = serializeBoundVariables(node);
@@ -512,7 +616,7 @@ const serializeSelf = (node: SerializableNode): SerializedNode => {
  * @param node - The node.
  * @returns Its visible children, empty when it takes none.
  */
-const visibleChildrenOf = (node: SerializableNode): readonly SceneNode[] =>
+export const visibleChildrenOf = (node: SerializableNode): readonly SceneNode[] =>
   "children" in node ? node.children.filter((child) => child.visible !== false) : [];
 
 export const serializeNode = (node: SerializableNode): SerializedNode => {

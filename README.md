@@ -41,6 +41,7 @@ The plugin is named **Figma MCP Bridge (Fork)** and the bridge listens on **port
 | **Text styles** | `list_fonts`, `create_text_style`, `update_text_style`, `delete_text_style`, `apply_text_style`                                                                                                                                                                                              |
 | **Components**  | `list_components`, `get_component`, `get_instance`, `create_component`, `combine_as_variants`, `create_instance`, `swap_instance`, `detach_instance`, `add_component_property`, `edit_component_property`, `delete_component_property`, `bind_component_property`, `set_instance_properties` |
 | **Sections**    | `list_sections`, `get_section`, `create_section`, `move_to_section`, `move_out_of_section`, `fit_section`. The core `ungroup_node` takes a section as well as a group or a frame.                                                                                                            |
+| **Audit**       | `dump_nodes`, which writes complete dumps to disk and returns a manifest. See [Dumps](#dumps).                                                                                                                                                                                               |
 
 The read tools grew with them: `get_variable_defs` reports each collection's `defaultModeId` and each variable's `description` and `scopes`, `get_styles` reports a text style's `description`, `paragraphSpacing`, `paragraphIndent`, `textCase`, `leadingTrim`, and `boundVariables`, `list_components` names the nearest section holding each component as `sectionId` and `sectionName`, and a node reports its `boundVariables`, `textStyleId`, `componentProperties`, and, on a collapsed section, `sectionContentsHidden`.
 
@@ -113,7 +114,7 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 
 ## Audit configuration
 
-The bridge writes evidence files — captures from `save_screenshots` — to disk, so an audit reads them from files instead of carrying each result through its conversation. Each server process writes only under its own **output root**. The leader writes no file for another process: a follower fetches each capture over `/rpc` and writes it itself.
+The bridge writes evidence files — captures from `save_screenshots` and dumps from `dump_nodes` — to disk, so an audit reads them from files instead of carrying each result through its conversation. Each server process writes only under its own **output root**. The leader writes no file for another process: a follower fetches each capture and each dump chunk over `/rpc` and writes the files itself.
 
 | Variable                   | Meaning                                                                                                                                                                                                                                                                                                                                | When unset                            |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
@@ -213,6 +214,7 @@ Both build values are written at build time: the server build writes `server/dis
 | `get_variable_defs`            | Get all variable collections with their default mode, and every variable with its scopes, description, and values                                                                                                                   |
 | `get_screenshot`               | Export nodes as PNG/SVG/JPG/PDF (base64-encoded)                                                                                                                                                                                    |
 | `save_screenshots`             | Export screenshots and save them under the output root (see [Audit configuration](#audit-configuration))                                                                                                                            |
+| `dump_nodes`                   | Write the complete subtree of each root, hidden content included, as canonical JSON under the output root, and return only a manifest (see [Dumps](#dumps))                                                                         |
 | `get_motion_styles`            | List all available animation presets (beta)                                                                                                                                                                                         |
 | `get_node_motion`              | Read a node's current animation styles and properties (beta)                                                                                                                                                                        |
 | `apply_animation_style`        | Apply a preset animation style to a node (beta)                                                                                                                                                                                     |
@@ -281,6 +283,45 @@ All tools accept an optional `fileKey` parameter when multiple Figma files are c
 - A node reports only what has been set on it. A style field sitting at Figma's default — `opacity` 1, `visible` true, no strokes, `cornerRadius` 0, `clipsContent` false, `MIN`/`MIN` constraints, a blend mode that does not blend, an opaque paint — is left out, as `effects`, `rotation`, and `padding` always were, and a node with no children reports no `children`. An absent field holds its default; nothing is lost, and a frame of a few hundred instances reads back about half the size.
 - `get_node` returns the whole subtree, which for a big frame can still be more than one tool call should hand an agent. Past 50,000 characters it fills in as much as fits and says `truncated: true`. A node it stopped at reports `childCount`, the children it really has, beside the `children` it carried — read the rest with `get_node` on that node, or with `get_design_context` and a `depth`. A subtree that fits comes back whole, which is almost every call.
 - `get_node` finds a node on any page, not only the open one. It loads the pages that it needs to search, so in a large file the first read of a node on another page can take time.
+
+#### Dumps
+
+`dump_nodes` writes the complete subtree of each root to disk, under the [output root](#audit-configuration) of the server process that serves the call, and returns only a manifest. An audit reads the files with its own scripts instead of carrying node data through its conversation.
+
+- **Files.** One file for each root, named after its node ID with `_` for `:`, because Windows forbids `:` in a file name: `12:34` gives `12_34.json`. `includeVariables` adds `variables.json`, the payload of `get_variable_defs`. `includeStyles` adds `styles.json`, the payload of `get_styles`. `manifest.json` describes the files. All of them go in `outputPath`, a folder under the output root; the default is `dumps/<UTC time>`, for example `dumps/20260101T120000Z`.
+- **Canonical form.** UTF-8 with no byte order mark, object keys sorted by UTF-16 code unit, arrays in the order Figma gives, no whitespace, no trailing newline, and numbers as `JSON.stringify` writes them. A dump file holds node data only: the times, the epoch, the commit, and the build go in the manifest. Two dumps of a file that did not change are thus byte-identical.
+- **The tree.** Each node has the form of `get_node`, with its children in `children`. A node without children has no `children` field. No character budget applies, so a dump is never cut.
+- **Hidden markers.** With `includeHidden` (the default), a hidden node is in the dump with `styles.visible: false`, the marker that `get_node` uses. A hidden paint or effect is kept with `visible: false`; a visible one has no `visible` field. The nodes inside instances are included: the bridge turns `skipInvisibleInstanceChildren` off for each chunk and sets the old value back after it.
+- **Added fields.** A dump adds what the read tools leave out, each only when it has a value: `mainComponentId` on an instance (`null` when Figma gives none) and `componentSetId` when its main component is a variant; `detachedInfo`; `reactions`; `flowStartingPoints` on a page; `styledTextSegments` on a text node whose style is mixed; and `boundVariables` inside a paint, which names the variable bound to that paint. Each field that `get_node` writes keeps its value.
+- **Chunks.** The serving process asks the plugin for each root in chunks of at most 1,000 nodes or 15 seconds, and builds the tree from them. A record holds no chunk data, so the chunk boundaries do not change the bytes. The process checks the structure of each tree: a lost or a repeated record fails the call.
+- **Failure.** Each file is written as `<name>.partial` and gets its final name only when the whole call succeeded. A failed chunk, a broken tree, a failed write, or a plugin session that changed during the call (a new epoch, a new plugin build, or a restarted leader) fails the call. The error names the root, the cause, and the correction, and no file of the call remains.
+- **No overwrite.** Evidence is append-only. If a target file exists in `outputPath`, the call stops before it reads a node. Give a new `outputPath` for each run.
+- **Not audit evidence.** A dump with `includeHidden: false` leaves out the hidden content, as `get_node` does. The manifest records the option.
+- **Limits.** The editor freezes while a chunk runs, up to 15 seconds. A very large root takes long, and the whole call runs inside one tool call: dump a big root in its own call. One call takes 200 roots at most. The leader refuses `dump_nodes` over `/rpc`: each process serves it itself.
+
+The manifest is the result of the call, and `manifest.json` holds the same text. It holds no node data.
+
+| Field                                                                     | Meaning                                                                                                                                                              |
+| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tool`                                                                    | `dump_nodes`.                                                                                                                                                        |
+| `fileKey`                                                                 | The file that was dumped.                                                                                                                                            |
+| `bridgeCommit`, `leaderCommit`, `pluginBuild`, `epoch`, `leaderStartedAt` | The [instrument identity](#instrument-identity) at the start of the call. The call fails if the epoch, the plugin build, or the leader start changed before its end. |
+| `outputRoot`                                                              | The real absolute path of the output root.                                                                                                                           |
+| `outputPath`                                                              | The folder of the files, relative to `outputRoot`, with `/`.                                                                                                         |
+| `includeHidden`, `includeVariables`, `includeStyles`                      | The options of the call.                                                                                                                                             |
+| `startedAt`, `finishedAt`                                                 | ISO 8601 UTC with milliseconds. `finishedAt` is when the last data file got its final name.                                                                          |
+| `files`                                                                   | One entry for each data file, in the order of `nodeIds`, then `variables.json`, then `styles.json`.                                                                  |
+
+| File field     | Meaning                                                                                                                                                                                                                                          |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `kind`         | `nodes`, `variables`, or `styles`.                                                                                                                                                                                                               |
+| `nodeId`       | The root of a nodes file. `null` for the variables file and the styles file.                                                                                                                                                                     |
+| `path`         | The file, relative to `outputRoot`, with `/`.                                                                                                                                                                                                    |
+| `sha256`       | The SHA-256 of the exact bytes written.                                                                                                                                                                                                          |
+| `bytes`        | The size of the file.                                                                                                                                                                                                                            |
+| `nodeCount`    | Each node in the file: the root, the hidden nodes, and the nodes inside instances included. `null` for the variables file and the styles file.                                                                                                   |
+| `hiddenCount`  | The nodes with `styles.visible: false`. `null` for the variables file and the styles file.                                                                                                                                                       |
+| `variantCount` | For a `COMPONENT_SET` root, its variants in the dump; for another root, the sum over each component set in the dump. With `includeHidden`, it equals the `variantCount` of `list_components`. `null` for the variables file and the styles file. |
 
 ### Editing Notes
 
@@ -367,7 +408,7 @@ bun run format:check  # verify formatting without writing (useful in CI)
 
 ### End-to-end test
 
-`server/scripts/e2e-free-plan.ts` drives every variable, text style, component, and section tool against a real Figma file on a free (Starter) plan, asserting on the parsed results rather than on the absence of an error. It starts its own `node dist/index.js`, which joins the running bridge as a follower, so it covers the follower-to-leader `/rpc` path as well as the tools.
+`server/scripts/e2e-free-plan.ts` drives every variable, text style, component, section, and dump tool against a real Figma file on a free (Starter) plan, asserting on the parsed results rather than on the absence of an error. It starts its own `node dist/index.js`, which joins the running bridge as a follower, so it covers the follower-to-leader `/rpc` path as well as the tools.
 
 Before running it, build the server, open the plugin in the file you want to test against, and make `MCP E2E` the active page in Figma — the script creates that page on the first run, and `list_components` reads whichever page is open.
 
@@ -375,7 +416,7 @@ Before running it, build the server, open the plugin in the file you want to tes
 cd server && FIGMA_FILE_KEY='<key>' bun run e2e
 ```
 
-`FIGMA_FILE_KEY` is required, and must name a connected file. Without it the script refuses to start, lists each connected file with its key and its name, and exits with code 1; it writes nothing before that check. `bun run perf` follows the same rule, and also takes an optional `FIGMA_READ_FILE_KEY`. Everything the e2e script makes is named `mcp-e2e/…` and is removed again in a `finally` block, after a failure as well. It sets the output root of its server to `server/scripts/e2e-output/` (git-ignored), where the screenshots of the test frame land, and a failed step exits with code 1.
+`FIGMA_FILE_KEY` is required, and must name a connected file. Without it the script refuses to start, lists each connected file with its key and its name, and exits with code 1; it writes nothing before that check. `bun run perf` follows the same rule, and also takes an optional `FIGMA_READ_FILE_KEY`. Everything the e2e script makes is named `mcp-e2e/…` and is removed again in a `finally` block, after a failure as well. It sets the output root of its server to `server/scripts/e2e-output/` (git-ignored), where the screenshots and the dumps of the test frame land; the dump group removes its own folder again. A failed step exits with code 1.
 
 ## Structure
 
@@ -390,6 +431,7 @@ Figma-MCP-Bridge/
         ├── follower.ts   # Follower: proxies to leader via HTTP
         ├── rpc-token.ts  # The install token that each /rpc request carries
         ├── identity.ts   # File selection and the identity of one file
+        ├── evidence.ts   # Canonical JSON, SHA-256, and the write of evidence files
         ├── build-info.ts # The commit of this build, from dist/build-info.json
         ├── node.ts       # Dynamic leader/follower role switching
         ├── election.ts   # Leader election & health monitoring

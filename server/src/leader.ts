@@ -25,6 +25,16 @@ export function leaderUrl(port: number): string {
 }
 
 /**
+ * The tools that write evidence files. `/rpc` refuses each of them: the
+ * process that serves the call writes the files under its own output root,
+ * and fetches what it needs from the plugin with the request named here.
+ */
+const SERVED_BY_EACH_PROCESS: ReadonlyMap<string, string> = new Map([
+  ["save_screenshots", "it fetches each capture with get_screenshot"],
+  ["dump_nodes", "it fetches each root in chunks with dump_nodes_chunk"],
+]);
+
+/**
  * Leader owns the WebSocket bridge to Figma and exposes HTTP endpoints for followers.
  * Endpoints:
  *   /ws   — WebSocket upgrade for the Figma plugin
@@ -178,12 +188,12 @@ export class Leader {
           return;
         }
 
-        // Each process serves save_screenshots itself and writes under its own
-        // output root, so the leader writes no file for another process.
-        if (rpcReq.tool === "save_screenshots") {
+        // Each process serves the evidence tools itself and writes under its
+        // own output root, so the leader writes no file for another process.
+        const fetches = SERVED_BY_EACH_PROCESS.get(rpcReq.tool);
+        if (fetches !== undefined) {
           this.sendJSON(res, 400, {
-            error:
-              "save_screenshots is not served over /rpc: each process serves save_screenshots itself, and writes under its own output root (FIGMA_BRIDGE_OUTPUT_ROOT). Call the save_screenshots tool of your own MCP server; it fetches each capture with get_screenshot.",
+            error: `${rpcReq.tool} is not served over /rpc: each process serves ${rpcReq.tool} itself, and writes under its own output root (FIGMA_BRIDGE_OUTPUT_ROOT). Call the ${rpcReq.tool} tool of your own MCP server; ${fetches}.`,
           });
           return;
         }
