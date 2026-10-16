@@ -3,7 +3,7 @@
  *
  * `<commit>[-dirty]+<the first 16 hexadecimal characters of a SHA-256>`. The
  * commit is the full git hash, with `-dirty` when `git status --porcelain`
- * prints a line, and `unknown` without git or outside a repository. The
+ * prints a line (less the temporary config files of Vite), and `unknown` without git or outside a repository. The
  * SHA-256 covers each file under `src/` and five files of the plugin folder,
  * in sorted path order. Each file adds its relative path and its bytes.
  *
@@ -28,6 +28,14 @@ const COVERED_FILES = [
   "vite.config.ts",
   "vite.config.main.ts",
 ];
+
+/**
+ * Vite bundles a config file to `<config>.timestamp-<time>-<hash>.mjs` in the
+ * plugin folder, imports it, and deletes it. The identifier is computed while
+ * the file exists, so `git status` lists it as untracked. It is no change to
+ * the tree, and counting it would make `code.js` dirty and `index.html` clean.
+ */
+const VITE_TEMP_CONFIG = /\.timestamp-\d+-[0-9a-f]+\.mjs$/;
 
 /**
  * Runs git in the plugin folder.
@@ -67,7 +75,10 @@ function listFiles(folder: string): string[] {
 function commitPart(): string {
   const hash = git(["rev-parse", "HEAD"]).trim();
   if (!/^[0-9a-f]{40}$/.test(hash)) return "unknown";
-  return git(["status", "--porcelain"]).trim() === "" ? hash : `${hash}-dirty`;
+  const changes = git(["status", "--porcelain"])
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== "" && !VITE_TEMP_CONFIG.test(line));
+  return changes.length === 0 ? hash : `${hash}-dirty`;
 }
 
 /**
