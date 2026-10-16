@@ -11,7 +11,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/write-build-info.mjs",
     "e2e": "bun scripts/e2e-free-plan.ts",
     "perf": "bun scripts/perf-free-plan.ts",
     "test": "bun test",
