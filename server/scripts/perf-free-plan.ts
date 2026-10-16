@@ -258,7 +258,7 @@ const resolveFileKeys = async (): Promise<string | null> => {
       `list_files failed: ${answer.error}. Run the plugin in the file you want to measure, then run this again.`
     );
   }
-  const listed = asList(answer.data, "list_files");
+  const listed = asList(asRecord(answer.data, "list_files").files, "list_files files");
   const connected = (key: string): boolean => listed.some((file) => file.fileKey === key);
 
   const fromEnv = process.env.FIGMA_FILE_KEY?.trim();

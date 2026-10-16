@@ -27,6 +27,39 @@ export interface RPCResponse {
 export interface ConnectedFile {
   fileKey: string;
   fileName: string;
+  /** The build of the plugin that holds the connection, or "unknown". */
+  pluginBuild: string;
+  /**
+   * How many times a plugin has connected for this file key since the leader
+   * started. A connection that replaces a live one counts too. A disconnect and
+   * a read leave it as it is.
+   */
+  epoch: number;
+}
+
+/** What the leader knows: its own build, its start time, and the connected files. */
+export interface LeaderIdentity {
+  /** The commit of the leader build. */
+  leaderCommit: string;
+  /** When the process became the leader, as an ISO 8601 UTC time. */
+  leaderStartedAt: string;
+  files: ConnectedFile[];
+}
+
+/**
+ * The report of `/ping` (less the status and the version) and of `list_files`.
+ * `bridgeCommit` is the commit of the process that serves the call. It equals
+ * `leaderCommit` when that process is the leader.
+ */
+export interface IdentityReport extends LeaderIdentity {
+  bridgeCommit: string;
+}
+
+/** The identity of one file, as a manifest records it. */
+export interface FileIdentity extends ConnectedFile {
+  bridgeCommit: string;
+  leaderCommit: string;
+  leaderStartedAt: string;
 }
 
 export enum Role {

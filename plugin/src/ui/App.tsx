@@ -141,7 +141,7 @@ export default function App() {
         previousSocket.close();
       }
 
-      const wsUrl = `${WS_BASE_URL}?fileKey=${encodeURIComponent(status.fileKey)}&fileName=${encodeURIComponent(status.fileName)}`;
+      const wsUrl = `${WS_BASE_URL}?fileKey=${encodeURIComponent(status.fileKey)}&fileName=${encodeURIComponent(status.fileName)}&pluginBuild=${encodeURIComponent(__PLUGIN_BUILD__)}`;
       const ws = new WebSocket(wsUrl);
       socketRef.current = ws;
 
@@ -226,6 +226,9 @@ export default function App() {
           <div className="info-row">
             <span className="info-label">Selection:</span>
             <span className="info-value">{status.selectionCount} node(s)</span>
+          </div>
+          <div className="build-id" title="Plugin build">
+            {__PLUGIN_BUILD__}
           </div>
         </div>
 

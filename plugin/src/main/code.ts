@@ -104,9 +104,11 @@ const generateFallbackFileKey = (): string => {
 };
 
 const getFileKey = (): string => {
-  // figma.fileKey is available for saved files; otherwise we generate a
-  // session-scoped fallback so unsaved files (and files with duplicate names)
-  // still get a stable, unique identifier for this plugin instance.
+  // figma.fileKey is the same at each plugin run, but Figma gives it only to a
+  // plugin whose manifest sets "enablePrivatePluginApi": true. Without that
+  // flag, we generate a session-scoped fallback: it is new at each plugin run,
+  // so the epoch of a file (counted for each key) starts again at 1. A file
+  // with no key at all gets the fallback too.
   try {
     if (typeof figma.fileKey === "string" && figma.fileKey) {
       return figma.fileKey;
@@ -1939,6 +1941,7 @@ const postUiCollapseState = () => {
 // Start hidden so the window never flashes at full height before the stored
 // collapsed state is restored. The iframe still loads and runs while hidden.
 figma.showUI(__html__, { width: UI_WIDTH, height: UI_EXPANDED_HEIGHT, visible: false });
+console.log(`[figma-mcp-bridge] plugin build ${__PLUGIN_BUILD__}`);
 
 figma.clientStorage
   .getAsync(UI_COLLAPSED_KEY)

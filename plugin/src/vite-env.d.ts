@@ -14,6 +14,13 @@ interface ImportMetaEnv {
   readonly VITE_FIGMA_BRIDGE_WS?: string;
 }
 
+/**
+ * The identifier of this plugin build, set by `define` in both Vite
+ * configurations from `build-identity.ts`: the commit, `-dirty` when the tree
+ * held uncommitted changes, and a hash of the plugin sources.
+ */
+declare const __PLUGIN_BUILD__: string;
+
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }

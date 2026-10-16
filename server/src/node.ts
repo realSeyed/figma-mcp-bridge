@@ -1,7 +1,7 @@
 import { Leader, leaderUrl } from "./leader.js";
 import { Follower } from "./follower.js";
 import { Role } from "./types.js";
-import type { BridgeResponse, ConnectedFile } from "./types.js";
+import type { BridgeResponse, IdentityReport } from "./types.js";
 
 /**
  * Node is the dynamic handler that switches between leader and follower roles.
@@ -47,12 +47,16 @@ export class Node {
     return this.follower.sendWithParams(requestType, nodeIds, params, fileKey);
   }
 
-  listConnectedFiles(): ConnectedFile[] | undefined {
+  /**
+   * The identity of the instrument: the commit of this process, the commit and
+   * the start time of the leader, and each connected file with its plugin build
+   * and epoch. A follower asks the leader.
+   */
+  async identityReport(): Promise<IdentityReport> {
     if (this._role === Role.Leader && this.leader) {
-      return this.leader.getBridge().listConnectedFiles();
+      return this.leader.identityReport();
     }
-    // Followers return undefined — the tool handler falls back to RPC
-    return undefined;
+    return this.follower.identityReport();
   }
 
   async becomeLeader(): Promise<void> {

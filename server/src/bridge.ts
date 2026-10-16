@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
+import { selectFile } from "./identity.js";
 import type { BridgeRequest, BridgeResponse, ConnectedFile } from "./types.js";
 
 interface PendingRequest {
@@ -14,12 +15,15 @@ interface ConnectionEntry {
   ws: WebSocket;
   fileKey: string;
   fileName: string;
+  pluginBuild: string;
   isAlive: boolean;
 }
 
 export class Bridge {
   private wss: WebSocketServer;
   private connections = new Map<string, ConnectionEntry>();
+  /** The epoch of each file key. It lives in memory: a new leader starts again. */
+  private epochs = new Map<string, number>();
   private pending = new Map<string, PendingRequest>();
   private counter = 0;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -52,7 +56,7 @@ export class Bridge {
     }
 
     const url = new URL(request.url, "http://localhost");
-    const { fileKey, fileName = "Unknown" } = Object.fromEntries(url.searchParams);
+    const { fileKey, fileName = "Unknown", pluginBuild } = Object.fromEntries(url.searchParams);
 
     if (!fileKey) {
       console.error("Plugin connected without fileKey, rejecting");
@@ -61,20 +65,30 @@ export class Bridge {
     }
 
     this.wss.handleUpgrade(request, socket, head, (ws) => {
-      this.handleConnection(ws, fileKey, fileName);
+      this.handleConnection(ws, fileKey, fileName, pluginBuild?.trim().slice(0, 200) || "unknown");
     });
   }
 
-  private handleConnection(ws: WebSocket, fileKey: string, fileName: string): void {
+  private handleConnection(
+    ws: WebSocket,
+    fileKey: string,
+    fileName: string,
+    pluginBuild: string
+  ): void {
     // Replace existing connection for the same file
     const existing = this.connections.get(fileKey);
     if (existing) {
       existing.ws.close();
     }
+    // Count before the connection is stored, so no read sees the new
+    // connection with the old epoch.
+    const epoch = (this.epochs.get(fileKey) ?? 0) + 1;
+    this.epochs.set(fileKey, epoch);
     this.connections.set(fileKey, {
       ws,
       fileKey,
       fileName,
+      pluginBuild,
       isAlive: true,
     });
     console.error(`Plugin connected: ${fileName} (${fileKey})`);
@@ -134,38 +148,16 @@ export class Bridge {
    * - If multiple files connected and no fileKey, throw with a helpful message.
    */
   private resolveConnection(fileKey?: string): WebSocket {
-    if (fileKey) {
-      const entry = this.connections.get(fileKey);
-      if (!entry) {
-        const available = this.listConnectedFiles();
-        const hint =
-          available.length > 0
-            ? ` Connected files: ${available.map((f) => `"${f.fileName}" (fileKey: ${f.fileKey})`).join(", ")}`
-            : " No files are currently connected.";
-        throw new Error(`No plugin connected for fileKey "${fileKey}".${hint}`);
-      }
-      return entry.ws;
-    }
-
-    if (this.connections.size === 0) {
-      throw new Error("No plugin connected. Open a Figma file and run the bridge plugin.");
-    }
-
-    if (this.connections.size === 1) {
-      const entry = this.connections.values().next().value!;
-      return entry.ws;
-    }
-
-    const files = this.listConnectedFiles();
-    throw new Error(
-      `Multiple files connected. Specify a fileKey to choose which file to query. Connected files: ${files.map((f) => `"${f.fileName}" (fileKey: ${f.fileKey})`).join(", ")}. Use the list_files tool to see all connected files.`
-    );
+    const file = selectFile(this.listConnectedFiles(), fileKey);
+    return this.connections.get(file.fileKey)!.ws;
   }
 
   listConnectedFiles(): ConnectedFile[] {
     return [...this.connections.values()].map((entry) => ({
       fileKey: entry.fileKey,
       fileName: entry.fileName,
+      pluginBuild: entry.pluginBuild,
+      epoch: this.epochs.get(entry.fileKey) ?? 0,
     }));
   }
 

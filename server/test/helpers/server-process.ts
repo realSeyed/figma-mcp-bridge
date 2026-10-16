@@ -19,6 +19,8 @@ const ROLE_TIMEOUT_MS = 15_000;
 
 export interface ServerOptions {
   port: number;
+  /** The script to run. The default is `dist/index.js` of this checkout. */
+  entry?: string;
   /** The working directory of the process. */
   cwd: string;
   /**
@@ -52,7 +54,7 @@ export async function startServer(options: ServerOptions): Promise<ServerProcess
 
   const transport = new StdioClientTransport({
     command: "node",
-    args: [SERVER_ENTRY],
+    args: [options.entry ?? SERVER_ENTRY],
     cwd: options.cwd,
     env,
     stderr: "pipe",
@@ -99,7 +101,7 @@ export async function startServer(options: ServerOptions): Promise<ServerProcess
     await close().catch(() => undefined);
     const log = stderr.length > 0 ? `\nserver log:\n${stderr.join("\n")}` : "";
     throw new Error(
-      `Could not start ${SERVER_ENTRY} (run \`bun run build\` in server/): ${
+      `Could not start ${options.entry ?? SERVER_ENTRY} (run \`bun run build\` in server/): ${
         err instanceof Error ? err.message : String(err)
       }${log}`
     );

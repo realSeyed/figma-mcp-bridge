@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
+import { pluginBuildId } from "./build-identity";
 
 export default defineConfig({
+  define: { __PLUGIN_BUILD__: JSON.stringify(pluginBuildId()) },
   build: {
     // The plugin sandbox runs this bundle in Figma's own VM. At an ES2015
     // target esbuild lowers every async function into a generator state

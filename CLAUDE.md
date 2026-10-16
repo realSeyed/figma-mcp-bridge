@@ -43,6 +43,15 @@ in Dev Mode, which is read-only. If no entry exists, control goes to the switch 
 of the core tools. `runExtension` wraps each extension call and puts the tool name in front
 of an error that does not carry it, thus a handler throws cause and correction only.
 
+The bridge reports its identity in `/ping` and `list_files`: `bridgeCommit` (the serving
+process), `leaderCommit`, `leaderStartedAt`, and for each file `pluginBuild` and `epoch`.
+The server build writes `server/dist/build-info.json` with the commit (`-dirty` for an
+unclean tree, `unknown` without git); `server/src/build-info.ts` reads it. The plugin build
+makes one identifier (`plugin/build-identity.ts`), gives it to both bundles with
+`__PLUGIN_BUILD__`, and the window adds it to the WebSocket URL as `pluginBuild`. `Bridge`
+adds 1 to the epoch of a file key at each connection, a replacing one included; a disconnect
+and a read leave it. The epoch lives in memory. `list_files` returns an object, not an array.
+
 Each process writes evidence files only under its own output root
 (`FIGMA_BRIDGE_OUTPUT_ROOT`, else its working directory). The leader writes no file for
 another process: `/rpc` refuses `save_screenshots`, and a follower fetches each capture
@@ -68,6 +77,10 @@ with `get_screenshot` over `/rpc` and writes it itself.
 | `server/src/schema.ts`                     | `toolInputSchemas` and `rpcToArgs` of the core tools.                                      |
 | `server/src/output-root.ts`                | The output root: path resolution, real-path containment, and the evidence file write.      |
 | `server/src/rpc-token.ts`                  | The install token: the path of its file, its creation, its checks. Node built-ins only.    |
+| `server/src/identity.ts`                   | File selection and the identity of one file, for the manifests. Imports types only.        |
+| `server/src/build-info.ts`                 | `BRIDGE_COMMIT`, read from `dist/build-info.json`.                                         |
+| `server/scripts/write-build-info.mjs`      | The build step that writes `dist/build-info.json`.                                         |
+| `plugin/build-identity.ts`                 | The plugin build identifier. Both Vite configurations import it.                           |
 | `server/src/schema-common.ts`              | `createFigmaNodeIdSchema`, `createHexColorSchema`, `fileKeyField`.                         |
 | `server/src/tools.ts`                      | `registerTools` of the core tools.                                                         |
 | `server/src/tool-helpers.ts`               | `renderResponse`, `parseToolInput`, the `ToolResult` type.                                 |
@@ -82,7 +95,8 @@ with `get_screenshot` over `/rpc` and writes it itself.
 | `server/test/`                             | `bun test` tests. Real server processes against a simulated plugin. Helpers in `helpers/`. |
 
 An extension file must not import `schema.ts` or `tools.ts`; this prevents an import cycle.
-It imports only `schema-common.ts`, `tool-helpers.ts`, packages, and types.
+It imports only `schema-common.ts`, `tool-helpers.ts`, `output-root.ts`, `identity.ts`, packages,
+and types; `output-root.ts` and `identity.ts` import neither `schema.ts` nor `tools.ts`.
 
 ## 5. Tool recipe
 
@@ -146,8 +160,10 @@ agent session: the server of a session can run an old build.
 4. The owner runs the plugin again in the test file and opens the page the script needs
    (`MCP E2E` for `bun run e2e`, `MCP Test` for `bun run perf`). Wait for
    `Plugin connected: <name> (<key>)` in the leader output.
-5. Make sure that each connected file is the test file. The key can change at each plugin
-   run, so read it again.
+5. Make sure that each connected file is the test file. The key of `test` is stable when the
+   private plugin API works (`enablePrivatePluginApi` in the manifest, see the README); if
+   `/ping` shows a key that starts with `unsaved-`, it can change at each plugin run, so read
+   it again.
 6. Run the script in `server/` with the key: `FIGMA_FILE_KEY='<key>' bun run e2e`. Each
    test object starts with `mcp-e2e/` or `mcp-test/`, and the script removes it, also after
    a failure.

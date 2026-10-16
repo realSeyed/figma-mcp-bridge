@@ -417,7 +417,7 @@ const resolveFileKey = async (): Promise<string | null> => {
       `list_files failed: ${listed.error}. Open the plugin "Figma MCP Bridge (Fork)" in the test file and run the script again.`
     );
   }
-  const files = readRecords(listed.data, "list_files result");
+  const files = readRecords(readRecord(listed.data, "list_files result").files, "list_files files");
   const fromEnv = process.env.FIGMA_FILE_KEY?.trim();
   const match = files.find((file) => file.fileKey === fromEnv);
   if (fromEnv && match) {

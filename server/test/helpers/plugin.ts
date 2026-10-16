@@ -19,6 +19,8 @@ export interface PluginOptions {
   port: number;
   fileKey: string;
   fileName?: string;
+  /** The `pluginBuild` query parameter. Omitted when not given, as an older plugin does. */
+  pluginBuild?: string;
   handlers?: Record<string, PluginHandler>;
 }
 
@@ -58,6 +60,7 @@ export async function connectPlugin(options: PluginOptions): Promise<SimulatedPl
     fileKey: options.fileKey,
     fileName: options.fileName ?? "harness",
   });
+  if (options.pluginBuild !== undefined) query.set("pluginBuild", options.pluginBuild);
   const socket = new WebSocket(`ws://127.0.0.1:${options.port}/ws?${query.toString()}`);
   const requests: PluginRequest[] = [];
   const handlers = options.handlers ?? {};

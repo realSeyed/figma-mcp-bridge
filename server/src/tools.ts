@@ -32,8 +32,6 @@ import {
   toolInputSchemas,
 } from "./schema.js";
 import type { BridgeResponse } from "./types.js";
-import { Follower } from "./follower.js";
-import { leaderUrl } from "./leader.js";
 import { parseToolInput, renderResponse } from "./tool-helpers.js";
 import type { ToolResult } from "./tool-helpers.js";
 import { registerExtensionTools } from "./extensions/index.js";
@@ -87,22 +85,17 @@ interface SaveScreenshotItemResult {
  * Registers all Figma bridge tools on the given MCP server.
  * @param server - The MCP server instance.
  * @param node - The node coordinator for leader/follower routing.
- * @param port - The port used for follower-to-leader HTTP calls.
+ * @param port - The bridge port. The node makes the follower-to-leader calls, so no tool reads it now.
  */
 export function registerTools(server: McpServer, node: Node, port: number): void {
   server.tool(
     "list_files",
-    "List all currently connected Figma files. Returns fileKey and fileName for each. Use the fileKey to target a specific file in other tools.",
+    "List all currently connected Figma files and the identity of the instrument. Returns { bridgeCommit, leaderCommit, leaderStartedAt, files }; each file has fileKey, fileName, pluginBuild and epoch. The epoch grows at each plugin connection for that key, so a change shows a plugin reload. Use the fileKey to target a specific file in other tools.",
     async (): Promise<ToolResult> => {
       try {
-        let files = node.listConnectedFiles();
-        if (files === undefined) {
-          // Follower: fetch via RPC from leader
-          const follower = new Follower(leaderUrl(port));
-          files = await follower.listConnectedFiles();
-        }
+        const report = await node.identityReport();
         return {
-          content: [{ type: "text", text: JSON.stringify(files) }],
+          content: [{ type: "text", text: JSON.stringify(report) }],
         };
       } catch (err) {
         return {

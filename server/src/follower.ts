@@ -1,5 +1,12 @@
+import { BRIDGE_COMMIT } from "./build-info.js";
 import { rpcToken } from "./rpc-token.js";
-import type { BridgeResponse, ConnectedFile, RPCRequest, RPCResponse } from "./types.js";
+import type {
+  BridgeResponse,
+  IdentityReport,
+  LeaderIdentity,
+  RPCRequest,
+  RPCResponse,
+} from "./types.js";
 
 /**
  * Follower proxies MCP tool calls to the leader via HTTP /rpc. Each request
@@ -50,7 +57,11 @@ export class Follower {
     };
   }
 
-  async listConnectedFiles(): Promise<ConnectedFile[]> {
+  /**
+   * The identity report of this process: the commit of this build, and what the
+   * leader reports about its own build, its start time, and the connected files.
+   */
+  async identityReport(): Promise<IdentityReport> {
     const response = await fetch(`${this.leaderUrl}/rpc`, {
       method: "POST",
       headers: rpcHeaders(),
@@ -68,7 +79,24 @@ export class Follower {
       throw new Error(rpcResp.error);
     }
 
-    return (rpcResp.data as ConnectedFile[]) ?? [];
+    const leader = rpcResp.data as Partial<LeaderIdentity> | undefined;
+    if (
+      typeof leader !== "object" ||
+      leader === null ||
+      !Array.isArray(leader.files) ||
+      typeof leader.leaderCommit !== "string" ||
+      typeof leader.leaderStartedAt !== "string"
+    ) {
+      throw new Error(
+        "The leader answered list_files in an old shape. It runs an older build of the bridge: stop the leader process, then restart the bridge processes from the current build."
+      );
+    }
+    return {
+      bridgeCommit: BRIDGE_COMMIT,
+      leaderCommit: leader.leaderCommit,
+      leaderStartedAt: leader.leaderStartedAt,
+      files: leader.files,
+    };
   }
 
   async ping(): Promise<boolean> {
