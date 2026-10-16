@@ -1,3 +1,4 @@
+import { leaderUrl } from "./leader.js";
 import type { Node } from "./node.js";
 import { Role } from "./types.js";
 
@@ -16,7 +17,7 @@ export class Election {
     private port: number,
     private node: Node
   ) {
-    this.leaderUrl = `http://localhost:${port}`;
+    this.leaderUrl = leaderUrl(port);
   }
 
   async start(): Promise<void> {

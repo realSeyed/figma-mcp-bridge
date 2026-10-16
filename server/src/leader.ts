@@ -6,6 +6,22 @@ import type { RPCRequest, RPCResponse } from "./types.js";
 import { VERSION } from "./version.js";
 
 /**
+ * The leader listens on this address only, so no other machine reaches it.
+ * The server processes call it by the literal address: an IPv4-only bind
+ * refuses `localhost` when it resolves to `::1`.
+ */
+export const LEADER_HOST = "127.0.0.1";
+
+/**
+ * The base URL of the leader on `port`.
+ * @param port - The bridge port.
+ * @returns For example `http://127.0.0.1:1995`.
+ */
+export function leaderUrl(port: number): string {
+  return `http://${LEADER_HOST}:${port}`;
+}
+
+/**
  * Leader owns the WebSocket bridge to Figma and exposes HTTP endpoints for followers.
  * Endpoints:
  *   /ws   — WebSocket upgrade for the Figma plugin
@@ -61,9 +77,9 @@ export class Leader {
         }
       });
 
-      server.listen(this.port, () => {
+      server.listen(this.port, LEADER_HOST, () => {
         this.server = server;
-        console.error(`Leader listening on :${this.port}`);
+        console.error(`Leader listening on ${LEADER_HOST}:${this.port}`);
         resolve();
       });
     });
