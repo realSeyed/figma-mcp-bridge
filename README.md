@@ -192,6 +192,7 @@ All tools accept an optional `fileKey` parameter when multiple Figma files are c
 
 - A node reports only what has been set on it. A style field sitting at Figma's default — `opacity` 1, `visible` true, no strokes, `cornerRadius` 0, `clipsContent` false, `MIN`/`MIN` constraints, a blend mode that does not blend, an opaque paint — is left out, as `effects`, `rotation`, and `padding` always were, and a node with no children reports no `children`. An absent field holds its default; nothing is lost, and a frame of a few hundred instances reads back about half the size.
 - `get_node` returns the whole subtree, which for a big frame can still be more than one tool call should hand an agent. Past 50,000 characters it fills in as much as fits and says `truncated: true`. A node it stopped at reports `childCount`, the children it really has, beside the `children` it carried — read the rest with `get_node` on that node, or with `get_design_context` and a `depth`. A subtree that fits comes back whole, which is almost every call.
+- `get_node` finds a node on any page, not only the open one. It loads the pages that it needs to search, so in a large file the first read of a node on another page can take time.
 
 ### Editing Notes
 
