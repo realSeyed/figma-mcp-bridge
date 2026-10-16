@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * End-to-end test of this fork's variable, text style, component, and section
- * tools against a live Figma file on a free (Starter) plan.
+ * End-to-end test of this fork's variable, text style, component, section,
+ * and dump tools against a live Figma file on a free (Starter) plan.
  *
  * Run it from `server/` with `bun run e2e`, with the Figma plugin connected.
  * The script starts its own `node dist/index.js`. That process joins the
@@ -21,12 +21,14 @@
  *                      environment of this script.
  *
  * The script sets FIGMA_BRIDGE_OUTPUT_ROOT of the spawned server to
- * `scripts/e2e-output/`, so each file that save_screenshots writes lands
- * there.
+ * `scripts/e2e-output/`, so each file that save_screenshots or dump_nodes
+ * writes lands there. The dump group removes the one folder it made.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2147,6 +2149,211 @@ const runNegativeSteps = async (): Promise<void> => {
 // Entry point
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// J Dumps
+// ---------------------------------------------------------------------------
+
+/**
+ * The fields a dump adds to the read form of a node. J4 removes them before
+ * it compares a dump with get_node. `boundVariables` is removed only inside a
+ * paint: the node-level field is in both.
+ */
+const DUMP_ONLY_FIELDS = [
+  "mainComponentId",
+  "componentSetId",
+  "detachedInfo",
+  "reactions",
+  "flowStartingPoints",
+  "styledTextSegments",
+];
+
+/**
+ * A copy of a value with the keys of each object in sorted order, so two
+ * trees compare as JSON text whatever order their keys came in.
+ * @param value - The value.
+ * @returns The copy.
+ */
+const sortedKeys = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(sortedKeys);
+  if (typeof value !== "object" || value === null) return value;
+  const copy: Json = {};
+  for (const key of Object.keys(value).sort()) copy[key] = sortedKeys((value as Json)[key]);
+  return copy;
+};
+
+/**
+ * The read form of a dumped node: the dump-only fields removed, at each level.
+ * @param value - A dumped node, or a part of one.
+ * @returns The copy.
+ */
+const readFormOf = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(readFormOf);
+  if (typeof value !== "object" || value === null) return value;
+  const copy: Json = {};
+  for (const [key, field] of Object.entries(value as Json)) {
+    if (DUMP_ONLY_FIELDS.includes(key)) continue;
+    copy[key] = readFormOf(field);
+  }
+  const styles = copy.styles as Json | undefined;
+  for (const paints of ["fills", "strokes"]) {
+    const list = styles?.[paints];
+    if (!Array.isArray(list)) continue;
+    styles![paints] = list.map((paint) => {
+      const { boundVariables: _bound, ...rest } = paint as Json;
+      return rest;
+    });
+  }
+  return copy;
+};
+
+/**
+ * The first place where two JSON values differ, for a failure message.
+ * @param a - The first value.
+ * @param b - The second value.
+ * @param at - The path so far.
+ * @returns The path and the two values, or null when they are equal.
+ */
+const firstDifference = (a: unknown, b: unknown, at = "$"): string | null => {
+  if (JSON.stringify(sortedKeys(a)) === JSON.stringify(sortedKeys(b))) return null;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) {
+    return `${at}: ${show(a)} against ${show(b)}`;
+  }
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const key of [...keys].sort()) {
+    const found = firstDifference((a as Json)[key], (b as Json)[key], `${at}.${key}`);
+    if (found !== null) return found;
+  }
+  return `${at}: ${show(a)} against ${show(b)}`;
+};
+
+/**
+ * Reads the file of one manifest entry, and checks its size and its SHA-256.
+ * @param manifest - The dump_nodes result.
+ * @param nodeId - The root of the file.
+ * @returns The file entry and the bytes on disk.
+ */
+const readDumpFile = async (
+  manifest: Json,
+  nodeId: string
+): Promise<{ entry: Json; bytes: Buffer }> => {
+  const files = readRecords(manifest.files, "dump_nodes.files");
+  const entry = files.find((file) => file.kind === "nodes" && file.nodeId === nodeId);
+  check(entry !== undefined, `the manifest has no nodes file for ${nodeId}: ${show(files)}`);
+  const path = readString((entry as Json).path, "the manifest path");
+  const bytes = await readFile(join(OUTPUT_DIR, path));
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  check(
+    (entry as Json).sha256 === sha256,
+    `${path} hashes to ${sha256}, but the manifest says ${show((entry as Json).sha256)}`
+  );
+  check(
+    (entry as Json).bytes === bytes.byteLength,
+    `${path} holds ${bytes.byteLength} bytes, but the manifest says ${show((entry as Json).bytes)}`
+  );
+  return { entry: entry as Json, bytes };
+};
+
+/**
+ * Dumps the test root, the set, a hidden layer, and the visible content, and
+ * compares each with the read tools. Every file lands in one folder of this
+ * run under the output root, which the group removes again.
+ */
+const runDumpSteps = async (): Promise<void> => {
+  const runFolder = `mcp-e2e-dumps-${Date.now()}`;
+  const runPath = join(OUTPUT_DIR, runFolder);
+  check(!existsSync(runPath), `${runPath} exists already; remove it, then run again`);
+  const dump = (args: Json): Promise<Json> => okRecord("dump_nodes", args);
+
+  try {
+    await step("J1 two dumps of the root are byte-identical", async () => {
+      const contents: Buffer[] = [];
+      for (const name of ["j1-a", "j1-b"]) {
+        const manifest = await dump({
+          nodeIds: [need("rootId")],
+          outputPath: `${runFolder}/${name}`,
+        });
+        check(
+          manifest.fileKey === fileKey,
+          `the manifest names the file ${show(manifest.fileKey)}, not ${fileKey}`
+        );
+        const { entry, bytes } = await readDumpFile(manifest, need("rootId"));
+        check(
+          readNumber(entry.nodeCount, "nodeCount") > 1,
+          `the root dump holds ${show(entry.nodeCount)} nodes`
+        );
+        contents.push(bytes);
+      }
+      check(
+        contents[0].equals(contents[1]),
+        `the two dumps differ: ${contents[0].byteLength} and ${contents[1].byteLength} bytes`
+      );
+      console.log(`      ${contents[0].byteLength} bytes, identical`);
+    });
+
+    await step("J2 the variantCount of the set equals list_components", async () => {
+      const manifest = await dump({ nodeIds: [need("setId")], outputPath: `${runFolder}/j2` });
+      const { entry } = await readDumpFile(manifest, need("setId"));
+      const listed = await okRecord("list_components", { scope: "currentPage", query: PREFIX });
+      const set = readRecords(listed.items, "list_components.items").find(
+        (item) => item.id === need("setId")
+      );
+      check(set !== undefined, `list_components does not list the set ${need("setId")}`);
+      check(
+        entry.variantCount === (set as Json).variantCount,
+        `the dump counts ${show(entry.variantCount)} variants, list_components ${show((set as Json).variantCount)}`
+      );
+    });
+
+    await step("J3 a hidden child is in the dump and not in get_node", async () => {
+      const before = await okRecord("get_node", { nodeId: need("rootId") });
+      const children = readRecords(before.children, "the root's children");
+      const child = children.find((candidate) => candidate.id !== need("setId"));
+      check(child !== undefined, "the root has no child besides the set to hide");
+      const childId = readString((child as Json).id, "the child's id");
+
+      await ok("set_node_visibility", { items: [{ nodeId: childId, visible: false }] });
+      try {
+        const manifest = await dump({ nodeIds: [need("rootId")], outputPath: `${runFolder}/j3` });
+        const { entry, bytes } = await readDumpFile(manifest, need("rootId"));
+        const tree = readRecord(JSON.parse(bytes.toString("utf8")), "the dump");
+        const dumped = readRecords(tree.children, "the dumped children").find(
+          (candidate) => candidate.id === childId
+        );
+        check(dumped !== undefined, `the dump does not hold the hidden child ${childId}`);
+        const styles = readRecord((dumped as Json).styles, "the hidden child's styles");
+        check(styles.visible === false, `the hidden child has visible ${show(styles.visible)}`);
+        check(
+          readNumber(entry.hiddenCount, "hiddenCount") >= 1,
+          `the manifest counts ${show(entry.hiddenCount)} hidden nodes`
+        );
+
+        const read = await okRecord("get_node", { nodeId: need("rootId") });
+        const ids = readRecords(read.children, "the root's children").map((item) => item.id);
+        check(!ids.includes(childId), `get_node still lists the hidden child ${childId}`);
+      } finally {
+        await ok("set_node_visibility", { items: [{ nodeId: childId, visible: true }] });
+      }
+    });
+
+    await step("J4 a dump without hidden content equals get_node", async () => {
+      const manifest = await dump({
+        nodeIds: [need("rootId")],
+        includeHidden: false,
+        outputPath: `${runFolder}/j4`,
+      });
+      check(manifest.includeHidden === false, `the manifest says ${show(manifest.includeHidden)}`);
+      const { bytes } = await readDumpFile(manifest, need("rootId"));
+      const read = await okRecord("get_node", { nodeId: need("rootId") });
+      check(read.truncated === undefined, "get_node cut the root, so it cannot be compared");
+      const difference = firstDifference(readFormOf(JSON.parse(bytes.toString("utf8"))), read);
+      check(difference === null, `the dump and get_node differ at ${difference}`);
+    });
+  } finally {
+    // Only the folder of this run, which the run made.
+    await rm(runPath, { recursive: true, force: true });
+  }
+};
+
 /** Runs every scenario group in order. Each step records its own outcome. */
 const runScenario = async (): Promise<void> => {
   await runVariableSteps();
@@ -2157,6 +2364,7 @@ const runScenario = async (): Promise<void> => {
   await runReadSteps();
   await runSectionSteps();
   await runNegativeSteps();
+  await runDumpSteps();
 };
 
 /**
