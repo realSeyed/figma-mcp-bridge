@@ -54,8 +54,9 @@ and a read leave it. The epoch lives in memory. `list_files` returns an object, 
 
 Each process writes evidence files only under its own output root
 (`FIGMA_BRIDGE_OUTPUT_ROOT`, else its working directory). The leader writes no file for
-another process: `/rpc` refuses `save_screenshots`, and a follower fetches each capture
-with `get_screenshot` over `/rpc` and writes it itself.
+another process: `/rpc` refuses `save_screenshots` and `dump_nodes` with 400, and a
+follower fetches each capture with `get_screenshot`, and each dump chunk with
+`dump_nodes_chunk`, over `/rpc` and writes the files itself.
 
 `dump_nodes_chunk` (`plugin/src/main/extensions/dumps.ts`, `edit: false`) is an internal
 plugin command: the server sends it, and no MCP tool has its name. Its params are `rootId`,
@@ -76,6 +77,17 @@ the saved value back in `finally`. The dump has no character budget. Its options
 (`includeHidden`, `paintBindings`) reach the serializer, and their defaults keep the output
 of the read tools byte for byte. `plugin/test/serializer.test.ts` fixes that output; do not
 change one of its expected values to make a serializer change pass.
+
+`dump_nodes` (`server/src/extensions/dumps.ts`) runs in the serving process, as
+`save_screenshots` does. It reads the identity of the file with `identity.ts` and resolves
+the file key, then refuses the call if a target file exists. For each root it sends
+`dump_nodes_chunk` requests through `node.sendWithParams` with the resolved key, until
+`nextCursor` is `null`; a follower thus sends each chunk over `/rpc` with the token.
+`TreeBuilder` builds the tree from the records by `depth` and `childCount` and checks the
+structure. The call writes each file as `.partial` under the output root of the serving
+process, reads the identity again, fails if the epoch, the plugin build, or the leader
+start changed, gives each file its final name, and writes `manifest.json`. The result is
+the manifest only. A failure removes each file of the call.
 
 ## 4. File map
 
@@ -98,6 +110,7 @@ change one of its expected values to make a serializer change pass.
 | `server/src/index.ts`                      | Start. Reads `FIGMA_BRIDGE_PORT`. The default is 1995.                                     |
 | `server/src/schema.ts`                     | `toolInputSchemas` and `rpcToArgs` of the core tools.                                      |
 | `server/src/output-root.ts`                | The output root: path resolution, real-path containment, and the evidence file write.      |
+| `server/src/evidence.ts`                   | Canonical JSON, SHA-256, `EvidenceSet` (the `.partial` write), the manifest envelope.      |
 | `server/src/rpc-token.ts`                  | The install token: the path of its file, its creation, its checks. Node built-ins only.    |
 | `server/src/identity.ts`                   | File selection and the identity of one file, for the manifests. Imports types only.        |
 | `server/src/build-info.ts`                 | `BRIDGE_COMMIT`, read from `dist/build-info.json`.                                         |
@@ -112,14 +125,17 @@ change one of its expected values to make a serializer change pass.
 | `server/src/extensions/typography.ts`      | Text style tools.                                                                          |
 | `server/src/extensions/components.ts`      | Component and component set tools.                                                         |
 | `server/src/extensions/sections.ts`        | Section tools.                                                                             |
+| `server/src/extensions/dumps.ts`           | `dump_nodes`: the chunk loop, `TreeBuilder`, the files, and the manifest.                  |
 | `server/scripts/e2e-free-plan.ts`          | The end-to-end script. Drives every extension tool against a real file.                    |
 | `server/scripts/perf-free-plan.ts`         | The measurement script. Holds each tool to 30 seconds and 50,000 characters.               |
 | `server/test/`                             | `bun test` tests. Real server processes against a simulated plugin. Helpers in `helpers/`. |
 | `plugin/test/`                             | `bun test` tests of the serializer, the dump form, and the chunk walk. Synthetic nodes.    |
 
 An extension file must not import `schema.ts` or `tools.ts`; this prevents an import cycle.
-It imports only `schema-common.ts`, `tool-helpers.ts`, `output-root.ts`, `identity.ts`, packages,
-and types; `output-root.ts` and `identity.ts` import neither `schema.ts` nor `tools.ts`.
+It imports only `schema-common.ts`, `tool-helpers.ts`, `output-root.ts`, `identity.ts`,
+`evidence.ts`, packages, and types; `output-root.ts`, `identity.ts`, and `evidence.ts`
+import neither `schema.ts` nor `tools.ts`. `evidence.ts` imports only Node built-in modules,
+`output-root.ts`, and `identity.ts`.
 
 ## 5. Tool recipe
 
@@ -156,6 +172,10 @@ and types; `output-root.ts` and `identity.ts` import neither `schema.ts` nor `to
     the tool name.
 14. A tool that writes a file uses `server/src/output-root.ts`. It never resolves a path
     against `process.cwd()` itself.
+15. An evidence file is canonical JSON (`canonicalJson` in `server/src/evidence.ts`). It is
+    written as `<name>.partial` and gets its final name only when the call succeeds
+    (`EvidenceSet`). It is never overwritten: a target that exists refuses the call before
+    it reads Figma. A failed call removes each file it wrote.
 
 ## 7. Commands
 
@@ -168,6 +188,11 @@ and types; `output-root.ts` and `identity.ts` import neither `schema.ts` nor `to
 | `bun run perf`  | In `server/`. The measurement script. Needs `FIGMA_FILE_KEY`. Reads `FIGMA_READ_FILE_KEY` as well. |
 
 Run `bun run check` before each commit. Commit only if the check passes.
+
+`FIGMA_BRIDGE_DUMP_CHUNK_NODES` is a setting for tests only: the most records that one
+`dump_nodes_chunk` request returns, an integer of 1 or more. The default is 1,000. The test
+harness removes it from each test process unless the test gives it. Do not document it in
+the README.
 
 ## 8. Live test
 
