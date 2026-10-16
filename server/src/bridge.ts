@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
+import { selectFile } from "./identity.js";
 import type { BridgeRequest, BridgeResponse, ConnectedFile } from "./types.js";
 
 interface PendingRequest {
@@ -147,32 +148,8 @@ export class Bridge {
    * - If multiple files connected and no fileKey, throw with a helpful message.
    */
   private resolveConnection(fileKey?: string): WebSocket {
-    if (fileKey) {
-      const entry = this.connections.get(fileKey);
-      if (!entry) {
-        const available = this.listConnectedFiles();
-        const hint =
-          available.length > 0
-            ? ` Connected files: ${available.map((f) => `"${f.fileName}" (fileKey: ${f.fileKey})`).join(", ")}`
-            : " No files are currently connected.";
-        throw new Error(`No plugin connected for fileKey "${fileKey}".${hint}`);
-      }
-      return entry.ws;
-    }
-
-    if (this.connections.size === 0) {
-      throw new Error("No plugin connected. Open a Figma file and run the bridge plugin.");
-    }
-
-    if (this.connections.size === 1) {
-      const entry = this.connections.values().next().value!;
-      return entry.ws;
-    }
-
-    const files = this.listConnectedFiles();
-    throw new Error(
-      `Multiple files connected. Specify a fileKey to choose which file to query. Connected files: ${files.map((f) => `"${f.fileName}" (fileKey: ${f.fileKey})`).join(", ")}. Use the list_files tool to see all connected files.`
-    );
+    const file = selectFile(this.listConnectedFiles(), fileKey);
+    return this.connections.get(file.fileKey)!.ws;
   }
 
   listConnectedFiles(): ConnectedFile[] {

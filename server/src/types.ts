@@ -37,6 +37,31 @@ export interface ConnectedFile {
   epoch: number;
 }
 
+/** What the leader knows: its own build, its start time, and the connected files. */
+export interface LeaderIdentity {
+  /** The commit of the leader build. */
+  leaderCommit: string;
+  /** When the process became the leader, as an ISO 8601 UTC time. */
+  leaderStartedAt: string;
+  files: ConnectedFile[];
+}
+
+/**
+ * The report of `/ping` (less the status and the version) and of `list_files`.
+ * `bridgeCommit` is the commit of the process that serves the call. It equals
+ * `leaderCommit` when that process is the leader.
+ */
+export interface IdentityReport extends LeaderIdentity {
+  bridgeCommit: string;
+}
+
+/** The identity of one file, as a manifest records it. */
+export interface FileIdentity extends ConnectedFile {
+  bridgeCommit: string;
+  leaderCommit: string;
+  leaderStartedAt: string;
+}
+
 export enum Role {
   Unknown = 0,
   Leader = 1,

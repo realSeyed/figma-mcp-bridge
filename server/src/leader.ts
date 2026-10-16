@@ -2,9 +2,10 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import type { Duplex } from "node:stream";
 import { Bridge } from "./bridge.js";
+import { BRIDGE_COMMIT } from "./build-info.js";
 import { rpcToken, tokenFilePath } from "./rpc-token.js";
 import { validateRpc } from "./schema.js";
-import type { RPCRequest, RPCResponse } from "./types.js";
+import type { IdentityReport, LeaderIdentity, RPCRequest, RPCResponse } from "./types.js";
 import { VERSION } from "./version.js";
 
 /**
@@ -27,7 +28,7 @@ export function leaderUrl(port: number): string {
  * Leader owns the WebSocket bridge to Figma and exposes HTTP endpoints for followers.
  * Endpoints:
  *   /ws   — WebSocket upgrade for the Figma plugin
- *   /ping — Health check, open to each local caller
+ *   /ping — Health check and identity report, open to each local caller
  *   /rpc  — JSON RPC for follower tool calls. Needs `Content-Type:
  *           application/json` and `Authorization: Bearer <install token>`.
  *
@@ -39,6 +40,8 @@ export class Leader {
   private server: http.Server | null = null;
   /** The SHA-256 digest of the install token, for a compare in constant time. */
   private tokenDigest: Buffer | null = null;
+  /** When this process became the leader: set when the port is bound. */
+  private startedAt = new Date().toISOString();
 
   constructor(private port: number) {
     this.bridge = new Bridge();
@@ -46,6 +49,20 @@ export class Leader {
 
   getBridge(): Bridge {
     return this.bridge;
+  }
+
+  /** What the leader knows: its build, its start time, and the connected files. */
+  leaderIdentity(): LeaderIdentity {
+    return {
+      leaderCommit: BRIDGE_COMMIT,
+      leaderStartedAt: this.startedAt,
+      files: this.bridge.listConnectedFiles(),
+    };
+  }
+
+  /** The report of the leader as the serving process: both commits are its own. */
+  identityReport(): IdentityReport {
+    return { bridgeCommit: BRIDGE_COMMIT, ...this.leaderIdentity() };
   }
 
   start(): Promise<void> {
@@ -58,7 +75,7 @@ export class Leader {
       const server = http.createServer((req, res) => {
         if (req.url === "/ping" && req.method === "GET") {
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ status: "ok", version: VERSION }));
+          res.end(JSON.stringify({ status: "ok", version: VERSION, ...this.identityReport() }));
           return;
         }
 
@@ -102,6 +119,7 @@ export class Leader {
 
       server.listen(this.port, LEADER_HOST, () => {
         this.server = server;
+        this.startedAt = new Date().toISOString();
         console.error(`Leader listening on ${LEADER_HOST}:${this.port}`);
         resolve();
       });
@@ -152,9 +170,7 @@ export class Leader {
 
         // Handle list_files as a special RPC (not forwarded to plugin)
         if (rpcReq.tool === "list_files") {
-          this.sendJSON(res, 200, {
-            data: this.bridge.listConnectedFiles(),
-          });
+          this.sendJSON(res, 200, { data: this.leaderIdentity() });
           return;
         }
 
