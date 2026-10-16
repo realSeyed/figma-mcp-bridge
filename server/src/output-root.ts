@@ -18,8 +18,10 @@
  *   writeEvidenceFile(path, bytes)   Does the same checks again, makes each
  *                                    missing folder one level at a time with a
  *                                    real-path check after each one, and writes
- *                                    a new file. It never overwrites a file.
- *                                    Returns the number of bytes written.
+ *                                    a new file. It never overwrites a file,
+ *                                    and a write that fails removes the file
+ *                                    it opened. Returns the number of bytes
+ *                                    written.
  *
  * Containment is by real path, so a `..` segment, an absolute path elsewhere,
  * and a symbolic link or a junction inside the root that points out of it are
@@ -27,7 +29,7 @@
  */
 
 import { constants, existsSync } from "node:fs";
-import { access, mkdir, open, realpath, stat } from "node:fs/promises";
+import { access, mkdir, open, realpath, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
 const ROOT_VARIABLE = "FIGMA_BRIDGE_OUTPUT_ROOT";
@@ -173,9 +175,15 @@ export async function writeEvidenceFile(outputPath: string, bytes: Uint8Array): 
   }
   try {
     await handle.writeFile(bytes);
-  } finally {
-    await handle.close();
+  } catch (err) {
+    // The file is this call's own, so a write that fails leaves no part of it.
+    await handle.close().catch(() => undefined);
+    await unlink(finalPath).catch(() => undefined);
+    throw new Error(
+      `Could not write outputPath "${outputPath}" at ${target}: ${errorMessage(err)}`
+    );
   }
+  await handle.close();
   return bytes.byteLength;
 }
 
