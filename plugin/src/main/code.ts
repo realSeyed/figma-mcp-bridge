@@ -364,7 +364,23 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         if (!nodeId) {
           throw new Error("nodeIds is required for get_node");
         }
-        const node = await figma.getNodeByIdAsync(nodeId);
+        const pageMatch = figma.root.children.find((p) => p.id === nodeId);
+        if (pageMatch) {
+          await pageMatch.loadAsync();
+        }
+        let node = await figma.getNodeByIdAsync(nodeId);
+        if (!node && pageMatch) {
+          node = pageMatch;
+        }
+        if (!node) {
+          for (const page of figma.root.children) {
+            if (page.id !== figma.currentPage.id) {
+              await page.loadAsync();
+              node = await figma.getNodeByIdAsync(nodeId);
+              if (node) break;
+            }
+          }
+        }
         if (!node || node.type === "DOCUMENT") {
           throw new Error(`Node not found: ${nodeId}`);
         }

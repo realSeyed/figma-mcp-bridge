@@ -15,7 +15,16 @@ export const supportsChildren = (node: BaseNode): node is BaseNode & ChildrenMix
   "appendChild" in node;
 
 export const getSceneNodeById = async (nodeId: string): Promise<SceneNode> => {
-  const node = await figma.getNodeByIdAsync(nodeId);
+  let node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) {
+    for (const page of figma.root.children) {
+      if (page.id !== figma.currentPage.id) {
+        await page.loadAsync();
+        node = await figma.getNodeByIdAsync(nodeId);
+        if (node) break;
+      }
+    }
+  }
   if (!isSceneNode(node)) {
     throw new Error(`Node not found: ${nodeId}`);
   }
@@ -23,7 +32,16 @@ export const getSceneNodeById = async (nodeId: string): Promise<SceneNode> => {
 };
 
 export const getTextNodeById = async (nodeId: string): Promise<TextNode> => {
-  const node = await figma.getNodeByIdAsync(nodeId);
+  let node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) {
+    for (const page of figma.root.children) {
+      if (page.id !== figma.currentPage.id) {
+        await page.loadAsync();
+        node = await figma.getNodeByIdAsync(nodeId);
+        if (node) break;
+      }
+    }
+  }
   if (!isTextNode(node)) {
     throw new Error(`Text node not found: ${nodeId}`);
   }
