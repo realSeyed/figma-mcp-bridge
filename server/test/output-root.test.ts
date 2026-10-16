@@ -227,7 +227,7 @@ describe("save_screenshots and the output root", () => {
       const cwd = await h.tempDir("cwd");
       const { port, plugin } = await leaderWithPlugin(root, cwd);
 
-      const answer = await postRpc(port, {
+      const answer = await postRpc(port, await h.token(), {
         tool: "save_screenshots",
         params: { items: [{ nodeId: NODE_ID, outputPath: "frame.png" }] },
         fileKey: FILE_KEY,

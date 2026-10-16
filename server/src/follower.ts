@@ -1,7 +1,9 @@
+import { rpcToken } from "./rpc-token.js";
 import type { BridgeResponse, ConnectedFile, RPCRequest, RPCResponse } from "./types.js";
 
 /**
- * Follower proxies MCP tool calls to the leader via HTTP /rpc.
+ * Follower proxies MCP tool calls to the leader via HTTP /rpc. Each request
+ * carries the install token in `Authorization: Bearer <token>`.
  */
 export class Follower {
   constructor(private leaderUrl: string) {}
@@ -23,7 +25,7 @@ export class Follower {
 
     const response = await fetch(`${this.leaderUrl}/rpc`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: rpcHeaders(),
       body: JSON.stringify(rpcReq),
       signal: AbortSignal.timeout(210_000),
     });
@@ -51,13 +53,14 @@ export class Follower {
   async listConnectedFiles(): Promise<ConnectedFile[]> {
     const response = await fetch(`${this.leaderUrl}/rpc`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: rpcHeaders(),
       body: JSON.stringify({ tool: "list_files" } as RPCRequest),
       signal: AbortSignal.timeout(5_000),
     });
 
     if (!response.ok) {
-      throw new Error(`Leader returned status ${response.status}`);
+      const body = (await response.json().catch(() => null)) as RPCResponse | null;
+      throw new Error(body?.error ?? `Leader returned status ${response.status}`);
     }
 
     const rpcResp = (await response.json()) as RPCResponse;
@@ -78,4 +81,11 @@ export class Follower {
       return false;
     }
   }
+}
+
+function rpcHeaders(): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${rpcToken()}`,
+  };
 }

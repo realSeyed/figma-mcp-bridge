@@ -9,9 +9,12 @@
  *
  * Start order: the leader process first, then the simulated plugin, then the
  * followers.
+ *
+ * Each server process of one harness shares one install token file in a
+ * temporary folder, so no test reads the real token file.
  */
 
-import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +26,7 @@ const PRODUCTION_PORT = 1995;
 
 export class Harness {
   private teardowns: Array<() => Promise<void>> = [];
+  private tokenPath: string | undefined;
 
   /** Runs each teardown in reverse order. Collects errors and throws the first one. */
   async cleanup(): Promise<void> {
@@ -86,12 +90,36 @@ export class Harness {
   }
 
   /**
-   * Starts `node dist/index.js` and waits until it has a role.
+   * The token file of this harness, in a temporary folder. The first server
+   * process makes the file.
+   * @returns The absolute path.
+   */
+  async tokenFile(): Promise<string> {
+    if (this.tokenPath === undefined) {
+      this.tokenPath = join(await this.tempDir("token"), "rpc-token");
+    }
+    return this.tokenPath;
+  }
+
+  /**
+   * The install token of this harness. A server process must have made the file.
+   * @returns The token.
+   */
+  async token(): Promise<string> {
+    return (await readFile(await this.tokenFile(), "utf8")).trim();
+  }
+
+  /**
+   * Starts `node dist/index.js` and waits until it has a role. The process
+   * gets the token file of this harness unless `options.env` names another.
    * @param options - Port, working directory, and environment changes.
    * @returns The running process.
    */
   async server(options: ServerOptions): Promise<ServerProcess> {
-    const server = await startServer(options);
+    const server = await startServer({
+      ...options,
+      env: { FIGMA_BRIDGE_TOKEN_FILE: await this.tokenFile(), ...options.env },
+    });
     this.defer(() => server.close());
     return server;
   }

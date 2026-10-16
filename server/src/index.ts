@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { Node } from "./node.js";
 import { Election } from "./election.js";
 import { describeOutputRoot } from "./output-root.js";
+import { rpcToken } from "./rpc-token.js";
 import { registerTools } from "./tools.js";
 import { VERSION } from "./version.js";
 
@@ -28,6 +29,9 @@ const PORT = resolvePort();
 
 async function main(): Promise<void> {
   console.error(describeOutputRoot());
+  // Read the install token now: a bad token file stops the process at start,
+  // not at the first tool call. The token itself is never logged.
+  rpcToken();
 
   const node = new Node(PORT);
   const election = new Election(PORT, node);
