@@ -508,38 +508,38 @@ const handleRequest = async (request: ServerRequest): Promise<PluginResponse> =>
         };
       }
       case "get_variable_defs": {
-        const collections = await figma.variables.getLocalVariableCollectionsAsync();
-        const variableData = await Promise.all(
-          collections.map(async (collection) => {
-            const variables = await Promise.all(
-              collection.variableIds.map((id) => figma.variables.getVariableByIdAsync(id))
-            );
-            return {
-              id: collection.id,
-              name: collection.name,
-              defaultModeId: collection.defaultModeId,
-              modes: collection.modes.map((mode) => ({
-                modeId: mode.modeId,
-                name: mode.name,
-              })),
-              variables: variables
-                .filter((v): v is Variable => v !== null)
-                .map((variable) => ({
-                  id: variable.id,
-                  name: variable.name,
-                  resolvedType: variable.resolvedType,
-                  description: variable.description,
-                  scopes: variable.scopes,
-                  valuesByMode: Object.fromEntries(
-                    Object.entries(variable.valuesByMode).map(([modeId, value]) => [
-                      modeId,
-                      serializeVariableValue(value),
-                    ])
-                  ),
-                })),
-            };
-          })
-        );
+        const [collections, allVariables] = await Promise.all([
+          figma.variables.getLocalVariableCollectionsAsync(),
+          figma.variables.getLocalVariablesAsync(),
+        ]);
+        const varMap = new Map(allVariables.map((v) => [v.id, v]));
+        const variableData = collections.map((collection) => {
+          const variables = collection.variableIds
+            .map((id) => varMap.get(id))
+            .filter((v): v is Variable => v !== undefined && v !== null);
+          return {
+            id: collection.id,
+            name: collection.name,
+            defaultModeId: collection.defaultModeId,
+            modes: collection.modes.map((mode) => ({
+              modeId: mode.modeId,
+              name: mode.name,
+            })),
+            variables: variables.map((variable) => ({
+              id: variable.id,
+              name: variable.name,
+              resolvedType: variable.resolvedType,
+              description: variable.description,
+              scopes: variable.scopes,
+              valuesByMode: Object.fromEntries(
+                Object.entries(variable.valuesByMode).map(([modeId, value]) => [
+                  modeId,
+                  serializeVariableValue(value),
+                ])
+              ),
+            })),
+          };
+        });
         return {
           type: request.type,
           requestId: request.requestId,
