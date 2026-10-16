@@ -1,4 +1,6 @@
 import { BRIDGE_COMMIT } from "./build-info.js";
+import { AUDITOR_ROLE, ROLE_HEADER } from "./role.js";
+import type { ProcessRole } from "./role.js";
 import { rpcToken } from "./rpc-token.js";
 import type {
   BridgeResponse,
@@ -10,10 +12,14 @@ import type {
 
 /**
  * Follower proxies MCP tool calls to the leader via HTTP /rpc. Each request
- * carries the install token in `Authorization: Bearer <token>`.
+ * carries the install token in `Authorization: Bearer <token>`. A process with
+ * the auditor role also sends `X-Figma-Bridge-Role: auditor`.
  */
 export class Follower {
-  constructor(private leaderUrl: string) {}
+  constructor(
+    private leaderUrl: string,
+    private processRole: ProcessRole = null
+  ) {}
 
   send(requestType: string, nodeIds?: string[], fileKey?: string): Promise<BridgeResponse> {
     return this.sendWithParams(requestType, nodeIds, undefined, fileKey);
@@ -32,7 +38,7 @@ export class Follower {
 
     const response = await fetch(`${this.leaderUrl}/rpc`, {
       method: "POST",
-      headers: rpcHeaders(),
+      headers: rpcHeaders(this.processRole),
       body: JSON.stringify(rpcReq),
       signal: AbortSignal.timeout(210_000),
     });
@@ -64,7 +70,7 @@ export class Follower {
   async identityReport(): Promise<IdentityReport> {
     const response = await fetch(`${this.leaderUrl}/rpc`, {
       method: "POST",
-      headers: rpcHeaders(),
+      headers: rpcHeaders(this.processRole),
       body: JSON.stringify({ tool: "list_files" } as RPCRequest),
       signal: AbortSignal.timeout(5_000),
     });
@@ -111,9 +117,11 @@ export class Follower {
   }
 }
 
-function rpcHeaders(): Record<string, string> {
-  return {
+function rpcHeaders(role: ProcessRole): Record<string, string> {
+  const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${rpcToken()}`,
   };
+  if (role === AUDITOR_ROLE) headers[ROLE_HEADER] = AUDITOR_ROLE;
+  return headers;
 }

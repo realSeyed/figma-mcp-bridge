@@ -1,5 +1,6 @@
 import { Leader, leaderUrl } from "./leader.js";
 import { Follower } from "./follower.js";
+import type { ProcessRole } from "./role.js";
 import { Role } from "./types.js";
 import type { BridgeResponse, IdentityReport } from "./types.js";
 
@@ -12,8 +13,15 @@ export class Node {
   private leader: Leader | null = null;
   private follower: Follower;
 
-  constructor(private port: number) {
-    this.follower = new Follower(leaderUrl(port));
+  /**
+   * @param port - The bridge port.
+   * @param processRole - The `FIGMA_BRIDGE_ROLE` of this process. The follower marks each request with it.
+   */
+  constructor(
+    private port: number,
+    processRole: ProcessRole = null
+  ) {
+    this.follower = new Follower(leaderUrl(port), processRole);
   }
 
   get role(): Role {
