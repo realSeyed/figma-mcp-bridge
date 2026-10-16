@@ -159,7 +159,7 @@ The leader listens on `127.0.0.1` only, and `/rpc` runs a tool only for a reques
 | Endpoint | Used by                    | Rules                                                                                                                                                                                                  |
 | -------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `/ws`    | the plugin                 | WebSocket upgrade. Reachable from this machine only, through the bind on `127.0.0.1`. The plugin names its `fileKey`.                                                                                  |
-| `/ping`  | discovery, leader election | `GET`. Open to each local caller; it needs no token.                                                                                                                                                   |
+| `/ping`  | discovery, leader election | `GET`. Open to each local caller; it needs no token. Answers `{ status, version, bridgeCommit, leaderStartedAt, files }`; see [Instrument identity](#instrument-identity).                             |
 | `/rpc`   | follower server processes  | `POST` only. Needs `Content-Type: application/json` (a `charset` parameter is allowed), else 415. Needs `Authorization: Bearer <token>`, else 401. A wrong token gets 403. Each other method gets 405. |
 
 The leader checks the headers before it reads the body, so a refused request runs no tool. No answer carries an `Access-Control-Allow-*` header: a browser page must send a preflight for a cross-origin JSON POST, and the leader refuses the preflight.
@@ -172,80 +172,107 @@ curl -s -X POST http://127.0.0.1:1995/rpc -H "Content-Type: application/json" -H
 
 On macOS or Linux, read `~/.config/figma-mcp-bridge/rpc-token` instead. Use `127.0.0.1`, not `localhost`: `localhost` can resolve to `::1`, where the leader does not listen.
 
+### Instrument identity
+
+An audit counts only if the instrument did not change while it ran. `/ping` and `list_files` report which build of the bridge and of the plugin serves a call, and an **epoch** that shows a swapped plugin session.
+
+```json
+{
+  "bridgeCommit": "…",
+  "leaderCommit": "…",
+  "leaderStartedAt": "2026-01-01T00:00:00.000Z",
+  "files": [{ "fileKey": "…", "fileName": "…", "pluginBuild": "…", "epoch": 3 }]
+}
+```
+
+| Field             | Meaning                                                                                                                                                                                                                                      |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bridgeCommit`    | The git commit of the build of the process that serves the call: 40 hexadecimal characters. `-dirty` is added when the tree held uncommitted changes at build time. `unknown` without git or outside a repository.                           |
+| `leaderCommit`    | The same value for the leader process. It equals `bridgeCommit` when the serving process is the leader. A follower and its leader can run different builds, so check both. `/ping` is answered by the leader, so its `bridgeCommit` is this. |
+| `leaderStartedAt` | When the process became the leader, in ISO 8601 UTC. The epoch lives in memory, so a restart of the leader starts every epoch again at 1; a new `leaderStartedAt` shows it.                                                                  |
+| `pluginBuild`     | The build of the plugin that holds the connection: `<commit>[-dirty]+<16 hexadecimal characters>`. The characters are a SHA-256 over `plugin/src/`, the manifest, the lock file, and the Vite configurations. `unknown` for an older plugin. |
+| `epoch`           | A counter for each `fileKey`. It grows by 1 at each plugin connection for that key, also a connection that replaces a live one. A disconnect keeps it. A read never changes it.                                                              |
+
+Both build values are written at build time: the server build writes `server/dist/build-info.json`, and the plugin build puts the identifier into the window and the main code. The window shows the plugin build in small text, so the owner can compare it with what `list_files` reports. Rebuild with `bun run check` before a live run: a process of an older build reports an older commit.
+
+**How the auditor uses it.** Read `list_files` when an audit is released, when it reads, and when it closes. The audit counts only if `bridgeCommit`, `leaderCommit`, `leaderStartedAt`, `pluginBuild`, and `epoch` are the same at each read. Check `bridgeCommit` and `pluginBuild` against the record of the instrument. A reload of the plugin, a replaced session, or a restart of the leader changes at least one value.
+
+**The file key.** `plugin/manifest.json` sets `"enablePrivatePluginApi": true`. Figma then gives the plugin `figma.fileKey`, which is the same at each plugin run, so a reload of the plugin in one file raises the epoch of the same key. Without the flag the plugin uses a key of the form `unsaved-…` that is new at each run, and the epoch would start again at 1. After you import the manifest again, a key that starts with `unsaved-` means that Figma did not give the key; compare the key and the epoch together in that case.
+
 ## Available Tools
 
-| Tool                           | Description                                                                                                       |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| `list_files`                   | List all connected Figma files (supports multi-file workflows)                                                    |
-| `get_document`                 | Get the current Figma page document tree                                                                          |
-| `get_selection`                | Get the currently selected nodes in Figma                                                                         |
-| `get_node`                     | Get a specific Figma node by ID (colon format, e.g. `4029:12345`)                                                 |
-| `get_styles`                   | Get all local paint, text, effect, and grid styles                                                                |
-| `get_metadata`                 | Get file name, pages, and current page info                                                                       |
-| `get_design_context`           | Get a depth-limited tree optimized for understanding design context                                               |
-| `get_variable_defs`            | Get all variable collections with their default mode, and every variable with its scopes, description, and values |
-| `get_screenshot`               | Export nodes as PNG/SVG/JPG/PDF (base64-encoded)                                                                  |
-| `save_screenshots`             | Export screenshots and save them under the output root (see [Audit configuration](#audit-configuration))          |
-| `get_motion_styles`            | List all available animation presets (beta)                                                                       |
-| `get_node_motion`              | Read a node's current animation styles and properties (beta)                                                      |
-| `apply_animation_style`        | Apply a preset animation style to a node (beta)                                                                   |
-| `remove_animation_style`       | Remove an applied animation style from a node (beta)                                                              |
-| `apply_manual_keyframe_track`  | Apply a manual keyframe track to a node property (beta)                                                           |
-| `remove_manual_keyframe_track` | Remove a manual keyframe track from a node property (beta)                                                        |
-| `set_timeline_duration`        | Set the duration of a timeline in seconds (beta)                                                                  |
-| `set_node_visibility`          | Show or hide specific nodes                                                                                       |
-| `set_text_content`             | Replace the contents of a text node                                                                               |
-| `set_text_properties`          | Patch font, size, alignment, auto-resize, color, and bounds on a text node                                        |
-| `set_node_properties`          | Patch common node properties: name, position, size, visibility, opacity, corner radius                            |
-| `set_solid_fill`               | Replace a node's fill or stroke with a single solid paint                                                         |
-| `set_gradient_fill`            | Replace a node's fill or stroke with a linear/radial/angular/diamond gradient                                     |
-| `set_effects`                  | Replace a node's effects list (drop/inner shadows, layer/background blurs)                                        |
-| `set_stroke_properties`        | Patch stroke weight, align, dash pattern, cap, and join                                                           |
-| `set_auto_layout`              | Configure auto-layout direction, padding, gap, alignment, sizing, and wrap                                        |
-| `create_page`                  | Create a new page in the document, optionally switching to it                                                     |
-| `create_frame`                 | Create a new frame, optionally under a parent                                                                     |
-| `create_text`                  | Create a new text node                                                                                            |
-| `create_shape`                 | Create a rectangle, ellipse, or line                                                                              |
-| `create_image`                 | Create an image-backed rectangle from a local path, URL, or data URI                                              |
-| `import_html_layers`           | Bulk-import an html-figma layer tree (JSON) as frames, text, rectangles, and vectors                              |
-| `duplicate_nodes`              | Duplicate nodes in place — each copy lands in its source's parent, directly above it                              |
-| `reparent_nodes`               | Move nodes into another parent                                                                                    |
-| `group_nodes`                  | Wrap a list of nodes (sharing a parent) in a new group                                                            |
-| `ungroup_node`                 | Ungroup a group, a frame, or a section — children move up to its parent                                           |
-| `set_selection`                | Set the page selection to a list of node IDs (works in Dev Mode)                                                  |
-| `scroll_and_zoom_into_view`    | Frame the viewport around the given nodes (works in Dev Mode)                                                     |
-| `delete_nodes`                 | Delete nodes with explicit confirmation                                                                           |
-| `create_variable_collection`   | Create a variable collection for design tokens (one mode on a free plan)                                          |
-| `update_variable_collection`   | Rename a variable collection                                                                                      |
-| `delete_variable_collection`   | Delete a variable collection and every variable in it, with explicit confirmation                                 |
-| `create_variables`             | Create up to 200 variables in one collection with values, aliases, scopes                                         |
-| `update_variables`             | Change the name, value, scopes, or description of up to 200 variables                                             |
-| `delete_variables`             | Delete up to 200 variables and report what aliased each one, with explicit confirmation                           |
-| `bind_variables`               | Bind variables to node fields such as `fills`, `itemSpacing`, or `characters`, or remove a binding                |
-| `list_fonts`                   | List the fonts Figma can use, grouped by family                                                                   |
-| `create_text_style`            | Create a local text style, optionally with variables driving its fields                                           |
-| `update_text_style`            | Change the name, font, metrics, or bound variables of a text style                                                |
-| `delete_text_style`            | Delete a text style with explicit confirmation                                                                    |
-| `apply_text_style`             | Apply a text style to up to 200 text nodes, or to one range of characters                                         |
-| `list_components`              | List the local components and component sets of a page, of one section, or of the whole file                      |
-| `get_component`                | Read one component or component set: its properties, its variants, and its default variant                        |
-| `get_instance`                 | Read one instance: its main component, its property values, and its overrides                                     |
-| `create_component`             | Create a local component, by converting a node or from a width and a height                                       |
-| `combine_as_variants`          | Combine 2 to 50 components into one component set, laid out in a row or a column                                  |
-| `create_instance`              | Create an instance of a component, or of one variant of a component set                                           |
-| `swap_instance`                | Point an instance at another component or variant, in place                                                       |
-| `detach_instance`              | Turn up to 200 instances into plain frames                                                                        |
-| `add_component_property`       | Add a BOOLEAN, TEXT, INSTANCE_SWAP, or VARIANT property to a component or a component set                         |
-| `edit_component_property`      | Rename a component property, or change its default value or its preferred values                                  |
-| `delete_component_property`    | Delete a component property with explicit confirmation                                                            |
-| `bind_component_property`      | Point a layer's `characters`, `visible`, or `mainComponent` at a component property, or remove the link           |
-| `set_instance_properties`      | Set the property values of one instance, including which variant of a set it is                                   |
-| `list_sections`                | List the sections of the current page or of the whole file, with their nesting                                    |
-| `get_section`                  | Read one section: its children, where its content really sits, and what hangs outside it                          |
-| `create_section`               | Create a section, empty at a given size or wrapped around nodes that are already there                            |
-| `move_to_section`              | Move nodes into a section without moving them on the canvas, and optionally fit it around them                    |
-| `move_out_of_section`          | Lift nodes out of their section to whatever holds it, without moving them on the canvas                           |
-| `fit_section`                  | Draw a section tight around the children it holds, leaving padding, without moving any of them                    |
+| Tool                           | Description                                                                                                                                                                                                                         |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_files`                   | List the connected Figma files and the identity of the bridge: `bridgeCommit`, `leaderCommit`, `leaderStartedAt`, and for each file `fileKey`, `fileName`, `pluginBuild`, `epoch` (see [Instrument identity](#instrument-identity)) |
+| `get_document`                 | Get the current Figma page document tree                                                                                                                                                                                            |
+| `get_selection`                | Get the currently selected nodes in Figma                                                                                                                                                                                           |
+| `get_node`                     | Get a specific Figma node by ID (colon format, e.g. `4029:12345`)                                                                                                                                                                   |
+| `get_styles`                   | Get all local paint, text, effect, and grid styles                                                                                                                                                                                  |
+| `get_metadata`                 | Get file name, pages, and current page info                                                                                                                                                                                         |
+| `get_design_context`           | Get a depth-limited tree optimized for understanding design context                                                                                                                                                                 |
+| `get_variable_defs`            | Get all variable collections with their default mode, and every variable with its scopes, description, and values                                                                                                                   |
+| `get_screenshot`               | Export nodes as PNG/SVG/JPG/PDF (base64-encoded)                                                                                                                                                                                    |
+| `save_screenshots`             | Export screenshots and save them under the output root (see [Audit configuration](#audit-configuration))                                                                                                                            |
+| `get_motion_styles`            | List all available animation presets (beta)                                                                                                                                                                                         |
+| `get_node_motion`              | Read a node's current animation styles and properties (beta)                                                                                                                                                                        |
+| `apply_animation_style`        | Apply a preset animation style to a node (beta)                                                                                                                                                                                     |
+| `remove_animation_style`       | Remove an applied animation style from a node (beta)                                                                                                                                                                                |
+| `apply_manual_keyframe_track`  | Apply a manual keyframe track to a node property (beta)                                                                                                                                                                             |
+| `remove_manual_keyframe_track` | Remove a manual keyframe track from a node property (beta)                                                                                                                                                                          |
+| `set_timeline_duration`        | Set the duration of a timeline in seconds (beta)                                                                                                                                                                                    |
+| `set_node_visibility`          | Show or hide specific nodes                                                                                                                                                                                                         |
+| `set_text_content`             | Replace the contents of a text node                                                                                                                                                                                                 |
+| `set_text_properties`          | Patch font, size, alignment, auto-resize, color, and bounds on a text node                                                                                                                                                          |
+| `set_node_properties`          | Patch common node properties: name, position, size, visibility, opacity, corner radius                                                                                                                                              |
+| `set_solid_fill`               | Replace a node's fill or stroke with a single solid paint                                                                                                                                                                           |
+| `set_gradient_fill`            | Replace a node's fill or stroke with a linear/radial/angular/diamond gradient                                                                                                                                                       |
+| `set_effects`                  | Replace a node's effects list (drop/inner shadows, layer/background blurs)                                                                                                                                                          |
+| `set_stroke_properties`        | Patch stroke weight, align, dash pattern, cap, and join                                                                                                                                                                             |
+| `set_auto_layout`              | Configure auto-layout direction, padding, gap, alignment, sizing, and wrap                                                                                                                                                          |
+| `create_page`                  | Create a new page in the document, optionally switching to it                                                                                                                                                                       |
+| `create_frame`                 | Create a new frame, optionally under a parent                                                                                                                                                                                       |
+| `create_text`                  | Create a new text node                                                                                                                                                                                                              |
+| `create_shape`                 | Create a rectangle, ellipse, or line                                                                                                                                                                                                |
+| `create_image`                 | Create an image-backed rectangle from a local path, URL, or data URI                                                                                                                                                                |
+| `import_html_layers`           | Bulk-import an html-figma layer tree (JSON) as frames, text, rectangles, and vectors                                                                                                                                                |
+| `duplicate_nodes`              | Duplicate nodes in place — each copy lands in its source's parent, directly above it                                                                                                                                                |
+| `reparent_nodes`               | Move nodes into another parent                                                                                                                                                                                                      |
+| `group_nodes`                  | Wrap a list of nodes (sharing a parent) in a new group                                                                                                                                                                              |
+| `ungroup_node`                 | Ungroup a group, a frame, or a section — children move up to its parent                                                                                                                                                             |
+| `set_selection`                | Set the page selection to a list of node IDs (works in Dev Mode)                                                                                                                                                                    |
+| `scroll_and_zoom_into_view`    | Frame the viewport around the given nodes (works in Dev Mode)                                                                                                                                                                       |
+| `delete_nodes`                 | Delete nodes with explicit confirmation                                                                                                                                                                                             |
+| `create_variable_collection`   | Create a variable collection for design tokens (one mode on a free plan)                                                                                                                                                            |
+| `update_variable_collection`   | Rename a variable collection                                                                                                                                                                                                        |
+| `delete_variable_collection`   | Delete a variable collection and every variable in it, with explicit confirmation                                                                                                                                                   |
+| `create_variables`             | Create up to 200 variables in one collection with values, aliases, scopes                                                                                                                                                           |
+| `update_variables`             | Change the name, value, scopes, or description of up to 200 variables                                                                                                                                                               |
+| `delete_variables`             | Delete up to 200 variables and report what aliased each one, with explicit confirmation                                                                                                                                             |
+| `bind_variables`               | Bind variables to node fields such as `fills`, `itemSpacing`, or `characters`, or remove a binding                                                                                                                                  |
+| `list_fonts`                   | List the fonts Figma can use, grouped by family                                                                                                                                                                                     |
+| `create_text_style`            | Create a local text style, optionally with variables driving its fields                                                                                                                                                             |
+| `update_text_style`            | Change the name, font, metrics, or bound variables of a text style                                                                                                                                                                  |
+| `delete_text_style`            | Delete a text style with explicit confirmation                                                                                                                                                                                      |
+| `apply_text_style`             | Apply a text style to up to 200 text nodes, or to one range of characters                                                                                                                                                           |
+| `list_components`              | List the local components and component sets of a page, of one section, or of the whole file                                                                                                                                        |
+| `get_component`                | Read one component or component set: its properties, its variants, and its default variant                                                                                                                                          |
+| `get_instance`                 | Read one instance: its main component, its property values, and its overrides                                                                                                                                                       |
+| `create_component`             | Create a local component, by converting a node or from a width and a height                                                                                                                                                         |
+| `combine_as_variants`          | Combine 2 to 50 components into one component set, laid out in a row or a column                                                                                                                                                    |
+| `create_instance`              | Create an instance of a component, or of one variant of a component set                                                                                                                                                             |
+| `swap_instance`                | Point an instance at another component or variant, in place                                                                                                                                                                         |
+| `detach_instance`              | Turn up to 200 instances into plain frames                                                                                                                                                                                          |
+| `add_component_property`       | Add a BOOLEAN, TEXT, INSTANCE_SWAP, or VARIANT property to a component or a component set                                                                                                                                           |
+| `edit_component_property`      | Rename a component property, or change its default value or its preferred values                                                                                                                                                    |
+| `delete_component_property`    | Delete a component property with explicit confirmation                                                                                                                                                                              |
+| `bind_component_property`      | Point a layer's `characters`, `visible`, or `mainComponent` at a component property, or remove the link                                                                                                                             |
+| `set_instance_properties`      | Set the property values of one instance, including which variant of a set it is                                                                                                                                                     |
+| `list_sections`                | List the sections of the current page or of the whole file, with their nesting                                                                                                                                                      |
+| `get_section`                  | Read one section: its children, where its content really sits, and what hangs outside it                                                                                                                                            |
+| `create_section`               | Create a section, empty at a given size or wrapped around nodes that are already there                                                                                                                                              |
+| `move_to_section`              | Move nodes into a section without moving them on the canvas, and optionally fit it around them                                                                                                                                      |
+| `move_out_of_section`          | Lift nodes out of their section to whatever holds it, without moving them on the canvas                                                                                                                                             |
+| `fit_section`                  | Draw a section tight around the children it holds, leaving padding, without moving any of them                                                                                                                                      |
 
 All tools accept an optional `fileKey` parameter when multiple Figma files are connected. Use `list_files` to discover connected files and their keys.
 
@@ -362,6 +389,8 @@ Figma-MCP-Bridge/
         ├── leader.ts     # Leader: HTTP server + bridge
         ├── follower.ts   # Follower: proxies to leader via HTTP
         ├── rpc-token.ts  # The install token that each /rpc request carries
+        ├── identity.ts   # File selection and the identity of one file
+        ├── build-info.ts # The commit of this build, from dist/build-info.json
         ├── node.ts       # Dynamic leader/follower role switching
         ├── election.ts   # Leader election & health monitoring
         ├── tools.ts      # MCP tool definitions
