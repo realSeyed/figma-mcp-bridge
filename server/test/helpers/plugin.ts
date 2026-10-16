@@ -27,6 +27,12 @@ export interface PluginOptions {
 export interface SimulatedPlugin {
   /** Each request the plugin got, in order. */
   requests: PluginRequest[];
+  /**
+   * Stops reading from the socket; sending still works. A close frame of the
+   * leader then waits unread, so the socket stays open on this side, and an
+   * answer sent now still reaches the leader. `close` reads again first.
+   */
+  pause(): void;
   close(): Promise<void>;
 }
 
@@ -89,9 +95,11 @@ export async function connectPlugin(options: PluginOptions): Promise<SimulatedPl
 
   return {
     requests,
+    pause: () => socket.pause(),
     close: () =>
       new Promise<void>((resolve) => {
         if (socket.readyState === WebSocket.CLOSED) return resolve();
+        socket.resume();
         socket.once("close", () => resolve());
         socket.close();
         setTimeout(() => {
