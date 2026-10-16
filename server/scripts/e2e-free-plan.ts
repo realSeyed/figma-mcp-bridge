@@ -23,6 +23,9 @@
  * The script sets FIGMA_BRIDGE_OUTPUT_ROOT of the spawned server to
  * `scripts/e2e-output/`, so each file that save_screenshots or dump_nodes
  * writes lands there. The dump group removes the one folder it made.
+ *
+ * Group K spawns a second server with FIGMA_BRIDGE_ROLE=auditor and its own
+ * output root under `scripts/e2e-output/`, and removes both at the end.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -2354,6 +2357,162 @@ const runDumpSteps = async (): Promise<void> => {
   }
 };
 
+// ---------------------------------------------------------------------------
+// K Auditor role
+// ---------------------------------------------------------------------------
+
+/** The 15 tools of the auditor role (BR-3), written out here and not imported. */
+const AUDITOR_TOOL_NAMES = [
+  "dump_nodes",
+  "get_component",
+  "get_document",
+  "get_instance",
+  "get_metadata",
+  "get_node",
+  "get_section",
+  "get_styles",
+  "get_variable_defs",
+  "list_components",
+  "list_files",
+  "list_fonts",
+  "list_sections",
+  "save_screenshots",
+  "scroll_and_zoom_into_view",
+];
+
+/** The port the leader listens on: the one the spawned servers use. */
+const leaderPort = (): number => {
+  const raw = process.env.FIGMA_BRIDGE_PORT;
+  return raw === undefined ? 1995 : Number(raw.trim());
+};
+
+/**
+ * Starts a second server process with the auditor role and its own output
+ * root, and checks its tool list, its files, and the refusal of the leader for
+ * a marked write. The process and its output root go away at the end, also
+ * after a failure.
+ */
+const runAuditorSteps = async (): Promise<void> => {
+  const auditorRoot = join(OUTPUT_DIR, `mcp-e2e-auditor-${Date.now()}`);
+  check(!existsSync(auditorRoot), `${auditorRoot} exists already; remove it, then run again`);
+  await mkdir(auditorRoot, { recursive: true });
+
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[key] = value;
+  }
+  env.FIGMA_BRIDGE_OUTPUT_ROOT = auditorRoot;
+  env.FIGMA_BRIDGE_ROLE = "auditor";
+
+  const transport = new StdioClientTransport({
+    command: "node",
+    args: [SERVER_ENTRY],
+    cwd: SERVER_ROOT,
+    env,
+    stderr: "pipe",
+  });
+  const auditorLog: string[] = [];
+  transport.stderr?.on("data", (chunk: Buffer) => {
+    const line = chunk.toString().trim();
+    if (line !== "") auditorLog.push(line);
+  });
+  const auditor = new Client(
+    { name: "figma-bridge-e2e-auditor", version: "1.0.0" },
+    { capabilities: {} }
+  );
+
+  const callAuditor = async (name: string, args: Json): Promise<unknown> => {
+    const result = await auditor.callTool({ name, arguments: { fileKey, ...args } }, undefined, {
+      timeout: CALL_TIMEOUT_MS,
+    });
+    const parts = (result.content ?? []) as Array<{ type: string; text?: string }>;
+    const text = parts.map((part) => part.text ?? "").join("\n");
+    check(result.isError !== true, `${name} through the auditor process failed: ${text}`);
+    return JSON.parse(text) as unknown;
+  };
+
+  try {
+    const started = await step("K1 the auditor process lists exactly the 15 tools", async () => {
+      try {
+        await auditor.connect(transport);
+      } catch (err) {
+        throw new AssertionError(
+          `the auditor process did not start: ${err instanceof Error ? err.message : String(err)}\n${auditorLog.join("\n")}`
+        );
+      }
+      const names = (await auditor.listTools()).tools.map((tool) => tool.name).sort();
+      check(
+        names.length === AUDITOR_TOOL_NAMES.length && names.join() === AUDITOR_TOOL_NAMES.join(),
+        `the auditor process lists ${names.length} tools: ${names.join(", ")}`
+      );
+    });
+    if (!started) return;
+
+    await step("K2 dump_nodes and save_screenshots write under the auditor root", async () => {
+      const manifest = readRecord(
+        await callAuditor("dump_nodes", { nodeIds: [need("rootId")], outputPath: "dump" }),
+        "dump_nodes result"
+      );
+      const entry = readRecords(manifest.files, "dump_nodes.files").find(
+        (file) => file.kind === "nodes" && file.nodeId === need("rootId")
+      );
+      check(entry !== undefined, `the manifest has no nodes file for ${need("rootId")}`);
+      const dumped = join(auditorRoot, readString((entry as Json).path, "the manifest path"));
+      check(existsSync(dumped), `${dumped} does not exist`);
+
+      const saved = readRecord(
+        await callAuditor("save_screenshots", {
+          items: [{ nodeId: need("rootId"), outputPath: "shot.png" }],
+          scale: 1,
+        }),
+        "save_screenshots result"
+      );
+      check(saved.succeeded === 1, `save_screenshots reports ${show(saved)}`);
+      const shot = join(auditorRoot, "shot.png");
+      check(existsSync(shot), `${shot} does not exist`);
+    });
+
+    await step("K3 the leader refuses a marked delete_nodes", async () => {
+      const target = readString(
+        (
+          await okRecord("create_frame", {
+            name: `${PREFIX}k3-target`,
+            parentId: need("rootId"),
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 20,
+          })
+        ).nodeId,
+        "create_frame.nodeId"
+      );
+      // The token is read from the file as a server process reads it, and is never printed.
+      const { rpcToken } = await import("../src/rpc-token.js");
+      const response = await fetch(`http://127.0.0.1:${leaderPort()}/rpc`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${rpcToken()}`,
+          "X-Figma-Bridge-Role": "auditor",
+        },
+        body: JSON.stringify({
+          tool: "delete_nodes",
+          nodeIds: [target],
+          params: { confirm: true },
+          fileKey,
+        }),
+        signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+      });
+      check(response.status === 403, `the leader answered ${response.status}, expected 403`);
+      const read = await okRecord("get_node", { nodeId: target });
+      check(read.id === target, `get_node no longer finds ${target}`);
+    });
+  } finally {
+    await auditor.close().catch(() => undefined);
+    await rm(auditorRoot, { recursive: true, force: true });
+  }
+};
+
 /** Runs every scenario group in order. Each step records its own outcome. */
 const runScenario = async (): Promise<void> => {
   await runVariableSteps();
@@ -2365,6 +2524,7 @@ const runScenario = async (): Promise<void> => {
   await runSectionSteps();
   await runNegativeSteps();
   await runDumpSteps();
+  await runAuditorSteps();
 };
 
 /**

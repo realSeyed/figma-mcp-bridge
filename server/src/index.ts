@@ -5,6 +5,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { Node } from "./node.js";
 import { Election } from "./election.js";
 import { describeOutputRoot } from "./output-root.js";
+import { AUDITOR_TOOLS, missingTools, parseRole, restrictServer, ROLE_VARIABLE } from "./role.js";
+import type { ProcessRole } from "./role.js";
 import { rpcToken } from "./rpc-token.js";
 import { registerTools } from "./tools.js";
 import { VERSION } from "./version.js";
@@ -27,13 +29,25 @@ function resolvePort(): number {
 }
 const PORT = resolvePort();
 
+// A set role other than exactly "auditor" stops the process at start: a typo
+// must not give the full tool set to a process that was meant to only read.
+function resolveRole(): ProcessRole {
+  try {
+    return parseRole(process.env[ROLE_VARIABLE]);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+}
+const ROLE = resolveRole();
+
 async function main(): Promise<void> {
   console.error(describeOutputRoot());
   // Read the install token now: a bad token file stops the process at start,
   // not at the first tool call. The token itself is never logged.
   rpcToken();
 
-  const node = new Node(PORT);
+  const node = new Node(PORT, ROLE);
   const election = new Election(PORT, node);
   await election.start();
 
@@ -82,9 +96,23 @@ async function main(): Promise<void> {
     version: VERSION,
   });
 
-  registerTools(server, node, PORT);
+  if (ROLE === null) {
+    registerTools(server, node, PORT);
+  } else {
+    const restricted = restrictServer(server, AUDITOR_TOOLS);
+    registerTools(restricted.server, node, PORT);
+    // A renamed tool must not make the list shorter without notice.
+    const missing = missingTools(restricted.registered, AUDITOR_TOOLS);
+    if (missing.length > 0) {
+      console.error(
+        `The ${ROLE} role lists tools that no code registers: ${missing.join(", ")}. Correct AUDITOR_TOOLS in server/src/role.ts or the tool names.`
+      );
+      await shutdown("auditor tool list mismatch", 1);
+      return;
+    }
+  }
 
-  console.error(`Starting MCP server (role: ${node.roleName})`);
+  console.error(`Starting MCP server (role: ${node.roleName}, tools: ${ROLE ?? "full"})`);
 
   transport = new StdioServerTransport();
   await server.connect(transport);

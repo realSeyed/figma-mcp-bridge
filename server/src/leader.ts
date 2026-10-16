@@ -3,6 +3,7 @@ import http from "node:http";
 import type { Duplex } from "node:stream";
 import { Bridge } from "./bridge.js";
 import { BRIDGE_COMMIT } from "./build-info.js";
+import { AUDITOR_ROLE, AUDITOR_TOOLS, ROLE_HEADER, ROLE_VARIABLE, auditorMayCall } from "./role.js";
 import { rpcToken, tokenFilePath } from "./rpc-token.js";
 import { validateRpc } from "./schema.js";
 import type { IdentityReport, LeaderIdentity, RPCRequest, RPCResponse } from "./types.js";
@@ -41,6 +42,11 @@ const SERVED_BY_EACH_PROCESS: ReadonlyMap<string, string> = new Map([
  *   /ping — Health check and identity report, open to each local caller
  *   /rpc  — JSON RPC for follower tool calls. Needs `Content-Type:
  *           application/json` and `Authorization: Bearer <install token>`.
+ *
+ * A request with `X-Figma-Bridge-Role: auditor` may call the tools of the
+ * auditor role only (see role.ts). A request without the header is relayed
+ * whatever the role of the leader process is: the role of this process governs
+ * its own tools, and its own MCP calls never pass /rpc.
  *
  * No answer carries an `Access-Control-Allow-*` header. A browser page must
  * send a preflight for a cross-origin JSON POST, and the preflight gets 405.
@@ -142,7 +148,8 @@ export class Leader {
 
   /**
    * The checks before the body is read, in this order: the content type
-   * (415), the Authorization header (401), the token (403).
+   * (415), the Authorization header (401), the token (403), the role header
+   * (400 for a value other than `auditor`).
    * @returns `true` if the request may run. Else the refusal is sent.
    */
   private admitRPC(req: http.IncomingMessage, res: http.ServerResponse): boolean {
@@ -170,6 +177,14 @@ export class Leader {
       return false;
     }
 
+    const mark = req.headers[ROLE_HEADER.toLowerCase()];
+    if (mark !== undefined && mark !== AUDITOR_ROLE) {
+      this.sendJSON(res, 400, {
+        error: `The header ${ROLE_HEADER} has the value "${String(mark)}". The only allowed value is "${AUDITOR_ROLE}"; send the header with that value, or send no header.`,
+      });
+      return false;
+    }
+
     return true;
   }
 
@@ -181,6 +196,18 @@ export class Leader {
     req.on("end", async () => {
       try {
         const rpcReq: RPCRequest = JSON.parse(body);
+
+        // A marked request may call the auditor tools and the two internal
+        // commands only. The plugin gets nothing from a refused request.
+        if (
+          req.headers[ROLE_HEADER.toLowerCase()] === AUDITOR_ROLE &&
+          !auditorMayCall(rpcReq.tool)
+        ) {
+          this.sendJSON(res, 403, {
+            error: `The tool "${rpcReq.tool}" is not allowed for the ${AUDITOR_ROLE} role (header ${ROLE_HEADER}: ${AUDITOR_ROLE}). This role may call only: ${AUDITOR_TOOLS.join(", ")}. Send the call from a process without ${ROLE_VARIABLE}.`,
+          });
+          return;
+        }
 
         // Handle list_files as a special RPC (not forwarded to plugin)
         if (rpcReq.tool === "list_files") {

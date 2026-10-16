@@ -43,6 +43,19 @@ in Dev Mode, which is read-only. If no entry exists, control goes to the switch 
 of the core tools. `runExtension` wraps each extension call and puts the tool name in front
 of an error that does not carry it, thus a handler throws cause and correction only.
 
+`FIGMA_BRIDGE_ROLE=auditor` (`server/src/role.ts`) makes a process register the 15 tools of
+`AUDITOR_TOOLS` and no other: `registerTools` gets a wrapper of the server that drops each
+other tool, and `index.ts` exits if a listed tool is not registered. A set value other than
+exactly `auditor` stops the process at start. The follower of an auditor process adds
+`X-Figma-Bridge-Role: auditor` to each `/rpc` request. For a request with that header the
+leader runs `AUDITOR_TOOLS` and the internal commands `dump_nodes_chunk` and `get_screenshot`
+only; it answers 403 to another tool, before it forwards anything, and 400 to another header
+value. A request without the header runs as before, whatever the role of the leader process
+is: the role governs the tools and the requests of its own process, and the own MCP calls of
+a leader never pass `/rpc`. Thus an auditor leader still relays the writes of the executor
+process. The role is a guardrail, not a sandbox: a process that can read the install token can
+send a request without the mark.
+
 The bridge reports its identity in `/ping` and `list_files`: `bridgeCommit` (the serving
 process), `leaderCommit`, `leaderStartedAt`, and for each file `pluginBuild` and `epoch`.
 The server build writes `server/dist/build-info.json` with the commit (`-dirty` for an
@@ -112,6 +125,7 @@ the manifest only. A failure removes each file of the call.
 | `server/src/output-root.ts`                | The output root: path resolution, real-path containment, and the evidence file write.      |
 | `server/src/evidence.ts`                   | Canonical JSON, SHA-256, `EvidenceSet` (the `.partial` write), the manifest envelope.      |
 | `server/src/rpc-token.ts`                  | The install token: the path of its file, its creation, its checks. Node built-ins only.    |
+| `server/src/role.ts`                       | The auditor role: `AUDITOR_TOOLS`, the internal commands, the role parse, the wrapper.     |
 | `server/src/identity.ts`                   | File selection and the identity of one file, for the manifests. Imports types only.        |
 | `server/src/build-info.ts`                 | `BRIDGE_COMMIT`, read from `dist/build-info.json`.                                         |
 | `server/scripts/write-build-info.mjs`      | The build step that writes `dist/build-info.json`.                                         |
@@ -176,6 +190,9 @@ import neither `schema.ts` nor `tools.ts`. `evidence.ts` imports only Node built
     written as `<name>.partial` and gets its final name only when the call succeeds
     (`EvidenceSet`). It is never overwritten: a target that exists refuses the call before
     it reads Figma. A failed call removes each file it wrote.
+16. A read tool joins `AUDITOR_TOOLS` in `server/src/role.ts` only on purpose: change the list
+    and its test (`server/test/auditor-role.test.ts`, which writes the 15 names out) together,
+    and the e2e list in group K. A new tool never reaches the auditor role by default.
 
 ## 7. Commands
 

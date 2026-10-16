@@ -16,6 +16,7 @@ const STRIPPED_VARIABLES = [
   "FIGMA_BRIDGE_OUTPUT_ROOT",
   "FIGMA_BRIDGE_TOKEN_FILE",
   "FIGMA_BRIDGE_DUMP_CHUNK_NODES",
+  "FIGMA_BRIDGE_ROLE",
 ];
 
 /** How long a process has to log its role. */
@@ -30,8 +31,8 @@ export interface ServerOptions {
   /**
    * Changes to the environment of this test process. A value of `undefined`
    * removes the variable. `FIGMA_BRIDGE_OUTPUT_ROOT`,
-   * `FIGMA_BRIDGE_TOKEN_FILE`, and `FIGMA_BRIDGE_DUMP_CHUNK_NODES` are removed
-   * unless they are given here, so a variable of the developer does not leak
+   * `FIGMA_BRIDGE_TOKEN_FILE`, `FIGMA_BRIDGE_DUMP_CHUNK_NODES`, and
+   * `FIGMA_BRIDGE_ROLE` are removed unless they are given here, so a variable of the developer does not leak
    * into a test.
    * `FIGMA_BRIDGE_TOKEN_FILE` is required: no test reads the real token file.
    */
@@ -44,6 +45,8 @@ export interface ServerProcess {
   role: "LEADER" | "FOLLOWER";
   /** Each line the process wrote to standard error. */
   stderr: string[];
+  /** The names that `tools/list` returns. */
+  listTools(): Promise<string[]>;
   /** Calls one tool and parses its text content as JSON. */
   callTool(name: string, args?: Record<string, unknown>): Promise<ToolOutcome>;
   close(): Promise<void>;
@@ -86,6 +89,16 @@ export async function startServer(options: ServerOptions): Promise<ServerProcess
       role,
       stderr,
       close,
+      async listTools() {
+        const names: string[] = [];
+        let cursor: string | undefined;
+        do {
+          const page = await client.listTools(cursor === undefined ? undefined : { cursor });
+          names.push(...page.tools.map((tool) => tool.name));
+          cursor = page.nextCursor;
+        } while (cursor !== undefined);
+        return names;
+      },
       async callTool(name, args = {}) {
         const result = await client.callTool({ name, arguments: args }, undefined, {
           timeout: 30_000,
