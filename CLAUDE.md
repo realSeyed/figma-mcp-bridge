@@ -27,6 +27,15 @@ The server is an MCP server on stdio. The first server process is the leader. Ea
 one is a follower and sends each tool call to the leader with HTTP `/rpc`. The leader
 sends the call to the plugin.
 
+The leader listens on `127.0.0.1` only. Each server process calls it by the literal
+`http://127.0.0.1:<port>`, not `localhost`, which can resolve to `::1`. A follower sends
+each `/rpc` request with `Content-Type: application/json` and `Authorization: Bearer
+<token>`. The token is the install token from `server/src/rpc-token.ts`: one file for
+each install, which the first process makes. Before it reads the body, the leader answers
+415 for another content type, 401 for no token, and 403 for a wrong token. `/rpc` answers
+405 to each method but `POST`, and no answer has an `Access-Control-Allow-*` header.
+`/ping` stays open. Never log, return, or write the token.
+
 `handleRequest` in `plugin/src/main/code.ts` receives each call. It looks the request type
 up in the merged extension map first. If an entry exists, `handleRequest` runs the entry;
 `edit: true` makes it call `requireEditorMode` first, thus an edit tool stops with an error
@@ -58,6 +67,7 @@ with `get_screenshot` over `/rpc` and writes it itself.
 | `server/src/index.ts`                      | Start. Reads `FIGMA_BRIDGE_PORT`. The default is 1995.                                     |
 | `server/src/schema.ts`                     | `toolInputSchemas` and `rpcToArgs` of the core tools.                                      |
 | `server/src/output-root.ts`                | The output root: path resolution, real-path containment, and the evidence file write.      |
+| `server/src/rpc-token.ts`                  | The install token: the path of its file, its creation, its checks. Node built-ins only.    |
 | `server/src/schema-common.ts`              | `createFigmaNodeIdSchema`, `createHexColorSchema`, `fileKeyField`.                         |
 | `server/src/tools.ts`                      | `registerTools` of the core tools.                                                         |
 | `server/src/tool-helpers.ts`               | `renderResponse`, `parseToolInput`, the `ToolResult` type.                                 |
@@ -142,6 +152,10 @@ agent session: the server of a session can run an old build.
    test object starts with `mcp-e2e/` or `mcp-test/`, and the script removes it, also after
    a failure.
 7. Stop the leader at the end.
+
+A request to `/rpc` by hand needs the headers `Content-Type: application/json` and
+`Authorization: Bearer <token>`. Read the token from the file inside the command, as the
+README shows, and use `127.0.0.1`. Never print the token.
 
 ## 9. Git
 

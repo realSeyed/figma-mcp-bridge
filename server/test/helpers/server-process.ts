@@ -9,7 +9,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SERVER_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const SERVER_ENTRY = join(SERVER_ROOT, "dist", "index.js");
+export const SERVER_ENTRY = join(SERVER_ROOT, "dist", "index.js");
+
+/** The variables of the developer that never leak into a test process. */
+const STRIPPED_VARIABLES = ["FIGMA_BRIDGE_OUTPUT_ROOT", "FIGMA_BRIDGE_TOKEN_FILE"];
 
 /** How long a process has to log its role. */
 const ROLE_TIMEOUT_MS = 15_000;
@@ -20,8 +23,10 @@ export interface ServerOptions {
   cwd: string;
   /**
    * Changes to the environment of this test process. A value of `undefined`
-   * removes the variable. `FIGMA_BRIDGE_OUTPUT_ROOT` is removed unless it is
-   * given here, so a variable of the developer does not leak into a test.
+   * removes the variable. `FIGMA_BRIDGE_OUTPUT_ROOT` and
+   * `FIGMA_BRIDGE_TOKEN_FILE` are removed unless they are given here, so a
+   * variable of the developer does not leak into a test.
+   * `FIGMA_BRIDGE_TOKEN_FILE` is required: no test reads the real token file.
    */
   env?: Record<string, string | undefined>;
 }
@@ -43,15 +48,7 @@ export interface ServerProcess {
  * @returns The running process.
  */
 export async function startServer(options: ServerOptions): Promise<ServerProcess> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && key !== "FIGMA_BRIDGE_OUTPUT_ROOT") env[key] = value;
-  }
-  env.FIGMA_BRIDGE_PORT = String(options.port);
-  for (const [key, value] of Object.entries(options.env ?? {})) {
-    if (value === undefined) delete env[key];
-    else env[key] = value;
-  }
+  const env = serverEnv(options);
 
   const transport = new StdioClientTransport({
     command: "node",
@@ -107,6 +104,31 @@ export async function startServer(options: ServerOptions): Promise<ServerProcess
       }${log}`
     );
   }
+}
+
+/**
+ * The environment of a server process: this process, less the stripped
+ * variables, plus the port and the changes in `options.env`.
+ * @param options - Port and environment changes.
+ * @returns The environment.
+ * @throws If `FIGMA_BRIDGE_TOKEN_FILE` is not given.
+ */
+export function serverEnv(options: Pick<ServerOptions, "port" | "env">): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && !STRIPPED_VARIABLES.includes(key)) env[key] = value;
+  }
+  env.FIGMA_BRIDGE_PORT = String(options.port);
+  for (const [key, value] of Object.entries(options.env ?? {})) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  if (!env.FIGMA_BRIDGE_TOKEN_FILE) {
+    throw new Error(
+      "A test server needs FIGMA_BRIDGE_TOKEN_FILE: no test reads the real token file."
+    );
+  }
+  return env;
 }
 
 async function waitForRole(stderr: string[]): Promise<"LEADER" | "FOLLOWER"> {

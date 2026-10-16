@@ -134,6 +134,44 @@ Set an absolute path, and make the folder before you start the server. The proce
 
 In JSON, write a Windows path as `"C:\\audit-output"` or `"C:/audit-output"`. A bare `"C:\audit-output\"` is invalid JSON: `\a` is not a JSON escape, and the trailing `\"` escapes the closing quote.
 
+### The install token
+
+The leader listens on `127.0.0.1` only, and `/rpc` runs a tool only for a request that carries the **install token**. All server processes of one install read the same token file:
+
+| System              | Token file                                                                                      |
+| ------------------- | ----------------------------------------------------------------------------------------------- |
+| Windows             | `%APPDATA%\figma-mcp-bridge\rpc-token`                                                          |
+| macOS, Linux, other | `$XDG_CONFIG_HOME/figma-mcp-bridge/rpc-token`, else `~/.config/figma-mcp-bridge/rpc-token`      |
+| Each system         | `FIGMA_BRIDGE_TOKEN_FILE`, when it is set and not empty. Use it for a second install or a test. |
+
+- **Which process makes it.** The first server process that finds no file makes it: 32 random bytes as hexadecimal. Each later process reads that file. You do not make or edit the file yourself.
+- **Permissions.** On macOS and Linux the folder gets mode `700` and the file mode `600`. A process refuses a token file that the group or others can read; correct it with `chmod 600 <file>`. On Windows the bridge does not change the ACL: the file is in the profile of the user, which only that user and the administrators can read.
+- **A bad file.** A file that holds less than 32 hexadecimal characters stops the process at start, with an error that names the file. Remove the file; the next process makes a new one. Then restart each bridge process, so all of them read the same token.
+- **After an update, rebuild and restart each bridge process.** A follower of an older build sends no token, and a new leader answers it with 401. A leader of an older build checks no token, so the rules below do not apply until it stops.
+- The token is never logged, never returned by a tool, and never written into a manifest. Do not paste it into a conversation or a file.
+
+| Variable                  | Meaning                                                                              | When unset                    |
+| ------------------------- | ------------------------------------------------------------------------------------ | ----------------------------- |
+| `FIGMA_BRIDGE_TOKEN_FILE` | The token file of this process. Each process of one install must name the same file. | The path of the system above. |
+
+### The endpoints of the leader
+
+| Endpoint | Used by                    | Rules                                                                                                                                                                                                  |
+| -------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/ws`    | the plugin                 | WebSocket upgrade. Reachable from this machine only, through the bind on `127.0.0.1`. The plugin names its `fileKey`.                                                                                  |
+| `/ping`  | discovery, leader election | `GET`. Open to each local caller; it needs no token.                                                                                                                                                   |
+| `/rpc`   | follower server processes  | `POST` only. Needs `Content-Type: application/json` (a `charset` parameter is allowed), else 415. Needs `Authorization: Bearer <token>`, else 401. A wrong token gets 403. Each other method gets 405. |
+
+The leader checks the headers before it reads the body, so a refused request runs no tool. No answer carries an `Access-Control-Allow-*` header: a browser page must send a preflight for a cross-origin JSON POST, and the leader refuses the preflight.
+
+To post to `/rpc` by hand, read the token from the file inside the command, so the token is never printed. In Git Bash on Windows:
+
+```bash
+curl -s -X POST http://127.0.0.1:1995/rpc -H "Content-Type: application/json" -H "Authorization: Bearer $(cat "$APPDATA/figma-mcp-bridge/rpc-token")" -d '{"tool":"list_files"}'
+```
+
+On macOS or Linux, read `~/.config/figma-mcp-bridge/rpc-token` instead. Use `127.0.0.1`, not `localhost`: `localhost` can resolve to `::1`, where the leader does not listen.
+
 ## Available Tools
 
 | Tool                           | Description                                                                                                       |
@@ -323,6 +361,7 @@ Figma-MCP-Bridge/
         ├── bridge.ts     # WebSocket bridge to Figma plugin
         ├── leader.ts     # Leader: HTTP server + bridge
         ├── follower.ts   # Follower: proxies to leader via HTTP
+        ├── rpc-token.ts  # The install token that each /rpc request carries
         ├── node.ts       # Dynamic leader/follower role switching
         ├── election.ts   # Leader election & health monitoring
         ├── tools.ts      # MCP tool definitions
@@ -346,6 +385,8 @@ The MCP server is the core of the Figma MCP Bridge. It maintains a registry of W
 - Forwarding responses back to the AI client
 - Handling leader election (as we can have only one WS connection to an MCP server at a time)
 
+The leader listens on `127.0.0.1:1995` only, so no other machine reaches it. Each follower sends its tool calls to `http://127.0.0.1:1995/rpc` with the install token (see [The install token](#the-install-token)).
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              FIGMA (Browser)                                │
@@ -360,7 +401,7 @@ The MCP server is the core of the Figma MCP Bridge. It maintains a registry of W
                                       ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                          PRIMARY MCP SERVER                                 │
-│                         (Leader on :1995)                                   │
+│                     (Leader on 127.0.0.1:1995)                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  Bridge                                    Endpoints:               │    │
 │  │  • Manages WebSocket conn                  • /ws    (plugin)        │    │
@@ -370,7 +411,7 @@ The MCP server is the core of the Figma MCP Bridge. It maintains a registry of W
 └─────────────────────────────────────────────────────────────────────────────┘
                            ▲                              ▲
                            │ HTTP /rpc                    │ HTTP /rpc
-                           │ POST requests                │ POST requests
+                           │ POST + token                 │ POST + token
                            │                              │
          ┌─────────────────┴───────────┐    ┌─────────────┴───────────────┐
          │    FOLLOWER MCP SERVER 1    │    │    FOLLOWER MCP SERVER 2    │

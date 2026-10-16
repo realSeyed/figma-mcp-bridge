@@ -33,6 +33,7 @@ import {
 } from "./schema.js";
 import type { BridgeResponse } from "./types.js";
 import { Follower } from "./follower.js";
+import { leaderUrl } from "./leader.js";
 import { parseToolInput, renderResponse } from "./tool-helpers.js";
 import type { ToolResult } from "./tool-helpers.js";
 import { registerExtensionTools } from "./extensions/index.js";
@@ -97,7 +98,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
         let files = node.listConnectedFiles();
         if (files === undefined) {
           // Follower: fetch via RPC from leader
-          const follower = new Follower(`http://localhost:${port}`);
+          const follower = new Follower(leaderUrl(port));
           files = await follower.listConnectedFiles();
         }
         return {

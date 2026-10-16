@@ -2,21 +2,53 @@
 
 export interface RpcAnswer {
   status: number;
+  headers: Headers;
   body: { data?: unknown; error?: string };
 }
 
+export interface RawRequest {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
 /**
- * Posts one JSON request to `http://127.0.0.1:<port>/rpc`.
+ * Sends one request to `http://127.0.0.1:<port>/rpc` with only the given headers.
  * @param port - The leader port.
- * @param body - The request: `tool`, and optionally `nodeIds`, `params`, `fileKey`.
- * @returns The status and the parsed body.
+ * @param request - Method (default POST), headers, and body.
+ * @returns The status, the headers, and the parsed body (empty if it is not JSON).
  */
-export async function postRpc(port: number, body: Record<string, unknown>): Promise<RpcAnswer> {
+export async function rawRpc(port: number, request: RawRequest): Promise<RpcAnswer> {
   const response = await fetch(`http://127.0.0.1:${port}/rpc`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    method: request.method ?? "POST",
+    headers: request.headers ?? {},
+    body: request.body,
     signal: AbortSignal.timeout(10_000),
   });
-  return { status: response.status, body: (await response.json()) as RpcAnswer["body"] };
+  const text = await response.text();
+  let body: RpcAnswer["body"] = {};
+  try {
+    body = JSON.parse(text) as RpcAnswer["body"];
+  } catch {
+    // Not JSON: keep the empty body.
+  }
+  return { status: response.status, headers: response.headers, body };
+}
+
+/**
+ * Posts one JSON request to the leader with the install token, as a follower does.
+ * @param port - The leader port.
+ * @param token - The install token.
+ * @param body - The request: `tool`, and optionally `nodeIds`, `params`, `fileKey`.
+ * @returns The status, the headers, and the parsed body.
+ */
+export async function postRpc(
+  port: number,
+  token: string,
+  body: Record<string, unknown>
+): Promise<RpcAnswer> {
+  return rawRpc(port, {
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
 }

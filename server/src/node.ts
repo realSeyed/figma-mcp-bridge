@@ -1,4 +1,4 @@
-import { Leader } from "./leader.js";
+import { Leader, leaderUrl } from "./leader.js";
 import { Follower } from "./follower.js";
 import { Role } from "./types.js";
 import type { BridgeResponse, ConnectedFile } from "./types.js";
@@ -13,7 +13,7 @@ export class Node {
   private follower: Follower;
 
   constructor(private port: number) {
-    this.follower = new Follower(`http://localhost:${port}`);
+    this.follower = new Follower(leaderUrl(port));
   }
 
   get role(): Role {
