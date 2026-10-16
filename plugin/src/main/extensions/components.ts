@@ -327,13 +327,13 @@ const readNodeId = (req: ExtensionRequest, tool: string, what: string): string =
  * @returns The node.
  */
 const readNodeById = async (nodeId: string, tool: string): Promise<BaseNode> => {
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
+  try {
+    return await getSceneNodeById(nodeId);
+  } catch {
     throw new Error(
       `${tool} found no node with the ID ${nodeId}. Call list_components or get_document to list the node IDs of this file.`
     );
   }
-  return node;
 };
 
 /**
