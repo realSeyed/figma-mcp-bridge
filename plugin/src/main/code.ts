@@ -1941,6 +1941,7 @@ const postUiCollapseState = () => {
 // Start hidden so the window never flashes at full height before the stored
 // collapsed state is restored. The iframe still loads and runs while hidden.
 figma.showUI(__html__, { width: UI_WIDTH, height: UI_EXPANDED_HEIGHT, visible: false });
+console.log(`[figma-mcp-bridge] plugin build ${__PLUGIN_BUILD__}`);
 
 figma.clientStorage
   .getAsync(UI_COLLAPSED_KEY)
