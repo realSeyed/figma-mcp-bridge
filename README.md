@@ -111,6 +111,29 @@ To work across multiple files, just open the plugin in each Figma file. The brid
 
 If you want to know more about how it works, read the [How it works](#how-it-works) section.
 
+## Audit configuration
+
+The bridge writes evidence files — captures from `save_screenshots` — to disk, so an audit reads them from files instead of carrying each result through its conversation. Each server process writes only under its own **output root**. The leader writes no file for another process: a follower fetches each capture over `/rpc` and writes it itself.
+
+| Variable                   | Meaning                                                                                                                                                                                                                                                                                                                                | When unset                            |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| `FIGMA_BRIDGE_PORT`        | The port of the leader. The plugin connects to it, and each later server process sends its tool calls to it.                                                                                                                                                                                                                           | `1995`                                |
+| `FIGMA_BRIDGE_OUTPUT_ROOT` | The folder that this process writes evidence files in. A relative `outputPath` resolves against it. A path whose real location is outside it is refused, through `..`, an absolute path, or a symbolic link or junction. If it is set but the folder is missing or not writable, each write fails with an error that names the folder. | The working directory of the process. |
+
+Set an absolute path, and make the folder before you start the server. The process reads the variable one time, at start, and logs the root to standard error. An AI tool can start the server in a system folder, for example `C:\Windows\System32`, so set the variable in the MCP server entry rather than relying on the working directory:
+
+```json
+{
+  "figma-bridge": {
+    "command": "node",
+    "args": ["/path/to/figma-mcp-bridge/server/dist/index.js"],
+    "env": { "FIGMA_BRIDGE_OUTPUT_ROOT": "C:\\audit-output" }
+  }
+}
+```
+
+In JSON, write a Windows path as `"C:\\audit-output"` or `"C:/audit-output"`. A bare `"C:\audit-output\"` is invalid JSON: `\a` is not a JSON escape, and the trailing `\"` escapes the closing quote.
+
 ## Available Tools
 
 | Tool                           | Description                                                                                                       |
@@ -124,7 +147,7 @@ If you want to know more about how it works, read the [How it works](#how-it-wor
 | `get_design_context`           | Get a depth-limited tree optimized for understanding design context                                               |
 | `get_variable_defs`            | Get all variable collections with their default mode, and every variable with its scopes, description, and values |
 | `get_screenshot`               | Export nodes as PNG/SVG/JPG/PDF (base64-encoded)                                                                  |
-| `save_screenshots`             | Export and save screenshots directly to the local filesystem                                                      |
+| `save_screenshots`             | Export screenshots and save them under the output root (see [Audit configuration](#audit-configuration))          |
 | `get_motion_styles`            | List all available animation presets (beta)                                                                       |
 | `get_node_motion`              | Read a node's current animation styles and properties (beta)                                                      |
 | `apply_animation_style`        | Apply a preset animation style to a node (beta)                                                                   |
@@ -260,7 +283,13 @@ The root `bun install` runs Husky's `prepare` script, which installs the pre-com
 bun run check
 ```
 
-From the root, this builds the server, type-checks and builds the plugin, and verifies formatting across the repo. Run it before every commit. After changing plugin code, re-run the plugin in Figma to pick up the new `dist/code.js`; after changing server code, reconnect the MCP server in your AI tool.
+From the root, this builds the server, type-checks and builds the plugin, and verifies formatting across the repo. Run it before every commit.
+
+```bash
+bun run test
+```
+
+This builds the server and runs the tests in `server/test/` with `bun test`. They start real server processes on free ports and answer them with a simulated plugin, so they need no Figma and never use port 1995. After changing plugin code, re-run the plugin in Figma to pick up the new `dist/code.js`; after changing server code, reconnect the MCP server in your AI tool.
 
 ### Code style
 
@@ -278,10 +307,10 @@ bun run format:check  # verify formatting without writing (useful in CI)
 Before running it, build the server, open the plugin in the file you want to test against, and make `MCP E2E` the active page in Figma — the script creates that page on the first run, and `list_components` reads whichever page is open.
 
 ```bash
-cd server && bun run e2e
+cd server && FIGMA_FILE_KEY='<key>' bun run e2e
 ```
 
-It picks the file up from `list_files` when exactly one is connected; set `FIGMA_FILE_KEY` to choose between several. Everything it makes is named `mcp-e2e/…` and is removed again in a `finally` block, after a failure as well. Screenshots of the test frame land in `server/scripts/e2e-output/` (git-ignored), and a failed step exits with code 1.
+`FIGMA_FILE_KEY` is required, and must name a connected file. Without it the script refuses to start, lists each connected file with its key and its name, and exits with code 1; it writes nothing before that check. `bun run perf` follows the same rule, and also takes an optional `FIGMA_READ_FILE_KEY`. Everything the e2e script makes is named `mcp-e2e/…` and is removed again in a `finally` block, after a failure as well. It sets the output root of its server to `server/scripts/e2e-output/` (git-ignored), where the screenshots of the test frame land, and a failed step exits with code 1.
 
 ## Structure
 

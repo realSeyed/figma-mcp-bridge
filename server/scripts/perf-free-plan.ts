@@ -17,16 +17,19 @@
  * Drafts does nicely. The write measurements build their own load and need a
  * file you do not mind writing to. Point them at different files with the two
  * environment variables below, or at one file by setting only `FIGMA_FILE_KEY`.
+ * The script refuses to start unless each key it gets names a connected file,
+ * and then lists the connected files. It makes no write before that check.
  *
  * Everything the run makes is named `mcp-test/...` on the page `MCP Test`, and
  * a `finally` block removes it again — after a failure as well.
  *
  * Environment:
- *   FIGMA_FILE_KEY       the file the write measurements build load in. Falls
- *                        back to the single connected file.
- *   FIGMA_READ_FILE_KEY  the file the read measurements read. Defaults to
- *                        FIGMA_FILE_KEY.
- *   FIGMA_BRIDGE_PORT    forwarded to the spawned server, as in production.
+ *   FIGMA_FILE_KEY       required. The file the write measurements build load
+ *                        in.
+ *   FIGMA_READ_FILE_KEY  optional. The file the read measurements read.
+ *                        Defaults to FIGMA_FILE_KEY.
+ *   FIGMA_BRIDGE_PORT    passed to the spawned server, which gets the whole
+ *                        environment of this script.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -243,38 +246,54 @@ const asId = (value: unknown, what: string): string => {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolves the two file keys from the environment and the connected files.
+ * Resolves the two file keys from the environment. Each key must name a
+ * connected file: with one connected file the script would otherwise write to
+ * whatever file that is.
+ * @returns Null when the keys are good, else the refusal to print.
  */
-const resolveFileKeys = async (): Promise<void> => {
-  const fromEnv = process.env.FIGMA_FILE_KEY?.trim();
-  if (fromEnv) {
-    writeKey = fromEnv;
-  } else {
-    const listed = asList(
-      await callTool("list_files", {}, undefined).then((r) => (r.ok ? r.data : [])),
-      "list_files"
+const resolveFileKeys = async (): Promise<string | null> => {
+  const answer = await callTool("list_files", {}, undefined);
+  if (!answer.ok) {
+    throw new Error(
+      `list_files failed: ${answer.error}. Run the plugin in the file you want to measure, then run this again.`
     );
-    if (listed.length === 0) {
-      throw new Error(
-        "No Figma file is connected. Run the plugin in the file you want to measure, then run this again."
-      );
-    }
-    if (listed.length > 1) {
-      const names = listed.map((file) => `${String(file.fileName)} (${String(file.fileKey)})`);
-      throw new Error(
-        `${listed.length} Figma files are connected, so the write file is ambiguous. Set FIGMA_FILE_KEY to one of: ${names.join(", ")}.`
-      );
-    }
-    writeKey = String(listed[0].fileKey);
+  }
+  const listed = asList(answer.data, "list_files");
+  const connected = (key: string): boolean => listed.some((file) => file.fileKey === key);
+
+  const fromEnv = process.env.FIGMA_FILE_KEY?.trim();
+  const readFromEnv = process.env.FIGMA_READ_FILE_KEY?.trim();
+  let cause: string | null = null;
+  if (!fromEnv) {
+    cause =
+      "FIGMA_FILE_KEY is not set. The script writes to the file it names, so it does not pick one.";
+  } else if (!connected(fromEnv)) {
+    cause = `FIGMA_FILE_KEY is "${fromEnv}", but no connected file has that key.`;
+  } else if (readFromEnv && !connected(readFromEnv)) {
+    cause = `FIGMA_READ_FILE_KEY is "${readFromEnv}", but no connected file has that key.`;
+  }
+  if (cause !== null) {
+    const listing =
+      listed.length === 0
+        ? "No Figma file is connected. Run the plugin in the file you want to measure first."
+        : `Connected files:\n${listed.map((file) => `  ${String(file.fileKey)}  ${String(file.fileName)}`).join("\n")}`;
+    return [
+      cause,
+      listing,
+      "Set FIGMA_FILE_KEY to the key of the file to write to, and optionally FIGMA_READ_FILE_KEY to the file to read, then run the script again:",
+      "  bash:        FIGMA_FILE_KEY='<key>' bun run perf",
+      "  PowerShell:  $env:FIGMA_FILE_KEY = '<key>'; bun run perf",
+    ].join("\n");
   }
 
-  const readFromEnv = process.env.FIGMA_READ_FILE_KEY?.trim();
+  writeKey = fromEnv;
   readKey = readFromEnv || writeKey;
   synthetic = !readFromEnv;
   console.log(`write file: ${writeKey}`);
   console.log(
     `read file:  ${readKey}${readKey === writeKey ? " (same; the run builds its own read load)" : ""}\n`
   );
+  return null;
 };
 
 /**
@@ -813,10 +832,18 @@ const teardown = async (load: Load): Promise<string[]> => {
  * @returns The process exit code.
  */
 const main = async (): Promise<number> => {
+  // Without an explicit env, the MCP SDK gives the child only a short default
+  // list of variables, and FIGMA_BRIDGE_PORT would not reach it.
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[key] = value;
+  }
+
   const transport = new StdioClientTransport({
     command: "node",
     args: [SERVER_ENTRY],
     cwd: SERVER_ROOT,
+    env,
     stderr: "pipe",
   });
 
@@ -841,7 +868,11 @@ const main = async (): Promise<number> => {
 
   const load: Load = { pageId: "", nodeIds: [] };
   try {
-    await resolveFileKeys();
+    const refusal = await resolveFileKeys();
+    if (refusal !== null) {
+      console.error(refusal);
+      return 1;
+    }
     load.pageId = await resolvePage();
 
     try {

@@ -4,6 +4,9 @@
 
 This fork adds component, variable, text style, and section tools to the Figma MCP bridge. All of them must work on a free (Starter) Figma account.
 
+The fork also adds audit tools: dumps and captures that the bridge writes to disk, with a
+manifest as the tool result, and an auditor role that only reads.
+
 ## 2. Scope
 
 1. Do not add a feature that needs a paid Figma plan.
@@ -13,6 +16,9 @@ This fork adds component, variable, text style, and section tools to the Figma M
 5. Do not use the Figma REST API. Use the Figma Plugin API.
 6. Write a variable value to the default mode of the collection only.
 7. If Figma rejects an operation because of a plan limit, return an error that names the limit.
+8. Put no design-file data in the repository: no dump, no capture, no node ID, no name, and
+   no figure from a design file. Commit synthetic test data only.
+9. A live test uses only the test file that `FIGMA_FILE_KEY` names.
 
 ## 3. Architecture
 
@@ -28,35 +34,42 @@ in Dev Mode, which is read-only. If no entry exists, control goes to the switch 
 of the core tools. `runExtension` wraps each extension call and puts the tool name in front
 of an error that does not carry it, thus a handler throws cause and correction only.
 
+Each process writes evidence files only under its own output root
+(`FIGMA_BRIDGE_OUTPUT_ROOT`, else its working directory). The leader writes no file for
+another process: `/rpc` refuses `save_screenshots`, and a follower fetches each capture
+with `get_screenshot` over `/rpc` and writes it itself.
+
 ## 4. File map
 
-| File                                       | Purpose                                                                                |
-| ------------------------------------------ | -------------------------------------------------------------------------------------- |
-| `plugin/manifest.json`                     | Plugin id, name, and allowed domains. Keep `documentAccess: "dynamic-page"`.           |
-| `plugin/src/main/code.ts`                  | `RequestType`, `EDIT_REQUEST_TYPES`, `requireEditorMode`, `handleRequest`, core tools. |
-| `plugin/src/main/serializer.ts`            | The node output of the read tools.                                                     |
-| `plugin/src/main/shared.ts`                | Shared helpers: node lookup, colors, fonts, position, variable values.                 |
-| `plugin/src/main/extensions/types.ts`      | The `ExtensionHandler` type.                                                           |
-| `plugin/src/main/extensions/index.ts`      | Merges the area maps. Exports `ExtensionRequestType`.                                  |
-| `plugin/src/main/extensions/batch.ts`      | Shared batch helpers: param reading, error wording, the two phases of a batch.         |
-| `plugin/src/main/extensions/variables.ts`  | Variable and variable collection handlers.                                             |
-| `plugin/src/main/extensions/typography.ts` | Text style handlers.                                                                   |
-| `plugin/src/main/extensions/components.ts` | Component and component set handlers.                                                  |
-| `plugin/src/main/extensions/sections.ts`   | Section handlers.                                                                      |
-| `plugin/src/ui/App.tsx`                    | The plugin window. Holds the WebSocket.                                                |
-| `server/src/index.ts`                      | Start. Reads `FIGMA_BRIDGE_PORT`. The default is 1995.                                 |
-| `server/src/schema.ts`                     | `toolInputSchemas` and `rpcToArgs` of the core tools.                                  |
-| `server/src/schema-common.ts`              | `createFigmaNodeIdSchema`, `createHexColorSchema`, `fileKeyField`.                     |
-| `server/src/tools.ts`                      | `registerTools` of the core tools.                                                     |
-| `server/src/tool-helpers.ts`               | `renderResponse`, `parseToolInput`, the `ToolResult` type.                             |
-| `server/src/extensions/types.ts`           | The area file types.                                                                   |
-| `server/src/extensions/index.ts`           | Merges `schemas`, `rpcToArgs`, and `register`.                                         |
-| `server/src/extensions/variables.ts`       | Variable and variable collection tools.                                                |
-| `server/src/extensions/typography.ts`      | Text style tools.                                                                      |
-| `server/src/extensions/components.ts`      | Component and component set tools.                                                     |
-| `server/src/extensions/sections.ts`        | Section tools.                                                                         |
-| `server/scripts/e2e-free-plan.ts`          | The end-to-end script. Drives every extension tool against a real file.                |
-| `server/scripts/perf-free-plan.ts`         | The measurement script. Holds each tool to 30 seconds and 50,000 characters.           |
+| File                                       | Purpose                                                                                    |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `plugin/manifest.json`                     | Plugin id, name, and allowed domains. Keep `documentAccess: "dynamic-page"`.               |
+| `plugin/src/main/code.ts`                  | `RequestType`, `EDIT_REQUEST_TYPES`, `requireEditorMode`, `handleRequest`, core tools.     |
+| `plugin/src/main/serializer.ts`            | The node output of the read tools.                                                         |
+| `plugin/src/main/shared.ts`                | Shared helpers: node lookup, colors, fonts, position, variable values.                     |
+| `plugin/src/main/extensions/types.ts`      | The `ExtensionHandler` type.                                                               |
+| `plugin/src/main/extensions/index.ts`      | Merges the area maps. Exports `ExtensionRequestType`.                                      |
+| `plugin/src/main/extensions/batch.ts`      | Shared batch helpers: param reading, error wording, the two phases of a batch.             |
+| `plugin/src/main/extensions/variables.ts`  | Variable and variable collection handlers.                                                 |
+| `plugin/src/main/extensions/typography.ts` | Text style handlers.                                                                       |
+| `plugin/src/main/extensions/components.ts` | Component and component set handlers.                                                      |
+| `plugin/src/main/extensions/sections.ts`   | Section handlers.                                                                          |
+| `plugin/src/ui/App.tsx`                    | The plugin window. Holds the WebSocket.                                                    |
+| `server/src/index.ts`                      | Start. Reads `FIGMA_BRIDGE_PORT`. The default is 1995.                                     |
+| `server/src/schema.ts`                     | `toolInputSchemas` and `rpcToArgs` of the core tools.                                      |
+| `server/src/output-root.ts`                | The output root: path resolution, real-path containment, and the evidence file write.      |
+| `server/src/schema-common.ts`              | `createFigmaNodeIdSchema`, `createHexColorSchema`, `fileKeyField`.                         |
+| `server/src/tools.ts`                      | `registerTools` of the core tools.                                                         |
+| `server/src/tool-helpers.ts`               | `renderResponse`, `parseToolInput`, the `ToolResult` type.                                 |
+| `server/src/extensions/types.ts`           | The area file types.                                                                       |
+| `server/src/extensions/index.ts`           | Merges `schemas`, `rpcToArgs`, and `register`.                                             |
+| `server/src/extensions/variables.ts`       | Variable and variable collection tools.                                                    |
+| `server/src/extensions/typography.ts`      | Text style tools.                                                                          |
+| `server/src/extensions/components.ts`      | Component and component set tools.                                                         |
+| `server/src/extensions/sections.ts`        | Section tools.                                                                             |
+| `server/scripts/e2e-free-plan.ts`          | The end-to-end script. Drives every extension tool against a real file.                    |
+| `server/scripts/perf-free-plan.ts`         | The measurement script. Holds each tool to 30 seconds and 50,000 characters.               |
+| `server/test/`                             | `bun test` tests. Real server processes against a simulated plugin. Helpers in `helpers/`. |
 
 An extension file must not import `schema.ts` or `tools.ts`; this prevents an import cycle.
 It imports only `schema-common.ts`, `tool-helpers.ts`, packages, and types.
@@ -94,28 +107,41 @@ It imports only `schema-common.ts`, `tool-helpers.ts`, packages, and types.
     `appendChild` only.
 13. Each error message gives the field, the cause, and the correction. `runExtension` adds
     the tool name.
+14. A tool that writes a file uses `server/src/output-root.ts`. It never resolves a path
+    against `process.cwd()` itself.
 
 ## 7. Commands
 
-| Command         | Purpose                                                                      |
-| --------------- | ---------------------------------------------------------------------------- |
-| `bun install`   | Install. Run it in the root, in `server/`, and in `plugin/`.                 |
-| `bun run check` | The server build, the plugin type check, the plugin build, the format check. |
-| `bun run e2e`   | In `server/`. The end-to-end script. Needs the plugin open in a real file.   |
-| `bun run perf`  | In `server/`. The measurement script. Reads `FIGMA_READ_FILE_KEY` as well.   |
+| Command         | Purpose                                                                                            |
+| --------------- | -------------------------------------------------------------------------------------------------- |
+| `bun install`   | Install. Run it in the root, in `server/`, and in `plugin/`.                                       |
+| `bun run check` | The server build, the plugin type check, the plugin build, the format check.                       |
+| `bun run test`  | The server build, then `bun test` in `server/`. Needs no Figma.                                    |
+| `bun run e2e`   | In `server/`. The end-to-end script. Needs `FIGMA_FILE_KEY`.                                       |
+| `bun run perf`  | In `server/`. The measurement script. Needs `FIGMA_FILE_KEY`. Reads `FIGMA_READ_FILE_KEY` as well. |
 
 Run `bun run check` before each commit. Commit only if the check passes.
 
 ## 8. Live test
 
-1. Run `bun run check`.
-2. The user runs the plugin again in Figma. The user reconnects the `figma-bridge` server with `/mcp`.
-3. Use the `fileKey` of the test file in each call.
-4. Put each test node on the page `MCP Test`. Start each test name with `mcp-test/`.
-5. Examine the results with the read tools and with `get_screenshot`.
-6. Remove all test objects at the end.
-7. `bun run e2e` in `server/` covers the same ground on the page `MCP E2E` without hand
-   work, and removes what it made even after a failure.
+A live test runs through the scripts of this repository, not through the MCP tools of an
+agent session: the server of a session can run an old build.
+
+1. Run `bun run check`. `server/dist/` and `plugin/dist/` are not in git, so build again
+   after each branch switch.
+2. List the bridge processes (`node` with `dist/index.js` on its command line). Stop the
+   stale ones only with the approval of the owner, and only when no audit or execution runs.
+3. Start a fresh leader from this checkout: `tail -f /dev/null | node server/dist/index.js`.
+   The pipe keeps its standard input open. Make sure that it is the only bridge process.
+4. The owner runs the plugin again in the test file and opens the page the script needs
+   (`MCP E2E` for `bun run e2e`, `MCP Test` for `bun run perf`). Wait for
+   `Plugin connected: <name> (<key>)` in the leader output.
+5. Make sure that each connected file is the test file. The key can change at each plugin
+   run, so read it again.
+6. Run the script in `server/` with the key: `FIGMA_FILE_KEY='<key>' bun run e2e`. Each
+   test object starts with `mcp-e2e/` or `mcp-test/`, and the script removes it, also after
+   a failure.
+7. Stop the leader at the end.
 
 ## 9. Git
 

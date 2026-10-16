@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { lookup } from "node:dns/promises";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { isIP } from "node:net";
 import path from "node:path";
 import type { z } from "zod";
@@ -36,6 +36,7 @@ import { Follower } from "./follower.js";
 import { parseToolInput, renderResponse } from "./tool-helpers.js";
 import type { ToolResult } from "./tool-helpers.js";
 import { registerExtensionTools } from "./extensions/index.js";
+import { checkOutputRoot, resolveEvidencePath, writeEvidenceFile } from "./output-root.js";
 
 const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
 const IMAGE_FETCH_TIMEOUT_MS = 15_000;
@@ -575,7 +576,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "save_screenshots",
-    "Export screenshots for multiple nodes and save them directly to the local filesystem. Returns metadata only (no base64). When multiple files are connected, specify fileKey.",
+    "Export screenshots for multiple nodes and save them directly to the local filesystem, under the output root of this server process (FIGMA_BRIDGE_OUTPUT_ROOT, or its working directory when unset). A relative outputPath resolves against the output root; a path outside it is refused. Returns metadata only (no base64). When multiple files are connected, specify fileKey.",
     toolInputSchemas.save_screenshots.shape,
     async ({ items, format, scale, clip, fileKey }): Promise<ToolResult> => {
       try {
@@ -627,18 +628,13 @@ export async function executeSaveScreenshots(
   hasErrors: boolean;
   results: SaveScreenshotItemResult[];
 }> {
+  // A missing or unusable root fails the whole call before any capture.
+  await checkOutputRoot();
+
   const results: SaveScreenshotItemResult[] = [];
 
   for (const [index, item] of items.entries()) {
-    const result = await saveScreenshotItemToFile(
-      sender,
-      item,
-      index,
-      process.cwd(),
-      format,
-      scale,
-      clip
-    );
+    const result = await saveScreenshotItemToFile(sender, item, index, format, scale, clip);
     results.push(result);
   }
 
@@ -652,23 +648,6 @@ export async function executeSaveScreenshots(
     hasErrors: failed > 0,
     results,
   };
-}
-
-/**
- * Resolves an output path relative to the workspace and ensures it stays inside it.
- * @param outputPath - Relative or absolute output path.
- * @param workspaceRoot - Root directory that must contain the resolved path.
- * @returns Absolute path inside the workspace root.
- */
-function resolveAndValidateOutputPath(outputPath: string, workspaceRoot: string): string {
-  const resolvedRoot = path.resolve(workspaceRoot);
-  const resolvedPath = path.resolve(resolvedRoot, outputPath);
-  const relativePath = path.relative(resolvedRoot, resolvedPath);
-  const escapesRoot = relativePath.startsWith("..") || path.isAbsolute(relativePath);
-  if (escapesRoot) {
-    throw new Error(`outputPath must be inside the MCP server working directory: ${resolvedRoot}`);
-  }
-  return resolvedPath;
 }
 
 /**
@@ -997,7 +976,6 @@ function getSingleScreenshotExport(data: unknown): ScreenshotExport {
  * @param sender - Sender that forwards get_screenshot requests to the plugin.
  * @param item - Screenshot save request.
  * @param index - Index of this item in the batch.
- * @param workspaceRoot - Root directory for resolving output paths.
  * @param defaultFormat - Default export format override.
  * @param defaultScale - Default export scale override.
  * @param defaultClip - Default clipping override.
@@ -1007,7 +985,6 @@ async function saveScreenshotItemToFile(
   sender: ScreenshotSender,
   item: SaveScreenshotItemInput,
   index: number,
-  workspaceRoot: string,
   defaultFormat?: ExportFormat,
   defaultScale?: number,
   defaultClip?: boolean
@@ -1015,7 +992,7 @@ async function saveScreenshotItemToFile(
   let resolvedOutputPath = item.outputPath;
 
   try {
-    resolvedOutputPath = resolveAndValidateOutputPath(item.outputPath, workspaceRoot);
+    resolvedOutputPath = await resolveEvidencePath(item.outputPath);
     const inferredFormat = inferFormatFromPath(resolvedOutputPath);
     const resolvedFormat = resolveExportFormat(item.format ?? defaultFormat, inferredFormat);
     const resolvedScale = resolveScale(item.scale, defaultScale);
@@ -1035,7 +1012,10 @@ async function saveScreenshotItemToFile(
     }
 
     const screenshotExport = getSingleScreenshotExport(resp.data);
-    const bytesWritten = await writeBase64ToFile(screenshotExport.base64, resolvedOutputPath);
+    const bytesWritten = await writeEvidenceFile(
+      resolvedOutputPath,
+      Buffer.from(screenshotExport.base64, "base64")
+    );
 
     return {
       index,
@@ -1060,26 +1040,6 @@ async function saveScreenshotItemToFile(
 }
 
 /**
- * Writes base64-encoded bytes to a file, creating parent directories as needed.
- * @param base64 - Base64-encoded file contents.
- * @param outputPath - Destination file path.
- * @returns Number of bytes written.
- */
-async function writeBase64ToFile(base64: string, outputPath: string): Promise<number> {
-  const bytes = Buffer.from(base64, "base64");
-  await mkdir(path.dirname(outputPath), { recursive: true });
-  try {
-    await writeFile(outputPath, bytes, { flag: "wx" });
-  } catch (err) {
-    if (isNodeError(err) && err.code === "EEXIST") {
-      throw new Error(`File already exists at outputPath: ${outputPath}`);
-    }
-    throw err;
-  }
-  return bytes.length;
-}
-
-/**
  * Resolves the effective screenshot scale from item and default values.
  * @param itemScale - Scale specified for the item.
  * @param defaultScale - Default scale for the batch.
@@ -1091,13 +1051,4 @@ function resolveScale(itemScale?: number, defaultScale?: number): number | undef
     return undefined;
   }
   return resolvedScale;
-}
-
-/**
- * Type guard that checks whether a value is a NodeJS error with an optional code.
- * @param err - Value to check.
- * @returns True when the value is an Error instance.
- */
-function isNodeError(err: unknown): err is NodeJS.ErrnoException {
-  return err instanceof Error;
 }

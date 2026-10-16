@@ -738,7 +738,7 @@ export const toolInputSchemas = {
             .string()
             .min(1)
             .describe(
-              "Output file path (relative paths resolve from the MCP server current working directory)"
+              "Output file path. A relative path resolves against the output root of the MCP server process (FIGMA_BRIDGE_OUTPUT_ROOT, or its working directory when unset). An absolute path must be inside the output root."
             ),
           format: createExportFormatSchema()
             .optional()

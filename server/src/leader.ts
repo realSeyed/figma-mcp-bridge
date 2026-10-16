@@ -2,8 +2,6 @@ import http from "node:http";
 import type { Duplex } from "node:stream";
 import { Bridge } from "./bridge.js";
 import { validateRpc } from "./schema.js";
-import { executeSaveScreenshots } from "./tools.js";
-import type { ExportFormat } from "./tools.js";
 import type { RPCRequest, RPCResponse } from "./types.js";
 import { VERSION } from "./version.js";
 
@@ -88,6 +86,16 @@ export class Leader {
           return;
         }
 
+        // Each process serves save_screenshots itself and writes under its own
+        // output root, so the leader writes no file for another process.
+        if (rpcReq.tool === "save_screenshots") {
+          this.sendJSON(res, 400, {
+            error:
+              "save_screenshots is not served over /rpc: each process serves save_screenshots itself, and writes under its own output root (FIGMA_BRIDGE_OUTPUT_ROOT). Call the save_screenshots tool of your own MCP server; it fetches each capture with get_screenshot.",
+          });
+          return;
+        }
+
         const validation = validateRpc(rpcReq.tool, rpcReq.nodeIds, rpcReq.params);
         if (validation.error) {
           this.sendJSON(res, 400, { error: validation.error });
@@ -99,29 +107,6 @@ export class Leader {
         // understands the canonical spelling.
         const validatedParams = validation.params ?? rpcReq.params;
         const fileKey = rpcReq.fileKey;
-
-        // Currently the only tool that is not forwarded to the plugin is save_screenshots
-        // If more are added we need to refactor to a better abstraction.
-        if (rpcReq.tool === "save_screenshots") {
-          const params = validatedParams ?? {};
-          // Create a sender bound to the specific fileKey
-          const sender = {
-            sendWithParams: (
-              requestType: string,
-              nodeIds?: string[],
-              sendParams?: Record<string, unknown>
-            ) => this.bridge.sendWithParams(requestType, nodeIds, sendParams, fileKey),
-          };
-          const result = await executeSaveScreenshots(
-            sender,
-            params.items as Parameters<typeof executeSaveScreenshots>[1],
-            params.format as ExportFormat | undefined,
-            params.scale as number | undefined,
-            params.clip as boolean | undefined
-          );
-          this.sendJSON(res, 200, { data: result });
-          return;
-        }
 
         const resp = await this.bridge.sendWithParams(
           rpcReq.tool,

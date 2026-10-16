@@ -14,14 +14,20 @@
  * The page itself stays: the tools cannot remove a page, so each run reuses it.
  *
  * Environment:
- *   FIGMA_FILE_KEY   the file to test against. Falls back to the single
- *                    connected file when exactly one is connected.
- *   FIGMA_BRIDGE_PORT  forwarded to the spawned server, as in production.
+ *   FIGMA_FILE_KEY     required. The test file. The script refuses to start
+ *                      unless it names a connected file, and lists the
+ *                      connected files. It makes no write before that check.
+ *   FIGMA_BRIDGE_PORT  passed to the spawned server, which gets the whole
+ *                      environment of this script.
+ *
+ * The script sets FIGMA_BRIDGE_OUTPUT_ROOT of the spawned server to
+ * `scripts/e2e-output/`, so each file that save_screenshots writes lands
+ * there.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -398,15 +404,13 @@ const propertyName = (displayName: string): string => {
 // Setup
 // ---------------------------------------------------------------------------
 
-/** Resolves the file to test against, from the environment or from the bridge. */
-const resolveFileKey = async (): Promise<void> => {
-  const fromEnv = process.env.FIGMA_FILE_KEY?.trim();
-  if (fromEnv) {
-    fileKey = fromEnv;
-    console.log(`file: ${fileKey} (FIGMA_FILE_KEY)`);
-    return;
-  }
-
+/**
+ * Resolves the file to test against. `FIGMA_FILE_KEY` must name a connected
+ * file: with one connected file the script would otherwise write to whatever
+ * file that is.
+ * @returns Null when the key is good, else the refusal to print.
+ */
+const resolveFileKey = async (): Promise<string | null> => {
   const listed = await callTool("list_files");
   if (!listed.ok) {
     throw new Error(
@@ -414,16 +418,28 @@ const resolveFileKey = async (): Promise<void> => {
     );
   }
   const files = readRecords(listed.data, "list_files result");
-  if (files.length !== 1) {
-    const names = files.map((file) => `${String(file.fileKey)} (${String(file.fileName)})`);
-    throw new Error(
-      files.length === 0
-        ? "No Figma file is connected. Open the plugin in the test file and run the script again."
-        : `${files.length} Figma files are connected, so the test file is ambiguous. Set FIGMA_FILE_KEY to one of: ${names.join(", ")}.`
-    );
+  const fromEnv = process.env.FIGMA_FILE_KEY?.trim();
+  const match = files.find((file) => file.fileKey === fromEnv);
+  if (fromEnv && match) {
+    fileKey = fromEnv;
+    console.log(`file: ${fileKey} (${String(match.fileName)})`);
+    return null;
   }
-  fileKey = readString(files[0].fileKey, "list_files[0].fileKey");
-  console.log(`file: ${fileKey} (${String(files[0].fileName)})`);
+
+  const cause = fromEnv
+    ? `FIGMA_FILE_KEY is "${fromEnv}", but no connected file has that key.`
+    : "FIGMA_FILE_KEY is not set. The script writes to the file it names, so it does not pick one.";
+  const listing =
+    files.length === 0
+      ? "No Figma file is connected. Run the plugin in the test file first."
+      : `Connected files:\n${files.map((file) => `  ${String(file.fileKey)}  ${String(file.fileName)}`).join("\n")}`;
+  return [
+    cause,
+    listing,
+    "Set FIGMA_FILE_KEY to the key of the test file and run the script again:",
+    "  bash:        FIGMA_FILE_KEY='<key>' bun run e2e",
+    "  PowerShell:  $env:FIGMA_FILE_KEY = '<key>'; bun run e2e",
+  ].join("\n");
 };
 
 /**
@@ -1435,6 +1451,42 @@ const runReadSteps = async (): Promise<void> => {
       console.log(`      wrote ${file} (${bytes.byteLength} bytes)`);
     }
   });
+
+  await step("G2 save_screenshots writes under the output root", async () => {
+    // save_screenshots never overwrites a file, so each run takes a new name.
+    const name = `mcp-e2e-saved-${Date.now()}.png`;
+    const saved = await okRecord("save_screenshots", {
+      items: [{ nodeId: need("rootId"), outputPath: name }],
+      scale: 1,
+    });
+    check(saved.succeeded === 1, `save_screenshots reports ${show(saved)}`);
+    const result = readRecords(saved.results, "save_screenshots.results")[0];
+    const file = join(OUTPUT_DIR, name);
+    check(
+      result.outputPath === file,
+      `the file went to ${show(result.outputPath)}, expected ${file} in the output root`
+    );
+    try {
+      const bytes = await readFile(file);
+      check(
+        bytes.byteLength === result.bytesWritten,
+        `the file holds ${bytes.byteLength} bytes, the result says ${show(result.bytesWritten)}`
+      );
+      console.log(`      saved ${file} (${bytes.byteLength} bytes)`);
+    } finally {
+      await rm(file, { force: true });
+    }
+
+    const refused = await okRecord("save_screenshots", {
+      items: [{ nodeId: need("rootId"), outputPath: "../mcp-e2e-outside.png" }],
+    });
+    const refusal = readRecords(refused.results, "save_screenshots.results")[0];
+    check(refusal.success === false, `a path out of the root was not refused: ${show(refusal)}`);
+    check(
+      String(refusal.error).includes("leads out of the root"),
+      `the refusal does not name its cause: ${show(refusal.error)}`
+    );
+  });
 };
 
 // ---------------------------------------------------------------------------
@@ -2130,12 +2182,19 @@ const summarise = (): number => {
  * @returns The process exit code.
  */
 const main = async (): Promise<number> => {
-  await mkdir(OUTPUT_DIR, { recursive: true });
+  // Without an explicit env, the MCP SDK gives the child only a short default
+  // list of variables, and FIGMA_BRIDGE_PORT would not reach it.
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[key] = value;
+  }
+  env.FIGMA_BRIDGE_OUTPUT_ROOT = OUTPUT_DIR;
 
   const transport = new StdioClientTransport({
     command: "node",
     args: [SERVER_ENTRY],
     cwd: SERVER_ROOT,
+    env,
     stderr: "pipe",
   });
 
@@ -2161,7 +2220,12 @@ const main = async (): Promise<number> => {
   }
 
   try {
-    await resolveFileKey();
+    const refusal = await resolveFileKey();
+    if (refusal !== null) {
+      console.error(refusal);
+      return 1;
+    }
+    await mkdir(OUTPUT_DIR, { recursive: true });
     await resolvePage();
 
     const leftovers = await removeArtifacts();

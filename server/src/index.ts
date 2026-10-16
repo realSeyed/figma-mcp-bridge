@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Node } from "./node.js";
 import { Election } from "./election.js";
+import { describeOutputRoot } from "./output-root.js";
 import { registerTools } from "./tools.js";
 import { VERSION } from "./version.js";
 
@@ -26,6 +27,8 @@ function resolvePort(): number {
 const PORT = resolvePort();
 
 async function main(): Promise<void> {
+  console.error(describeOutputRoot());
+
   const node = new Node(PORT);
   const election = new Election(PORT, node);
   await election.start();
