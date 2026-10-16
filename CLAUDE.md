@@ -57,13 +57,34 @@ Each process writes evidence files only under its own output root
 another process: `/rpc` refuses `save_screenshots`, and a follower fetches each capture
 with `get_screenshot` over `/rpc` and writes it itself.
 
+`dump_nodes_chunk` (`plugin/src/main/extensions/dumps.ts`, `edit: false`) is an internal
+plugin command: the server sends it, and no MCP tool has its name. Its params are `rootId`,
+`cursor` (an array of child indexes from the root, or `null` at the start), `maxNodes` (an
+integer of 1 or more), and `includeHidden`. The root is a page, which the command loads
+first, or a node on a page; the document node is refused. The walk is pre-order: a node,
+then its children in order. A chunk starts at the cursor and stops after `maxNodes`
+records, after 15 seconds, or at the end of the subtree; it returns one record at least.
+The answer is `{ rootId, records, nextCursor }`. A record is `{ depth, childCount, node }`:
+`depth` is 0 for the root, and `node` is the dump form (`plugin/src/main/dump.ts`) without
+`children`. `childCount` and the cursor count the same children: each child with
+`includeHidden`, the visible ones without it. `nextCursor` is the child-index path of the
+next node, or `null` when the walk is complete. A cursor index that does not exist stops
+the chunk with an error: the tree changed during the dump. A record holds no counter, no
+time, and no chunk number, thus the joined records do not depend on the chunk boundaries.
+Each chunk saves `figma.skipInvisibleInstanceChildren`, sets it to `false`, walks, and sets
+the saved value back in `finally`. The dump has no character budget. Its options
+(`includeHidden`, `paintBindings`) reach the serializer, and their defaults keep the output
+of the read tools byte for byte. `plugin/test/serializer.test.ts` fixes that output; do not
+change one of its expected values to make a serializer change pass.
+
 ## 4. File map
 
 | File                                       | Purpose                                                                                    |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------ |
 | `plugin/manifest.json`                     | Plugin id, name, and allowed domains. Keep `documentAccess: "dynamic-page"`.               |
 | `plugin/src/main/code.ts`                  | `RequestType`, `EDIT_REQUEST_TYPES`, `requireEditorMode`, `handleRequest`, core tools.     |
-| `plugin/src/main/serializer.ts`            | The node output of the read tools.                                                         |
+| `plugin/src/main/serializer.ts`            | The node output of the read tools, and the base of the dump form.                          |
+| `plugin/src/main/dump.ts`                  | The dump form of a node: the read form, the hidden content, and the added fields.          |
 | `plugin/src/main/shared.ts`                | Shared helpers: node lookup, colors, fonts, position, variable values.                     |
 | `plugin/src/main/extensions/types.ts`      | The `ExtensionHandler` type.                                                               |
 | `plugin/src/main/extensions/index.ts`      | Merges the area maps. Exports `ExtensionRequestType`.                                      |
@@ -72,6 +93,7 @@ with `get_screenshot` over `/rpc` and writes it itself.
 | `plugin/src/main/extensions/typography.ts` | Text style handlers.                                                                       |
 | `plugin/src/main/extensions/components.ts` | Component and component set handlers.                                                      |
 | `plugin/src/main/extensions/sections.ts`   | Section handlers.                                                                          |
+| `plugin/src/main/extensions/dumps.ts`      | `dump_nodes_chunk`, the internal chunk command of a dump.                                  |
 | `plugin/src/ui/App.tsx`                    | The plugin window. Holds the WebSocket.                                                    |
 | `server/src/index.ts`                      | Start. Reads `FIGMA_BRIDGE_PORT`. The default is 1995.                                     |
 | `server/src/schema.ts`                     | `toolInputSchemas` and `rpcToArgs` of the core tools.                                      |
@@ -93,6 +115,7 @@ with `get_screenshot` over `/rpc` and writes it itself.
 | `server/scripts/e2e-free-plan.ts`          | The end-to-end script. Drives every extension tool against a real file.                    |
 | `server/scripts/perf-free-plan.ts`         | The measurement script. Holds each tool to 30 seconds and 50,000 characters.               |
 | `server/test/`                             | `bun test` tests. Real server processes against a simulated plugin. Helpers in `helpers/`. |
+| `plugin/test/`                             | `bun test` tests of the serializer, the dump form, and the chunk walk. Synthetic nodes.    |
 
 An extension file must not import `schema.ts` or `tools.ts`; this prevents an import cycle.
 It imports only `schema-common.ts`, `tool-helpers.ts`, `output-root.ts`, `identity.ts`, packages,
@@ -140,7 +163,7 @@ and types; `output-root.ts` and `identity.ts` import neither `schema.ts` nor `to
 | --------------- | -------------------------------------------------------------------------------------------------- |
 | `bun install`   | Install. Run it in the root, in `server/`, and in `plugin/`.                                       |
 | `bun run check` | The server build, the plugin type check, the plugin build, the format check.                       |
-| `bun run test`  | The server build, then `bun test` in `server/`. Needs no Figma.                                    |
+| `bun run test`  | The server build, then `bun test` in `server/` and in `plugin/`. Needs no Figma.                   |
 | `bun run e2e`   | In `server/`. The end-to-end script. Needs `FIGMA_FILE_KEY`.                                       |
 | `bun run perf`  | In `server/`. The measurement script. Needs `FIGMA_FILE_KEY`. Reads `FIGMA_READ_FILE_KEY` as well. |
 
