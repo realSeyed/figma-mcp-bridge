@@ -4,7 +4,13 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { comparableForm, normaliseGolden, Normaliser } from "../scripts/conformance.js";
+import {
+  comparableForm,
+  normaliseGolden,
+  Normaliser,
+  visibleDifferences,
+  visibleProjection,
+} from "../scripts/conformance.js";
 
 /** The run-specific IDs of one synthetic run. */
 type RunIds = {
@@ -224,5 +230,228 @@ describe("the normalisation of the conformance dumps", () => {
     expect(result.styles).toEqual(node.styles);
     // Only a string that is a whole variable ID is replaced.
     expect(result.characters).toBe(node.characters);
+  });
+});
+
+/** A visible solid paint, as both forms write it. */
+const solid = (color: string) => ({ type: "SOLID", color });
+
+/** A hidden solid paint, as a dump with the hidden content writes it. */
+const hiddenSolid = (color: string) => ({ type: "SOLID", color, visible: false });
+
+/** A drop shadow, as both forms write it. */
+const shadow = {
+  type: "DROP_SHADOW",
+  color: "#000000",
+  opacity: 0.25,
+  offset: { x: 0, y: 4 },
+  radius: 8,
+  spread: 0,
+  blendMode: "NORMAL",
+};
+
+/**
+ * A dump with the hidden content that holds each rule of `serializeStyles`
+ * that the visible projection applies.
+ * @returns The parsed dump of one root.
+ */
+const dumpWithHidden = () => ({
+  id: "1:1",
+  name: "Screen",
+  type: "FRAME",
+  styles: {
+    // A hidden paint before a visible one that binds a variable.
+    fills: [
+      hiddenSolid("#ff0000"),
+      { ...solid("#00aa55"), boundVariables: { color: "VariableID:9:1" } },
+    ],
+    clipsContent: true,
+  },
+  boundVariables: { fills: ["VariableID:9:1"] },
+  children: [
+    {
+      id: "1:2",
+      name: "Instance",
+      type: "INSTANCE",
+      mainComponentId: "5:1",
+      componentSetId: "5:0",
+      componentProperties: { State: "Default" },
+      styles: { fills: [solid("#e8ecf4")] },
+      children: [
+        { id: "I1:2;5:2", name: "label", type: "TEXT", characters: "Go", styles: {} },
+        // A hidden instance child.
+        { id: "I1:2;5:3", name: "badge", type: "FRAME", styles: { visible: false } },
+      ],
+    },
+    {
+      id: "1:3",
+      name: "Each paint and effect hidden",
+      type: "RECTANGLE",
+      styles: {
+        fills: [hiddenSolid("#ff0000")],
+        strokes: [hiddenSolid("#000000")],
+        effects: [{ ...shadow, visible: false }],
+      },
+    },
+    {
+      id: "1:4",
+      name: "One effect hidden",
+      type: "RECTANGLE",
+      styles: {
+        effects: [
+          { type: "LAYER_BLUR", radius: 4 },
+          { ...shadow, visible: false },
+        ],
+      },
+    },
+    {
+      id: "1:5",
+      name: "Mixed text",
+      type: "TEXT",
+      characters: "Body text",
+      textStyleId: "mixed",
+      styles: { fills: "mixed" },
+      styledTextSegments: [
+        { start: 0, end: 4, fills: [solid("#11151c")], textStyleId: "S:1,1:0" },
+        { start: 4, end: 9, fills: [solid("#d92d20")], textStyleId: "" },
+      ],
+    },
+    {
+      id: "1:6",
+      name: "Detached",
+      type: "FRAME",
+      detachedInfo: { type: "local", componentId: "5:4" },
+      reactions: [
+        {
+          actions: [{ type: "NODE", destinationId: "1:9", navigation: "NAVIGATE" }],
+          trigger: { type: "ON_CLICK" },
+        },
+      ],
+      styles: {},
+      // Its only child is hidden, so get_node gives it no children field.
+      children: [
+        { id: "1:7", name: "Hidden only child", type: "FRAME", styles: { visible: false } },
+      ],
+    },
+    {
+      id: "1:8",
+      name: "Hidden frame",
+      type: "FRAME",
+      styles: { visible: false },
+      children: [{ id: "1:10", name: "Inside the hidden frame", type: "FRAME", styles: {} }],
+    },
+  ],
+});
+
+/**
+ * The `get_node` result of the same root, written out by hand.
+ * @returns The read form.
+ */
+const readOfDump = () => ({
+  id: "1:1",
+  name: "Screen",
+  type: "FRAME",
+  styles: { fills: [solid("#00aa55")], clipsContent: true },
+  boundVariables: { fills: ["VariableID:9:1"] },
+  children: [
+    {
+      id: "1:2",
+      name: "Instance",
+      type: "INSTANCE",
+      componentProperties: { State: "Default" },
+      styles: { fills: [solid("#e8ecf4")] },
+      children: [{ id: "I1:2;5:2", name: "label", type: "TEXT", characters: "Go", styles: {} }],
+    },
+    {
+      id: "1:3",
+      name: "Each paint and effect hidden",
+      type: "RECTANGLE",
+      // No fills and no strokes, but effects: [] when each effect is hidden.
+      styles: { effects: [] },
+    },
+    {
+      id: "1:4",
+      name: "One effect hidden",
+      type: "RECTANGLE",
+      styles: { effects: [{ type: "LAYER_BLUR", radius: 4 }] },
+    },
+    {
+      id: "1:5",
+      name: "Mixed text",
+      type: "TEXT",
+      characters: "Body text",
+      textStyleId: "mixed",
+      styles: { fills: "mixed" },
+    },
+    { id: "1:6", name: "Detached", type: "FRAME", styles: {} },
+  ],
+});
+
+describe("the visible projection of a dump", () => {
+  test("the projection of a dump with the hidden content equals get_node", () => {
+    const projected = visibleProjection(dumpWithHidden());
+    expect(projected).toEqual(readOfDump());
+    expect(visibleDifferences(readOfDump(), projected)).toEqual([]);
+  });
+
+  test("each hidden effect gives effects: [], each hidden paint no paint list", () => {
+    const projected = visibleProjection(dumpWithHidden()) as Record<string, any>;
+    const [, allHidden, oneHidden] = projected.children;
+    expect(allHidden.styles).toEqual({ effects: [] });
+    expect("fills" in allHidden.styles).toBe(false);
+    expect("strokes" in allHidden.styles).toBe(false);
+    expect(oneHidden.styles.effects).toEqual([{ type: "LAYER_BLUR", radius: 4 }]);
+  });
+
+  test("a mixed paint list stays, and a paint loses its own bindings", () => {
+    const projected = visibleProjection(dumpWithHidden()) as Record<string, any>;
+    expect(projected.styles.fills).toEqual([solid("#00aa55")]);
+    expect(projected.boundVariables).toEqual({ fills: ["VariableID:9:1"] });
+    expect(projected.children[3].styles.fills).toBe("mixed");
+    expect("styledTextSegments" in projected.children[3]).toBe(false);
+  });
+
+  test("a hidden root stays, and the added fields of a page go", () => {
+    const projected = visibleProjection({
+      id: "0:1",
+      name: "Page",
+      type: "PAGE",
+      styles: { visible: false },
+      flowStartingPoints: [{ nodeId: "1:1", name: "flow" }],
+      children: [{ id: "1:1", name: "Screen", type: "FRAME", styles: {} }],
+    });
+    expect(projected).toEqual({
+      id: "0:1",
+      name: "Page",
+      type: "PAGE",
+      styles: { visible: false },
+      children: [{ id: "1:1", name: "Screen", type: "FRAME", styles: {} }],
+    });
+  });
+
+  test("the projection leaves the dump as it was", () => {
+    const dump = dumpWithHidden();
+    visibleProjection(dump);
+    expect(dump).toEqual(dumpWithHidden());
+  });
+
+  test("each difference names the node and the field", () => {
+    const projected = visibleProjection(dumpWithHidden()) as Record<string, any>;
+
+    const changed = readOfDump() as Record<string, any>;
+    changed.children[0].styles.fills = [solid("#ffffff")];
+    changed.children[2].note = "only in get_node";
+    delete changed.boundVariables;
+    expect(visibleDifferences(changed, projected)).toEqual([
+      '1:1.boundVariables: get_node writes nothing, the dump {"fills":["VariableID:9:1"]}',
+      '1:2.styles: get_node writes {"fills":[{"color":"#ffffff","type":"SOLID"}]}, the dump {"fills":[{"color":"#e8ecf4","type":"SOLID"}]}',
+      '1:4.note: get_node writes "only in get_node", the dump nothing',
+    ]);
+
+    const reordered = readOfDump() as Record<string, any>;
+    reordered.children.reverse();
+    expect(visibleDifferences(reordered, projected)).toEqual([
+      "1:1.children: get_node gives [1:6, 1:5, 1:4, 1:3, 1:2], the dump [1:2, 1:3, 1:4, 1:5, 1:6]",
+    ]);
   });
 });
