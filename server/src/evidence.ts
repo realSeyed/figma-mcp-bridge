@@ -238,8 +238,9 @@ export class EvidenceSet {
       }
     }
     if (taken.length > 0) {
-      throw new Error(
-        `outputPath "${outputPath}" already holds ${taken.join(", ")}. Evidence is never overwritten: give a new outputPath, or leave it out for a new folder.`
+      throw new EvidenceTakenError(
+        `outputPath "${outputPath}" already holds ${taken.join(", ")}. Evidence is never overwritten: give a new outputPath, or leave it out for a new folder.`,
+        taken
       );
     }
 
@@ -350,12 +351,47 @@ export class EvidenceSet {
   }
 
   /**
+   * The path that `write` will report for a name, before the file exists: the
+   * deepest existing part is resolved to its real path, the rest is appended.
+   * A manifest can hold its own path with it. Makes nothing.
+   * @param name - The final file name, as `write` takes it.
+   * @returns The path relative to the output root, with `/`.
+   */
+  async plannedPath(name: string): Promise<string> {
+    const target = await resolveEvidencePath(path.join(this.outputPath, name));
+    const rest = [path.basename(target)];
+    let existing = path.dirname(target);
+    for (;;) {
+      try {
+        return this.relativePath(path.join(await realpath(existing), ...rest));
+      } catch (err) {
+        const parent = path.dirname(existing);
+        if (parent === existing) throw err;
+        rest.unshift(path.basename(existing));
+        existing = parent;
+      }
+    }
+  }
+
+  /**
    * The real folder of the files, relative to the root, with `/`. Call it
    * after the first write, when the folder exists.
    * @returns `.` when the files are in the root itself.
    */
   async folder(): Promise<string> {
     return this.relativePath(await realpath(this.lexicalFolder));
+  }
+}
+
+/** `EvidenceSet.open` refused the call because a target name is taken. */
+export class EvidenceTakenError extends Error {
+  constructor(
+    message: string,
+    /** Each path that is taken, as an absolute path. */
+    readonly taken: readonly string[]
+  ) {
+    super(message);
+    this.name = "EvidenceTakenError";
   }
 }
 
