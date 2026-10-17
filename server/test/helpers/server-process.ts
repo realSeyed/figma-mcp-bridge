@@ -41,6 +41,19 @@ export interface ServerOptions {
 
 export type ToolOutcome = { ok: true; data: unknown } | { ok: false; error: string };
 
+/** One content block of a tool result, as the MCP client gives it. */
+export interface RawContentBlock {
+  type: string;
+  text?: string;
+  data?: string;
+  mimeType?: string;
+}
+
+export interface RawToolResult {
+  isError: boolean;
+  content: RawContentBlock[];
+}
+
 export interface ServerProcess {
   role: "LEADER" | "FOLLOWER";
   /** Each line the process wrote to standard error. */
@@ -49,6 +62,8 @@ export interface ServerProcess {
   listTools(): Promise<string[]>;
   /** Calls one tool and parses its text content as JSON. */
   callTool(name: string, args?: Record<string, unknown>): Promise<ToolOutcome>;
+  /** Calls one tool and returns its content blocks as they are, images too. */
+  callToolRaw(name: string, args?: Record<string, unknown>): Promise<RawToolResult>;
   close(): Promise<void>;
 }
 
@@ -98,6 +113,15 @@ export async function startServer(options: ServerOptions): Promise<ServerProcess
           cursor = page.nextCursor;
         } while (cursor !== undefined);
         return names;
+      },
+      async callToolRaw(name, args = {}) {
+        const result = await client.callTool({ name, arguments: args }, undefined, {
+          timeout: 30_000,
+        });
+        return {
+          isError: result.isError === true,
+          content: (result.content ?? []) as RawContentBlock[],
+        };
       },
       async callTool(name, args = {}) {
         const result = await client.callTool({ name, arguments: args }, undefined, {

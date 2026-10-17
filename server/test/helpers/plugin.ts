@@ -57,6 +57,78 @@ export const pngScreenshot: PluginHandler = (request) => ({
 });
 
 /**
+ * The bytes of a PNG header with the given size: the signature and the IHDR
+ * chunk, then zero padding. It is not a picture a viewer can open, but the
+ * server reads only the header.
+ * @param width - Pixel width.
+ * @param height - Pixel height.
+ * @param padding - Bytes of zero padding after the header.
+ * @returns The bytes.
+ */
+export function pngWithSize(width: number, height: number, padding = 0): Buffer {
+  const header = Buffer.alloc(33 + padding);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header, 0);
+  header.writeUInt32BE(13, 8);
+  header.write("IHDR", 12, "ascii");
+  header.writeUInt32BE(width, 16);
+  header.writeUInt32BE(height, 20);
+  header[24] = 8; // bit depth
+  header[25] = 6; // colour type
+  return header;
+}
+
+/**
+ * The bytes of a JPG header with the given size: SOI, an APP0 segment, one SOF0
+ * segment, and EOI. The server reads only the header.
+ * @param width - Pixel width.
+ * @param height - Pixel height.
+ * @returns The bytes.
+ */
+export function jpgWithSize(width: number, height: number): Buffer {
+  const app0 = Buffer.from([
+    0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 1, 1, 0, 0, 1, 0, 1, 0, 0,
+  ]);
+  const sof = Buffer.alloc(19);
+  sof[0] = 0xff;
+  sof[1] = 0xc0;
+  sof.writeUInt16BE(17, 2);
+  sof[4] = 8; // precision
+  sof.writeUInt16BE(height, 5);
+  sof.writeUInt16BE(width, 7);
+  sof[9] = 3; // components
+  return Buffer.concat([Buffer.from([0xff, 0xd8]), app0, sof, Buffer.from([0xff, 0xd9])]);
+}
+
+/** What a `screenshotHandler` callback returns for one node. */
+export interface SimulatedCapture {
+  format: "PNG" | "JPG" | "SVG" | "PDF";
+  bytes: Uint8Array;
+  nodeName?: string;
+}
+
+/**
+ * A `get_screenshot` handler that answers each node with the capture that the
+ * callback builds. A throw becomes an `error` answer, as in the plugin.
+ * @param build - Builds the capture of one node from its ID and the request.
+ * @returns The handler.
+ */
+export const screenshotHandler =
+  (build: (nodeId: string, request: PluginRequest) => SimulatedCapture): PluginHandler =>
+  (request) => ({
+    exports: (request.nodeIds ?? []).map((nodeId) => {
+      const capture = build(nodeId, request);
+      return {
+        nodeId,
+        nodeName: capture.nodeName ?? `node ${nodeId}`,
+        format: capture.format,
+        base64: Buffer.from(capture.bytes).toString("base64"),
+        width: 1,
+        height: 1,
+      };
+    }),
+  });
+
+/**
  * Connects to `ws://127.0.0.1:<port>/ws` and waits until the socket is open.
  * @param options - Port, file, and the request handlers.
  * @returns The connected plugin.

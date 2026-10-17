@@ -7,8 +7,12 @@ import type { BridgeResponse } from "./types.js";
  * `tools.ts`, which would close an import cycle through `registerTools`.
  */
 
+/** One block of a tool result. An image goes to the conversation as an image block, never as base64 in text. */
+export type ToolContent =
+  { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
+
 export type ToolResult = {
-  content: Array<{ type: "text"; text: string }>;
+  content: ToolContent[];
   isError?: boolean;
 };
 
