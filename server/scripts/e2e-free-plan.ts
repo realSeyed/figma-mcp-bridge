@@ -29,6 +29,14 @@
  *
  * Group L checks the capture manifest of save_screenshots against the file on
  * disk, and removes the capture and its manifest file.
+ *
+ * Group V builds the dump-conformance fixture (BR-7), dumps it, and compares
+ * the normalised dumps with the golden dump in `scripts/golden/`. Some parts
+ * of the fixture need the test helper `e2e_fixture`, a plugin command that no
+ * MCP tool and no role exposes; the script sends it with a raw `/rpc` request.
+ * `E2E_UPDATE_GOLDEN=1` writes the golden dump in place of the compare. A
+ * change of the golden dump is a change of the serializer: commit it alone,
+ * and send it for review.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -38,6 +46,8 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { comparableForm, GOLDEN_ROOTS, goldenText, normaliseGolden } from "./conformance.js";
+import type { GoldenRoot } from "./conformance.js";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const SERVER_ROOT = resolve(SCRIPT_DIR, "..");
@@ -2640,6 +2650,533 @@ const runCaptureSteps = async (): Promise<void> => {
   });
 };
 
+// ---------------------------------------------------------------------------
+// V Dump conformance
+// ---------------------------------------------------------------------------
+
+/** Each node, style, and flow of the conformance fixture starts with this name. */
+const CONFORMANCE = `${PREFIX}conformance/`;
+
+/** The committed, normalised dump of the fixture. */
+const GOLDEN_PATH = join(SCRIPT_DIR, "golden", "dump-conformance.json");
+
+/** `E2E_UPDATE_GOLDEN=1` writes the golden dump in place of the compare. */
+const UPDATE_GOLDEN = process.env.E2E_UPDATE_GOLDEN === "1";
+
+/** The name of the flow starting point that V1 gives the page. */
+const FLOW_NAME = "mcp-e2e flow";
+
+/** The left edge of the fixture on the page, clear of the other groups. */
+const FIXTURE_X = 4000;
+
+/** The text of the mixed-style node, and its two styled ranges. */
+const MIXED_TEXT = "Body text with one red word";
+const STYLED_RANGE = { start: 0, end: 4 };
+const RED_RANGE = { start: 19, end: 22 };
+
+/** The IDs of the fixture, which group V threads through its steps. */
+type Fixture = {
+  styleId: string;
+  defaultId: string;
+  hoverId: string;
+  setId: string;
+  screenId: string;
+  targetId: string;
+  instanceId: string;
+  detachedId: string;
+  paintsId: string;
+  textId: string;
+  areaId: string;
+};
+
+const fixture: Partial<Fixture> = {};
+
+/**
+ * Reads an ID of the fixture.
+ * @param key - The fixture key.
+ * @returns The ID.
+ */
+const part = (key: keyof Fixture): string => {
+  const value = fixture[key];
+  check(value !== undefined, `this step needs ${key} from V1, which did not produce it`);
+  return value as string;
+};
+
+/**
+ * Sends one operation of the test helper `e2e_fixture` to the leader.
+ *
+ * No MCP tool has this name, so the script sends a raw `/rpc` request with the
+ * install token, which it reads from the file as a server process reads it.
+ * The token is never printed.
+ * @param op - The operation.
+ * @param params - Its params.
+ * @returns The data of the answer.
+ */
+const fixtureOp = async (op: string, params: Json = {}): Promise<Json> => {
+  const { rpcToken } = await import("../src/rpc-token.js");
+  const response = await fetch(`http://127.0.0.1:${leaderPort()}/rpc`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${rpcToken()}` },
+    body: JSON.stringify({ tool: "e2e_fixture", params: { op, ...params }, fileKey }),
+    signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+  });
+  const body = (await response.json()) as { data?: unknown; error?: string };
+  check(
+    response.status === 200 && body.error === undefined,
+    `e2e_fixture ${op} failed (HTTP ${response.status}): ${body.error ?? show(body)}`
+  );
+  return readRecord(body.data, `e2e_fixture ${op} result`);
+};
+
+/**
+ * Creates one node with a tool and reads the ID it returns.
+ * @param tool - The tool.
+ * @param args - Its arguments.
+ * @param field - The field of the result that holds the ID.
+ * @returns The ID.
+ */
+const created = async (tool: string, args: Json, field = "nodeId"): Promise<string> =>
+  readString((await okRecord(tool, args))[field], `${tool}.${field}`);
+
+/**
+ * Builds one variant: an empty component with a label and an icon frame.
+ * @param state - The value of the State property.
+ * @param x - The position on the page.
+ * @param fillHex - The fill of the variant.
+ * @returns The component ID.
+ */
+const buildVariant = async (state: string, x: number, fillHex: string): Promise<string> => {
+  const id = await created(
+    "create_component",
+    {
+      name: `State=${state}`,
+      parentId: need("pageId"),
+      x,
+      y: 0,
+      width: 160,
+      height: 48,
+      fillHex,
+    },
+    "id"
+  );
+  await created("create_text", {
+    name: `${CONFORMANCE}label`,
+    parentId: id,
+    characters: state,
+    fontFamily: "Inter",
+    fontStyle: "Regular",
+    fontSize: 14,
+    fillHex: "#11151C",
+    textAutoResize: "NONE",
+    width: 80,
+    height: 20,
+    x: 16,
+    y: 14,
+  });
+  await created("create_frame", {
+    name: `${CONFORMANCE}icon`,
+    parentId: id,
+    x: 120,
+    y: 12,
+    width: 24,
+    height: 24,
+    fillHex: "#FF7755",
+  });
+  return id;
+};
+
+/**
+ * Builds the conformance fixture on the test page. Each part has a fixed name,
+ * position, and size, so two runs give the same dump but for the IDs.
+ * @param saved - Receives the values that the cleanup sets back.
+ */
+const buildFixture = async (saved: { flow?: Json[]; skip?: boolean }): Promise<void> => {
+  const skip = await fixtureOp("getSkipInvisibleInstanceChildren");
+  check(typeof skip.value === "boolean", `the flag reads as ${show(skip.value)}`);
+  saved.skip = skip.value as boolean;
+
+  fixture.styleId = await created(
+    "create_text_style",
+    { name: `${CONFORMANCE}Body`, fontFamily: "Inter", fontStyle: "Bold", fontSize: 16 },
+    "id"
+  );
+
+  // The component set: two variants, and a hidden badge in the Default one,
+  // which the instance of Default carries as a hidden instance child.
+  fixture.defaultId = await buildVariant("Default", FIXTURE_X, "#E8ECF4");
+  const badge = await created("create_frame", {
+    name: `${CONFORMANCE}badge`,
+    parentId: fixture.defaultId,
+    x: 140,
+    y: 4,
+    width: 12,
+    height: 12,
+    fillHex: "#D92D20",
+  });
+  await ok("set_node_visibility", { items: [{ nodeId: badge, visible: false }] });
+  fixture.hoverId = await buildVariant("Hover", FIXTURE_X + 200, "#D0D7E6");
+  fixture.setId = await created(
+    "combine_as_variants",
+    {
+      componentIds: [fixture.defaultId, fixture.hoverId],
+      name: `${CONFORMANCE}Button`,
+      parentId: need("pageId"),
+      layout: "ROW",
+      gap: 24,
+      padding: 24,
+    },
+    "id"
+  );
+  await ok("set_node_properties", { nodeId: fixture.setId, x: FIXTURE_X, y: 0 });
+
+  fixture.screenId = await created("create_frame", {
+    name: `${CONFORMANCE}Screen`,
+    parentId: need("pageId"),
+    x: FIXTURE_X,
+    y: 200,
+    width: 800,
+    height: 400,
+    fillHex: "#FFFFFF",
+  });
+  fixture.targetId = await created("create_frame", {
+    name: `${CONFORMANCE}Target`,
+    parentId: need("pageId"),
+    x: FIXTURE_X + 900,
+    y: 200,
+    width: 400,
+    height: 400,
+    fillHex: "#F4F6FA",
+  });
+
+  fixture.instanceId = await created(
+    "create_instance",
+    {
+      componentId: fixture.setId,
+      variantProperties: { State: "Default" },
+      parentId: fixture.screenId,
+      x: 40,
+      y: 40,
+    },
+    "id"
+  );
+  await ok("set_node_properties", {
+    nodeId: fixture.instanceId,
+    name: `${CONFORMANCE}Default instance`,
+  });
+
+  const hover = await created(
+    "create_instance",
+    {
+      componentId: fixture.setId,
+      variantProperties: { State: "Hover" },
+      parentId: fixture.screenId,
+      x: 240,
+      y: 40,
+    },
+    "id"
+  );
+  await ok("set_node_properties", { nodeId: hover, name: `${CONFORMANCE}Hover detached` });
+  const detached = allWritten(
+    await ok("detach_instance", { nodeIds: [hover] }),
+    "detach_instance",
+    1
+  );
+  fixture.detachedId = readString(detached[0].frameId, "detach_instance results[0].frameId");
+
+  // Two fills, the first one hidden, and a hidden drop shadow.
+  fixture.paintsId = await created("create_shape", {
+    shapeType: "RECTANGLE",
+    name: `${CONFORMANCE}Paints`,
+    parentId: fixture.screenId,
+    x: 440,
+    y: 40,
+    width: 120,
+    height: 80,
+    fillHex: "#FF0000",
+  });
+  await fixtureOp("addPaint", { nodeId: fixture.paintsId, target: "fills", hex: "#00AA55" });
+  await fixtureOp("hidePaint", { nodeId: fixture.paintsId, target: "fills", index: 0 });
+  await ok("set_effects", {
+    nodeId: fixture.paintsId,
+    effects: [
+      {
+        type: "DROP_SHADOW",
+        color: "#000000",
+        opacity: 0.25,
+        offset: { x: 0, y: 4 },
+        radius: 8,
+        visible: false,
+      },
+    ],
+  });
+
+  // Mixed styles: a text style on one range, another fill on a second range.
+  fixture.textId = await created("create_text", {
+    name: `${CONFORMANCE}Mixed text`,
+    parentId: fixture.screenId,
+    characters: MIXED_TEXT,
+    fontFamily: "Inter",
+    fontStyle: "Regular",
+    fontSize: 16,
+    fillHex: "#11151C",
+    textAutoResize: "NONE",
+    width: 320,
+    height: 48,
+    x: 40,
+    y: 160,
+  });
+  allWritten(
+    await ok("apply_text_style", {
+      nodeIds: [fixture.textId],
+      styleId: fixture.styleId,
+      range: STYLED_RANGE,
+    }),
+    "apply_text_style",
+    1
+  );
+  await fixtureOp("setRangeFill", { nodeId: fixture.textId, ...RED_RANGE, hex: "#D92D20" });
+
+  // A reaction: on click, navigate to Target.
+  fixture.areaId = await created("create_frame", {
+    name: `${CONFORMANCE}Button area`,
+    parentId: fixture.screenId,
+    x: 40,
+    y: 260,
+    width: 160,
+    height: 48,
+    fillHex: "#3355FF",
+  });
+  await fixtureOp("setReactions", {
+    nodeId: fixture.areaId,
+    reactions: [
+      {
+        trigger: { type: "ON_CLICK" },
+        actions: [
+          {
+            type: "NODE",
+            destinationId: fixture.targetId,
+            navigation: "NAVIGATE",
+            transition: null,
+          },
+        ],
+      },
+    ],
+  });
+
+  const flow = await fixtureOp("setFlowStartingPoints", {
+    pageId: need("pageId"),
+    points: [{ nodeId: fixture.screenId, name: FLOW_NAME }],
+  });
+  saved.flow = readRecords(flow.previous, "the flow starting points before the run");
+  const points = readRecords(flow.points, "the flow starting points");
+  check(
+    points.length === 1 && points[0].nodeId === fixture.screenId,
+    `the page has the flow starting points ${show(points)}`
+  );
+};
+
+/**
+ * Finds the nodes of a tree that pass a test, in pre-order.
+ * @param node - The root.
+ * @param test - The test.
+ * @returns The nodes.
+ */
+const findNodes = (node: unknown, test: (candidate: Json) => boolean): Json[] => {
+  if (typeof node !== "object" || node === null || Array.isArray(node)) return [];
+  const found = test(node as Json) ? [node as Json] : [];
+  const children = (node as Json).children;
+  for (const child of Array.isArray(children) ? children : []) {
+    found.push(...findNodes(child, test));
+  }
+  return found;
+};
+
+/**
+ * Lists each part of the specification that the normalised dumps do not show,
+ * so neither a compare nor a write of the golden dump passes without them.
+ * @param golden - The normalised dumps.
+ * @returns One line for each missing part.
+ */
+const missingParts = (golden: Record<GoldenRoot, unknown>): string[] => {
+  const missing: string[] = [];
+  const named = (root: unknown, name: string): Json | undefined =>
+    findNodes(root, (node) => node.name === `${CONFORMANCE}${name}`)[0];
+  const placeholder = (value: unknown): boolean =>
+    typeof value === "string" && /^N\d+$/.test(value);
+  const hidden = (node: Json | undefined): boolean =>
+    (node?.styles as Json | undefined)?.visible === false;
+
+  if (!hidden(named(golden["button-set"], "badge"))) {
+    missing.push("the badge of the set with styles.visible false");
+  }
+  const instance = named(golden.screen, "Default instance");
+  if (!hidden(findNodes(instance, (node) => node.name === `${CONFORMANCE}badge`)[0])) {
+    missing.push("the badge of the instance with styles.visible false");
+  }
+  if (!placeholder(instance?.mainComponentId) || !placeholder(instance?.componentSetId)) {
+    missing.push("mainComponentId and componentSetId of the instance as placeholders");
+  }
+
+  const styles = (named(golden.screen, "Paints")?.styles ?? {}) as Json;
+  const hiddenEntry = (list: unknown): boolean =>
+    Array.isArray(list) && list.some((entry) => (entry as Json).visible === false);
+  if (!hiddenEntry(styles.fills)) missing.push("the hidden fill with visible false");
+  if (!hiddenEntry(styles.effects)) missing.push("the hidden drop shadow with visible false");
+
+  const detachedInfo = named(golden.screen, "Hover detached")?.detachedInfo as Json | undefined;
+  if (!placeholder(detachedInfo?.componentId)) {
+    missing.push(`detachedInfo of the detached frame (found ${show(detachedInfo ?? null)})`);
+  }
+
+  const targetId = (golden.target as Json).id;
+  const reactions = named(golden.screen, "Button area")?.reactions;
+  const destinations: string[] =
+    JSON.stringify(reactions ?? []).match(/"destinationId":"[^"]*"/g) ?? [];
+  if (!placeholder(targetId) || !destinations.includes(`"destinationId":"${String(targetId)}"`)) {
+    missing.push("the reaction with Target as its destination placeholder");
+  }
+
+  const segments = named(golden.screen, "Mixed text")?.styledTextSegments;
+  if (!Array.isArray(segments) || segments.length < 2) {
+    missing.push("styledTextSegments on the mixed text");
+  }
+  return missing;
+};
+
+/**
+ * Dumps the three roots of the fixture into one folder.
+ * @param folder - The folder under the output root.
+ * @returns The bytes of each file, and its parsed tree, by golden root.
+ */
+const dumpFixture = async (
+  folder: string
+): Promise<{ bytes: Record<GoldenRoot, Buffer>; trees: Record<GoldenRoot, unknown> }> => {
+  const roots: Record<GoldenRoot, string> = {
+    "button-set": part("setId"),
+    screen: part("screenId"),
+    target: part("targetId"),
+  };
+  const manifest = await okRecord("dump_nodes", {
+    nodeIds: GOLDEN_ROOTS.map((root) => roots[root]),
+    outputPath: folder,
+  });
+  check(
+    manifest.includeHidden === true,
+    `the manifest says includeHidden ${show(manifest.includeHidden)}`
+  );
+  const bytes = {} as Record<GoldenRoot, Buffer>;
+  const trees = {} as Record<GoldenRoot, unknown>;
+  for (const root of GOLDEN_ROOTS) {
+    bytes[root] = (await readDumpFile(manifest, roots[root])).bytes;
+    trees[root] = JSON.parse(bytes[root].toString("utf8")) as unknown;
+  }
+  console.log(
+    `      bridge ${String(manifest.bridgeCommit)}, plugin build ${String(manifest.pluginBuild)}`
+  );
+  return { bytes, trees };
+};
+
+/**
+ * Builds the conformance fixture, dumps it, and compares the normalised dumps
+ * with the golden dump. The dumps land in one folder of this run under the
+ * output root, which the group removes again. The `finally` block sets the
+ * flow starting points of the page and the flag of the plugin back to their
+ * values before the run; the cleanup of the script removes the nodes and the
+ * text style through their prefix.
+ */
+const runConformanceSteps = async (): Promise<void> => {
+  const runFolder = `mcp-e2e-conformance-${Date.now()}`;
+  const runPath = join(OUTPUT_DIR, runFolder);
+  check(!existsSync(runPath), `${runPath} exists already; remove it, then run again`);
+  const saved: { flow?: Json[]; skip?: boolean } = {};
+  let first: Record<GoldenRoot, Buffer> | undefined;
+
+  try {
+    const built = await step("V1 build the conformance fixture", () => buildFixture(saved));
+    if (!built) return;
+
+    const golden = UPDATE_GOLDEN
+      ? "V2 the normalised dumps are written as the golden dump"
+      : "V2 the normalised dumps equal the golden dump";
+    await step(golden, async () => {
+      const { bytes, trees } = await dumpFixture(`${runFolder}/v2`);
+      first = bytes;
+      const normalised = normaliseGolden(trees);
+      const missing = missingParts(normalised);
+      check(missing.length === 0, `the dumps do not show: ${missing.join("; ")}`);
+
+      if (UPDATE_GOLDEN) {
+        await mkdir(dirname(GOLDEN_PATH), { recursive: true });
+        await writeFile(GOLDEN_PATH, await goldenText(normalised, GOLDEN_PATH), "utf8");
+        console.log(`      wrote ${GOLDEN_PATH}`);
+        console.log(
+          "      WARNING: a change of the golden dump is a change of the serializer. Commit it alone, and send it to the auditor process for review."
+        );
+        return;
+      }
+
+      check(
+        existsSync(GOLDEN_PATH),
+        `${GOLDEN_PATH} does not exist. Make it with E2E_UPDATE_GOLDEN=1 bun run e2e, read it, and commit it alone`
+      );
+      const expected = JSON.parse(await readFile(GOLDEN_PATH, "utf8")) as unknown;
+      if (comparableForm(expected) !== comparableForm(normalised)) {
+        throw new AssertionError(
+          `the normalised dumps differ from the golden dump at ${firstDifference(normalised, expected)}. A change of the serializer changes the golden dump: write it with E2E_UPDATE_GOLDEN=1, commit it alone, and send it for review`
+        );
+      }
+    });
+
+    await step("V3 a second dump of the fixture is byte-identical", async () => {
+      check(first !== undefined, "V2 made no dump to compare with");
+      const { bytes } = await dumpFixture(`${runFolder}/v3`);
+      for (const root of GOLDEN_ROOTS) {
+        check(
+          bytes[root].equals(first![root]),
+          `the ${root} dumps differ: ${first![root].byteLength} and ${bytes[root].byteLength} bytes`
+        );
+      }
+    });
+
+    await step("V4 the page dump holds the Screen frame as a flow starting point", async () => {
+      const manifest = await okRecord("dump_nodes", {
+        nodeIds: [need("pageId")],
+        outputPath: `${runFolder}/v4`,
+      });
+      const { bytes } = await readDumpFile(manifest, need("pageId"));
+      const page = readRecord(JSON.parse(bytes.toString("utf8")), "the page dump");
+      const points = readRecords(page.flowStartingPoints, "flowStartingPoints");
+      check(
+        points.some((point) => point.nodeId === part("screenId") && point.name === FLOW_NAME),
+        `flowStartingPoints is ${show(points)}, expected { nodeId: ${part("screenId")}, name: "${FLOW_NAME}" }`
+      );
+    });
+  } finally {
+    if (saved.flow !== undefined || saved.skip !== undefined) {
+      await step("V cleanup sets the flow starting points and the flag back", async () => {
+        if (saved.flow !== undefined) {
+          const points = saved.flow.map((point) => ({ nodeId: point.nodeId, name: point.name }));
+          const restored = await fixtureOp("setFlowStartingPoints", {
+            pageId: need("pageId"),
+            points,
+          });
+          check(
+            JSON.stringify(restored.points) === JSON.stringify(points),
+            `the page has the flow starting points ${show(restored.points)}, expected ${show(points)}`
+          );
+        }
+        if (saved.skip !== undefined) {
+          await fixtureOp("setSkipInvisibleInstanceChildren", { value: saved.skip });
+          const now = await fixtureOp("getSkipInvisibleInstanceChildren");
+          check(now.value === saved.skip, `the flag is ${show(now.value)}, expected ${saved.skip}`);
+        }
+      });
+    }
+    // Only the folder of this run, which the run made.
+    await rm(runPath, { recursive: true, force: true });
+  }
+};
+
 /** Runs every scenario group in order. Each step records its own outcome. */
 const runScenario = async (): Promise<void> => {
   await runVariableSteps();
@@ -2653,6 +3190,7 @@ const runScenario = async (): Promise<void> => {
   await runDumpSteps();
   await runAuditorSteps();
   await runCaptureSteps();
+  await runConformanceSteps();
 };
 
 /**
