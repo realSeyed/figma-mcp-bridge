@@ -71,6 +71,17 @@ another process: `/rpc` refuses `save_screenshots` and `dump_nodes` with 400, an
 follower fetches each capture with `get_screenshot`, and each dump chunk with
 `dump_nodes_chunk`, over `/rpc` and writes the files itself.
 
+`save_screenshots` (`server/src/captures.ts`) runs in the serving process too, and returns a manifest in
+the envelope of `evidence.ts`: the identity of the file, one entry for each item, the totals, and
+`manifestPath`. A capture entry holds the path, the bytes, the SHA-256, the scale, and the pixel
+size, read from the PNG or JPG header (`server/src/image-size.ts`). It returns no image data. The
+call reads the identity before the first capture and after the last, fails if the epoch, the plugin
+build, or the leader start changed, and removes each file of the call. The manifest file goes
+beside the first item as `save_screenshots-<UTC time>.manifest.json`. A target that exists refuses
+the call before the first capture. An item that fails alone does not fail the call.
+`get_screenshot` returns a PNG or JPG of 1,568 pixels or less on the long edge and 3,750,000 bytes
+or less as an image block and a text block with its metadata; any other export is JSON text.
+
 `dump_nodes_chunk` (`plugin/src/main/extensions/dumps.ts`, `edit: false`) is an internal
 plugin command: the server sends it, and no MCP tool has its name. Its params are `rootId`,
 `cursor` (an array of child indexes from the root, or `null` at the start), `maxNodes` (an
@@ -104,46 +115,48 @@ the manifest only. A failure removes each file of the call.
 
 ## 4. File map
 
-| File                                       | Purpose                                                                                    |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------ |
-| `plugin/manifest.json`                     | Plugin id, name, and allowed domains. Keep `documentAccess: "dynamic-page"`.               |
-| `plugin/src/main/code.ts`                  | `RequestType`, `EDIT_REQUEST_TYPES`, `requireEditorMode`, `handleRequest`, core tools.     |
-| `plugin/src/main/serializer.ts`            | The node output of the read tools, and the base of the dump form.                          |
-| `plugin/src/main/dump.ts`                  | The dump form of a node: the read form, the hidden content, and the added fields.          |
-| `plugin/src/main/shared.ts`                | Shared helpers: node lookup, colors, fonts, position, variable values.                     |
-| `plugin/src/main/extensions/types.ts`      | The `ExtensionHandler` type.                                                               |
-| `plugin/src/main/extensions/index.ts`      | Merges the area maps. Exports `ExtensionRequestType`.                                      |
-| `plugin/src/main/extensions/batch.ts`      | Shared batch helpers: param reading, error wording, the two phases of a batch.             |
-| `plugin/src/main/extensions/variables.ts`  | Variable and variable collection handlers.                                                 |
-| `plugin/src/main/extensions/typography.ts` | Text style handlers.                                                                       |
-| `plugin/src/main/extensions/components.ts` | Component and component set handlers.                                                      |
-| `plugin/src/main/extensions/sections.ts`   | Section handlers.                                                                          |
-| `plugin/src/main/extensions/dumps.ts`      | `dump_nodes_chunk`, the internal chunk command of a dump.                                  |
-| `plugin/src/ui/App.tsx`                    | The plugin window. Holds the WebSocket.                                                    |
-| `server/src/index.ts`                      | Start. Reads `FIGMA_BRIDGE_PORT`. The default is 1995.                                     |
-| `server/src/schema.ts`                     | `toolInputSchemas` and `rpcToArgs` of the core tools.                                      |
-| `server/src/output-root.ts`                | The output root: path resolution, real-path containment, and the evidence file write.      |
-| `server/src/evidence.ts`                   | Canonical JSON, SHA-256, `EvidenceSet` (the `.partial` write), the manifest envelope.      |
-| `server/src/rpc-token.ts`                  | The install token: the path of its file, its creation, its checks. Node built-ins only.    |
-| `server/src/role.ts`                       | The auditor role: `AUDITOR_TOOLS`, the internal commands, the role parse, the wrapper.     |
-| `server/src/identity.ts`                   | File selection and the identity of one file, for the manifests. Imports types only.        |
-| `server/src/build-info.ts`                 | `BRIDGE_COMMIT`, read from `dist/build-info.json`.                                         |
-| `server/scripts/write-build-info.mjs`      | The build step that writes `dist/build-info.json`.                                         |
-| `plugin/build-identity.ts`                 | The plugin build identifier. Both Vite configurations import it.                           |
-| `server/src/schema-common.ts`              | `createFigmaNodeIdSchema`, `createHexColorSchema`, `fileKeyField`.                         |
-| `server/src/tools.ts`                      | `registerTools` of the core tools.                                                         |
-| `server/src/tool-helpers.ts`               | `renderResponse`, `parseToolInput`, the `ToolResult` type.                                 |
-| `server/src/extensions/types.ts`           | The area file types.                                                                       |
-| `server/src/extensions/index.ts`           | Merges `schemas`, `rpcToArgs`, and `register`.                                             |
-| `server/src/extensions/variables.ts`       | Variable and variable collection tools.                                                    |
-| `server/src/extensions/typography.ts`      | Text style tools.                                                                          |
-| `server/src/extensions/components.ts`      | Component and component set tools.                                                         |
-| `server/src/extensions/sections.ts`        | Section tools.                                                                             |
-| `server/src/extensions/dumps.ts`           | `dump_nodes`: the chunk loop, `TreeBuilder`, the files, and the manifest.                  |
-| `server/scripts/e2e-free-plan.ts`          | The end-to-end script. Drives every extension tool against a real file.                    |
-| `server/scripts/perf-free-plan.ts`         | The measurement script. Holds each tool to 30 seconds and 50,000 characters.               |
-| `server/test/`                             | `bun test` tests. Real server processes against a simulated plugin. Helpers in `helpers/`. |
-| `plugin/test/`                             | `bun test` tests of the serializer, the dump form, and the chunk walk. Synthetic nodes.    |
+| File                                       | Purpose                                                                                         |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `plugin/manifest.json`                     | Plugin id, name, and allowed domains. Keep `documentAccess: "dynamic-page"`.                    |
+| `plugin/src/main/code.ts`                  | `RequestType`, `EDIT_REQUEST_TYPES`, `requireEditorMode`, `handleRequest`, core tools.          |
+| `plugin/src/main/serializer.ts`            | The node output of the read tools, and the base of the dump form.                               |
+| `plugin/src/main/dump.ts`                  | The dump form of a node: the read form, the hidden content, and the added fields.               |
+| `plugin/src/main/shared.ts`                | Shared helpers: node lookup, colors, fonts, position, variable values.                          |
+| `plugin/src/main/extensions/types.ts`      | The `ExtensionHandler` type.                                                                    |
+| `plugin/src/main/extensions/index.ts`      | Merges the area maps. Exports `ExtensionRequestType`.                                           |
+| `plugin/src/main/extensions/batch.ts`      | Shared batch helpers: param reading, error wording, the two phases of a batch.                  |
+| `plugin/src/main/extensions/variables.ts`  | Variable and variable collection handlers.                                                      |
+| `plugin/src/main/extensions/typography.ts` | Text style handlers.                                                                            |
+| `plugin/src/main/extensions/components.ts` | Component and component set handlers.                                                           |
+| `plugin/src/main/extensions/sections.ts`   | Section handlers.                                                                               |
+| `plugin/src/main/extensions/dumps.ts`      | `dump_nodes_chunk`, the internal chunk command of a dump.                                       |
+| `plugin/src/ui/App.tsx`                    | The plugin window. Holds the WebSocket.                                                         |
+| `server/src/index.ts`                      | Start. Reads `FIGMA_BRIDGE_PORT`. The default is 1995.                                          |
+| `server/src/schema.ts`                     | `toolInputSchemas` and `rpcToArgs` of the core tools.                                           |
+| `server/src/output-root.ts`                | The output root: path resolution, real-path containment, and the evidence file write.           |
+| `server/src/evidence.ts`                   | Canonical JSON, SHA-256, `EvidenceSet` (the `.partial` write), the manifest envelope.           |
+| `server/src/rpc-token.ts`                  | The install token: the path of its file, its creation, its checks. Node built-ins only.         |
+| `server/src/role.ts`                       | The auditor role: `AUDITOR_TOOLS`, the internal commands, the role parse, the wrapper.          |
+| `server/src/captures.ts`                   | `save_screenshots`: the plan, the captures, the manifest. The image blocks of `get_screenshot`. |
+| `server/src/image-size.ts`                 | The pixel size of a PNG or a JPG, read from its header. Imports nothing.                        |
+| `server/src/identity.ts`                   | File selection and the identity of one file, for the manifests. Imports types only.             |
+| `server/src/build-info.ts`                 | `BRIDGE_COMMIT`, read from `dist/build-info.json`.                                              |
+| `server/scripts/write-build-info.mjs`      | The build step that writes `dist/build-info.json`.                                              |
+| `plugin/build-identity.ts`                 | The plugin build identifier. Both Vite configurations import it.                                |
+| `server/src/schema-common.ts`              | `createFigmaNodeIdSchema`, `createHexColorSchema`, `fileKeyField`.                              |
+| `server/src/tools.ts`                      | `registerTools` of the core tools.                                                              |
+| `server/src/tool-helpers.ts`               | `renderResponse`, `parseToolInput`, the `ToolResult` type.                                      |
+| `server/src/extensions/types.ts`           | The area file types.                                                                            |
+| `server/src/extensions/index.ts`           | Merges `schemas`, `rpcToArgs`, and `register`.                                                  |
+| `server/src/extensions/variables.ts`       | Variable and variable collection tools.                                                         |
+| `server/src/extensions/typography.ts`      | Text style tools.                                                                               |
+| `server/src/extensions/components.ts`      | Component and component set tools.                                                              |
+| `server/src/extensions/sections.ts`        | Section tools.                                                                                  |
+| `server/src/extensions/dumps.ts`           | `dump_nodes`: the chunk loop, `TreeBuilder`, the files, and the manifest.                       |
+| `server/scripts/e2e-free-plan.ts`          | The end-to-end script. Drives every extension tool against a real file.                         |
+| `server/scripts/perf-free-plan.ts`         | The measurement script. Holds each tool to 30 seconds and 50,000 characters.                    |
+| `server/test/`                             | `bun test` tests. Real server processes against a simulated plugin. Helpers in `helpers/`.      |
+| `plugin/test/`                             | `bun test` tests of the serializer, the dump form, and the chunk walk. Synthetic nodes.         |
 
 An extension file must not import `schema.ts` or `tools.ts`; this prevents an import cycle.
 It imports only `schema-common.ts`, `tool-helpers.ts`, `output-root.ts`, `identity.ts`,
@@ -190,7 +203,10 @@ import neither `schema.ts` nor `tools.ts`. `evidence.ts` imports only Node built
     written as `<name>.partial` and gets its final name only when the call succeeds
     (`EvidenceSet`). It is never overwritten: a target that exists refuses the call before
     it reads Figma. A failed call removes each file it wrote.
-16. A read tool joins `AUDITOR_TOOLS` in `server/src/role.ts` only on purpose: change the list
+16. A tool that returns an image to the conversation returns an image block (`{ type: "image", data,
+mimeType }`), never base64 in text. A capture that is large or that serves as evidence goes to
+    disk with `save_screenshots`, and the result is a manifest.
+17. A read tool joins `AUDITOR_TOOLS` in `server/src/role.ts` only on purpose: change the list
     and its test (`server/test/auditor-role.test.ts`, which writes the 15 names out) together,
     and the e2e list in group K. A new tool never reaches the auditor role by default.
 

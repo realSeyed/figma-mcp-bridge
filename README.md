@@ -241,8 +241,8 @@ Both build values are written at build time: the server build writes `server/dis
 | `get_metadata`                 | Get file name, pages, and current page info                                                                                                                                                                                         |
 | `get_design_context`           | Get a depth-limited tree optimized for understanding design context                                                                                                                                                                 |
 | `get_variable_defs`            | Get all variable collections with their default mode, and every variable with its scopes, description, and values                                                                                                                   |
-| `get_screenshot`               | Export nodes as PNG/SVG/JPG/PDF (base64-encoded)                                                                                                                                                                                    |
-| `save_screenshots`             | Export screenshots and save them under the output root (see [Audit configuration](#audit-configuration))                                                                                                                            |
+| `get_screenshot`               | Export nodes as PNG/SVG/JPG/PDF. A PNG or JPG up to 1,568 pixels on its long edge and 3,750,000 bytes comes back as an image block (see [Captures](#captures)); any other export is JSON text with base64                           |
+| `save_screenshots`             | Export screenshots, save them under the output root, and return a manifest with the path, bytes, SHA-256, pixel size, and scale of each capture, never image data (see [Captures](#captures))                                       |
 | `dump_nodes`                   | Write the complete subtree of each root, hidden content included, as canonical JSON under the output root, and return only a manifest (see [Dumps](#dumps))                                                                         |
 | `get_motion_styles`            | List all available animation presets (beta)                                                                                                                                                                                         |
 | `get_node_motion`              | Read a node's current animation styles and properties (beta)                                                                                                                                                                        |
@@ -352,6 +352,31 @@ The manifest is the result of the call, and `manifest.json` holds the same text.
 | `hiddenCount`  | The nodes with `styles.visible: false`. `null` for the variables file and the styles file.                                                                                                                                                       |
 | `variantCount` | For a `COMPONENT_SET` root, its variants in the dump; for another root, the sum over each component set in the dump. With `includeHidden`, it equals the `variantCount` of `list_components`. `null` for the variables file and the styles file. |
 
+#### Captures
+
+`save_screenshots` writes each capture to disk, under the [output root](#audit-configuration) of the server process that serves the call, and returns only a manifest. It returns no image data, so no capture reaches the conversation as base64 text. A capture counts as evidence only when its SHA-256 equals the value in the manifest.
+
+- **Result shape.** The result is a manifest, not the earlier list of per-item results. `total`, `succeeded`, `failed`, and `hasErrors` stay; `results` is now `files`, and `outputPath`, `bytesWritten`, `width`, and `height` are now `path` (relative to the output root), `bytes`, `pixelWidth`, and `pixelHeight`.
+- **Pixel size.** `pixelWidth` and `pixelHeight` come from the image header: the IHDR chunk of a PNG, the SOF segment of a JPG. They are not the size of the node in points. They are `null` for SVG and PDF, and so is `scale`. A raster capture without a `scale` records the plugin default, 2.
+- **Manifest file.** The same text goes to disk as `save_screenshots-<UTC time as YYYYMMDDTHHmmssZ>.manifest.json`, beside the first item, as canonical JSON. `manifestPath` names it, relative to the output root. When no item is written, there is no capture to put it beside, and `manifestPath` is `null`.
+- **Failure.** An item that fails (a node that does not exist, a refused or repeated path, a plugin error) gets the entry `{ index, nodeId, ok: false, error }`; the other items are still written. The call fails, and no file of the call remains, if the plugin session changes during it (a new epoch, a new plugin build, or a restarted leader), or if a write fails.
+- **No overwrite.** Each file is written as `<name>.partial` and gets its final name only when the call succeeds. If an `outputPath`, or the name of the manifest file, exists already, the call stops before it captures anything. This is a change from the earlier per-item error.
+
+| Field                                                                     | Meaning                                                                                 |
+| ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `tool`                                                                    | `save_screenshots`.                                                                     |
+| `fileKey`                                                                 | The file that was captured.                                                             |
+| `bridgeCommit`, `leaderCommit`, `pluginBuild`, `epoch`, `leaderStartedAt` | The [instrument identity](#instrument-identity) at the start of the call.               |
+| `outputRoot`                                                              | The real absolute path of the output root.                                              |
+| `startedAt`, `finishedAt`                                                 | ISO 8601 UTC with milliseconds.                                                         |
+| `files`                                                                   | One entry for each item, in the order of `items`.                                       |
+| `manifestPath`                                                            | The manifest file, relative to `outputRoot`, with `/`; `null` when no item was written. |
+| `total`, `succeeded`, `failed`, `hasErrors`                               | The totals of the call.                                                                 |
+
+A written item has `kind: "capture"`, `index`, `nodeId`, `nodeName`, `path`, `format`, `scale`, `pixelWidth`, `pixelHeight`, `bytes`, `sha256`, and `ok: true`.
+
+`get_screenshot` is for a quick look. A PNG or JPG export whose long edge is 1,568 pixels or less, and whose size is 3,750,000 bytes or less, comes back as an MCP image block and a text block with `nodeId`, `nodeName`, `format`, `pixelWidth`, `pixelHeight`, and `bytes`. An SVG, a PDF, or a larger raster export comes back as JSON text with base64, as before. The auditor role does not register `get_screenshot`; a larger capture belongs in `save_screenshots`.
+
 ### Editing Notes
 
 - Edit tools work only when the plugin is opened in Figma's design editor (Dev Mode is read-only — they will return a clear error there).
@@ -445,7 +470,7 @@ Before running it, build the server, open the plugin in the file you want to tes
 cd server && FIGMA_FILE_KEY='<key>' bun run e2e
 ```
 
-`FIGMA_FILE_KEY` is required, and must name a connected file. Without it the script refuses to start, lists each connected file with its key and its name, and exits with code 1; it writes nothing before that check. `bun run perf` follows the same rule, and also takes an optional `FIGMA_READ_FILE_KEY`. Everything the e2e script makes is named `mcp-e2e/…` and is removed again in a `finally` block, after a failure as well. It sets the output root of its server to `server/scripts/e2e-output/` (git-ignored), where the screenshots and the dumps of the test frame land; the dump group removes its own folder again. Group K starts a second server process with `FIGMA_BRIDGE_ROLE=auditor` and its own output root under that folder, checks its 15 tools, runs `dump_nodes` and `save_screenshots` through it, and checks that the leader refuses a marked `delete_nodes`; it removes the process and its root at the end. A failed step exits with code 1.
+`FIGMA_FILE_KEY` is required, and must name a connected file. Without it the script refuses to start, lists each connected file with its key and its name, and exits with code 1; it writes nothing before that check. `bun run perf` follows the same rule, and also takes an optional `FIGMA_READ_FILE_KEY`. Everything the e2e script makes is named `mcp-e2e/…` and is removed again in a `finally` block, after a failure as well. It sets the output root of its server to `server/scripts/e2e-output/` (git-ignored), where the screenshots and the dumps of the test frame land; the dump group removes its own folder again. Group K starts a second server process with `FIGMA_BRIDGE_ROLE=auditor` and its own output root under that folder, checks its 15 tools, runs `dump_nodes` and `save_screenshots` through it, and checks that the leader refuses a marked `delete_nodes`; it removes the process and its root at the end. Group L saves a capture of the test frame and checks the manifest against the file: the SHA-256, the pixel size from the PNG header, and the manifest file. A failed step exits with code 1.
 
 ## Structure
 
