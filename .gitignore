@@ -184,3 +184,6 @@ server/dist/
 
 # End-to-end test output
 server/scripts/e2e-output/
+
+# Measurement output
+server/scripts/perf-output/

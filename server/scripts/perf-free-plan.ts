@@ -23,6 +23,10 @@
  * Everything the run makes is named `mcp-test/...` on the page `MCP Test`, and
  * a `finally` block removes it again — after a failure as well.
  *
+ * The dump measurement builds a frame of instances on that page and dumps it
+ * with `dump_nodes`. The script sets the output root of its server to
+ * `scripts/perf-output/`, and removes the folder of the dump again.
+ *
  * Environment:
  *   FIGMA_FILE_KEY       required. The file the write measurements build load
  *                        in.
@@ -34,12 +38,16 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const SERVER_ROOT = resolve(SCRIPT_DIR, "..");
 const SERVER_ENTRY = join(SERVER_ROOT, "dist", "index.js");
+
+/** The output root of the server of the script, where the dump lands. */
+const OUTPUT_DIR = join(SCRIPT_DIR, "perf-output");
 
 /** The page the write measurements build their load on. */
 const PAGE_NAME = "MCP Test";
@@ -760,6 +768,169 @@ const measureWrites = async (load: Load): Promise<void> => {
 };
 
 // ---------------------------------------------------------------------------
+// Dump measurement
+// ---------------------------------------------------------------------------
+
+/** Instances in the frame that the dump measurement dumps. */
+const DUMP_INSTANCES = 200;
+
+/** The most nodes one chunk of a dump holds: the default of the server. */
+const DUMP_CHUNK_NODES = 1_000;
+
+/** The longest one chunk runs before the plugin ends it. */
+const DUMP_CHUNK_MS = 15_000;
+
+/**
+ * Builds a frame of instances and dumps it with `dump_nodes`, the case of an
+ * audit that dumps one big screen in one call.
+ *
+ * Each instance holds a label, an icon with a glyph, a divider, and a hidden
+ * badge, so the dump walks the nodes inside the instances and keeps one
+ * hidden child of each. The time is printed whether or not the call stays
+ * inside the budget, for a compare with the tool-call timeout of the MCP
+ * client.
+ * @param load - Records every node made, for the teardown.
+ */
+const measureDump = async (load: Load): Promise<void> => {
+  console.log("\ndump");
+
+  const card = asRecord(
+    await ok("create_component", {
+      name: `${PREFIX}dump-card`,
+      parentId: load.pageId,
+      x: 0,
+      y: 3000,
+      width: 240,
+      height: 64,
+      fillHex: "#FFFFFF",
+    }),
+    "create_component result"
+  );
+  const cardId = asId(card.id, "component id");
+  // Its children go with it, so the component alone is recorded.
+  load.nodeIds.push(cardId);
+  await ok("create_text", {
+    name: `${PREFIX}dump-label`,
+    parentId: cardId,
+    characters: "Label",
+    fontSize: 14,
+    x: 16,
+    y: 22,
+  });
+  const icon = asRecord(
+    await ok("create_frame", {
+      name: `${PREFIX}dump-icon`,
+      parentId: cardId,
+      x: 196,
+      y: 20,
+      width: 24,
+      height: 24,
+    }),
+    "create_frame result"
+  );
+  await ok("create_shape", {
+    shapeType: "ELLIPSE",
+    name: `${PREFIX}dump-glyph`,
+    parentId: asId(icon.nodeId, "icon id"),
+    x: 4,
+    y: 4,
+    width: 16,
+    height: 16,
+    fillHex: "#3366FF",
+  });
+  await ok("create_shape", {
+    shapeType: "RECTANGLE",
+    name: `${PREFIX}dump-divider`,
+    parentId: cardId,
+    x: 0,
+    y: 63,
+    width: 240,
+    height: 1,
+    fillHex: "#E0E0E0",
+  });
+  const badge = asRecord(
+    await ok("create_frame", {
+      name: `${PREFIX}dump-badge`,
+      parentId: cardId,
+      x: 228,
+      y: 4,
+      width: 8,
+      height: 8,
+      fillHex: "#D92D20",
+    }),
+    "create_frame result"
+  );
+  await ok("set_node_visibility", {
+    items: [{ nodeId: asId(badge.nodeId, "badge id"), visible: false }],
+  });
+
+  const frame = asRecord(
+    await ok("create_frame", {
+      name: `${PREFIX}dump-screen`,
+      parentId: load.pageId,
+      x: 400,
+      y: 3000,
+      width: 1200,
+      height: 2400,
+    }),
+    "create_frame result"
+  );
+  const frameId = asId(frame.nodeId, "frame id");
+  load.nodeIds.push(frameId);
+  const seed = asRecord(
+    await ok("create_instance", { componentId: cardId, parentId: frameId }),
+    "create_instance result"
+  );
+  await growTo(asId(seed.id, "instance id"), DUMP_INSTANCES, load, frameId);
+  console.log(`load: a frame of ${DUMP_INSTANCES} instances, each with 5 children, 1 hidden`);
+
+  const folder = `dump-${Date.now()}`;
+  try {
+    const manifest = await measure(
+      "dump_nodes",
+      `frame of ${DUMP_INSTANCES} instances`,
+      "dump_nodes",
+      { nodeIds: [frameId], outputPath: folder }
+    );
+    if (manifest === undefined) return;
+    const row = rows[rows.length - 1];
+    const entry = asList(asRecord(manifest, "dump_nodes result").files, "files").find(
+      (file) => file.nodeId === frameId
+    );
+    const nodes = Number(entry?.nodeCount);
+    const bytes = Number(entry?.bytes);
+    const onDisk =
+      entry === undefined
+        ? undefined
+        : await stat(join(OUTPUT_DIR, String(entry.path))).then(
+            (file) => file.size,
+            () => undefined
+          );
+    if (entry === undefined || onDisk !== bytes) {
+      // Recorded on the row, so the report still prints and the run fails.
+      row.failed =
+        entry === undefined
+          ? `the manifest has no file for ${frameId}`
+          : `the file holds ${String(onDisk)} bytes, but the manifest says ${bytes}`;
+      console.log(`FAIL  dump_nodes\n      ${row.failed}`);
+      return;
+    }
+
+    // Each chunk ends at 1,000 nodes or after 15 seconds. A call shorter than
+    // 15 seconds has no chunk that ran that long, so its count is exact.
+    const chunks = Math.ceil(nodes / DUMP_CHUNK_NODES);
+    const chunkText = row.ms < DUMP_CHUNK_MS ? `${chunks}` : `${chunks} or more`;
+    row.input = `frame of ${DUMP_INSTANCES} instances: ${nodes.toLocaleString("en-US")} nodes (${String(entry.hiddenCount)} hidden), ${chunkText} chunks, ${bytes.toLocaleString("en-US")} bytes`;
+    console.log(
+      `      dump_nodes: ${(row.ms / 1000).toFixed(2)} s, ${nodes.toLocaleString("en-US")} nodes, ${chunkText} chunks, ${bytes.toLocaleString("en-US")} bytes. Compare the time with the tool-call timeout of the MCP client.`
+    );
+  } finally {
+    // Only the folder of this run, which the run made.
+    await rm(join(OUTPUT_DIR, folder), { recursive: true, force: true });
+  }
+};
+
+// ---------------------------------------------------------------------------
 // Setup and teardown
 // ---------------------------------------------------------------------------
 
@@ -838,6 +1009,10 @@ const main = async (): Promise<number> => {
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined) env[key] = value;
   }
+  env.FIGMA_BRIDGE_OUTPUT_ROOT = OUTPUT_DIR;
+  // The dump is measured at the chunk size of a real server.
+  delete env.FIGMA_BRIDGE_DUMP_CHUNK_NODES;
+  await mkdir(OUTPUT_DIR, { recursive: true });
 
   const transport = new StdioClientTransport({
     command: "node",
@@ -882,6 +1057,7 @@ const main = async (): Promise<number> => {
       const targets = synthetic ? await buildReadLoad(load) : undefined;
       await measureReads(targets);
       await measureWrites(load);
+      await measureDump(load);
     } finally {
       const problems = await teardown(load);
       if (problems.length > 0) {
