@@ -4,6 +4,7 @@ import { typographyHandlers } from "./typography";
 import { componentsHandlers } from "./components";
 import { sectionsHandlers } from "./sections";
 import { dumpsHandlers } from "./dumps";
+import { e2eHandlers } from "./e2e";
 
 export type { ExtensionHandler, ExtensionHandlerMap, ExtensionRequest } from "./types";
 
@@ -21,6 +22,7 @@ export const extensionHandlers = {
   ...componentsHandlers,
   ...sectionsHandlers,
   ...dumpsHandlers,
+  ...e2eHandlers,
 };
 
 /** Union of the extension tool names, for the RequestType union in `code.ts`. */

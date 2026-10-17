@@ -130,6 +130,7 @@ the manifest only. A failure removes each file of the call.
 | `plugin/src/main/extensions/components.ts` | Component and component set handlers.                                                           |
 | `plugin/src/main/extensions/sections.ts`   | Section handlers.                                                                               |
 | `plugin/src/main/extensions/dumps.ts`      | `dump_nodes_chunk`, the internal chunk command of a dump.                                       |
+| `plugin/src/main/extensions/e2e.ts`        | `e2e_fixture`, the test helper that builds the conformance fixture parts no tool writes.        |
 | `plugin/src/ui/App.tsx`                    | The plugin window. Holds the WebSocket.                                                         |
 | `server/src/index.ts`                      | Start. Reads `FIGMA_BRIDGE_PORT`. The default is 1995.                                          |
 | `server/src/schema.ts`                     | `toolInputSchemas` and `rpcToArgs` of the core tools.                                           |
@@ -155,6 +156,8 @@ the manifest only. A failure removes each file of the call.
 | `server/src/extensions/dumps.ts`           | `dump_nodes`: the chunk loop, `TreeBuilder`, the files, and the manifest.                       |
 | `server/scripts/e2e-free-plan.ts`          | The end-to-end script. Drives every extension tool against a real file.                         |
 | `server/scripts/perf-free-plan.ts`         | The measurement script. Holds each tool to 30 seconds and 50,000 characters.                    |
+| `server/scripts/conformance.ts`            | The dump-conformance test: ID placeholders, the golden file text, the visible projection.       |
+| `server/scripts/golden/`                   | The golden dump of the conformance fixture. Synthetic data from the test file only.             |
 | `server/test/`                             | `bun test` tests. Real server processes against a simulated plugin. Helpers in `helpers/`.      |
 | `plugin/test/`                             | `bun test` tests of the serializer, the dump form, and the chunk walk. Synthetic nodes.         |
 
@@ -209,6 +212,12 @@ mimeType }`), never base64 in text. A capture that is large or that serves as ev
 17. A read tool joins `AUDITOR_TOOLS` in `server/src/role.ts` only on purpose: change the list
     and its test (`server/test/auditor-role.test.ts`, which writes the 15 names out) together,
     and the e2e list in group K. A new tool never reaches the auditor role by default.
+18. `e2e_fixture` (`plugin/src/main/extensions/e2e.ts`, `edit: true`) is a test helper. No
+    MCP tool and no role exposes it, and the README does not list it. The e2e script sends it
+    with a raw `/rpc` request. Its `op` is `addPaint`, `hidePaint`, `setReactions`,
+    `setRangeFill`, `getSkipInvisibleInstanceChildren`, `setSkipInvisibleInstanceChildren`, or
+    `setFlowStartingPoints`. It refuses a node off the page `MCP E2E` or under a top-level node
+    whose name does not start with `mcp-e2e/`, and a page other than `MCP E2E`.
 
 ## 7. Commands
 
@@ -226,6 +235,14 @@ Run `bun run check` before each commit. Commit only if the check passes.
 `dump_nodes_chunk` request returns, an integer of 1 or more. The default is 1,000. The test
 harness removes it from each test process unless the test gives it. Do not document it in
 the README.
+
+`bun run e2e` ends with the result line of the conformance group V:
+`CONFORMANCE PASS bridgeCommit=<commit> pluginBuild=<build>`, or
+`CONFORMANCE FAIL bridgeCommit=<commit> pluginBuild=<build> failed=<count>`. The commit and
+the build come from a manifest of the run. `E2E_UPDATE_GOLDEN=1 bun run e2e` writes
+`server/scripts/golden/dump-conformance.json` in place of the compare, and then prints
+`CONFORMANCE FAIL`. A change of the golden dump is a change of the serializer: commit it
+alone, and the auditor reviews it.
 
 ## 8. Live test
 
@@ -249,6 +266,9 @@ agent session: the server of a session can run an old build.
    test object starts with `mcp-e2e/` or `mcp-test/`, and the script removes it, also after
    a failure.
 7. Stop the leader at the end.
+
+Each bridge change passes the conformance test (`CONFORMANCE PASS` in `bun run e2e`) before
+an audit uses it. Record the result line with each release.
 
 A request to `/rpc` by hand needs the headers `Content-Type: application/json` and
 `Authorization: Bearer <token>`. Read the token from the file inside the command, as the
