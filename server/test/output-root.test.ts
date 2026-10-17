@@ -22,11 +22,12 @@ interface SaveResult {
   succeeded: number;
   failed: number;
   hasErrors: boolean;
-  results: Array<{
+  manifestPath: string | null;
+  files: Array<{
     index: number;
-    success: boolean;
-    outputPath: string;
-    bytesWritten?: number;
+    ok: boolean;
+    path?: string;
+    bytes?: number;
     error?: string;
   }>;
 }
@@ -65,7 +66,7 @@ function onlyResult(outcome: Awaited<ReturnType<typeof saveOne>>) {
   if (!outcome.ok) throw new Error(`save_screenshots failed: ${outcome.error}`);
   const data = outcome.data as SaveResult;
   expect(data.total).toBe(1);
-  return data.results[0];
+  return data.files[0];
 }
 
 function screenshotRequests(plugin: SimulatedPlugin) {
@@ -87,9 +88,9 @@ describe("save_screenshots and the output root", () => {
       expect(leader.stderr.join("\n")).toContain(`Output root: ${root} (FIGMA_BRIDGE_OUTPUT_ROOT)`);
 
       const result = onlyResult(await saveOne(leader, "shots/frame.png"));
-      expect(result.success).toBe(true);
-      expect(result.outputPath).toBe(join(root, "shots", "frame.png"));
-      expect(result.bytesWritten).toBe(PNG.byteLength);
+      expect(result.ok).toBe(true);
+      expect(result.path).toBe("shots/frame.png");
+      expect(result.bytes).toBe(PNG.byteLength);
       expect(await readFile(join(root, "shots", "frame.png"))).toEqual(PNG);
       expect(await entries(cwd)).toEqual([]);
     },
@@ -105,7 +106,7 @@ describe("save_screenshots and the output root", () => {
       expect(leader.stderr.join("\n")).toContain("(working directory)");
 
       const result = onlyResult(await saveOne(leader, "frame.png"));
-      expect(result.success).toBe(true);
+      expect(result.ok).toBe(true);
       expect(await readFile(join(cwd, "frame.png"))).toEqual(PNG);
     },
     TIMEOUT_MS
@@ -132,8 +133,11 @@ describe("save_screenshots and the output root", () => {
         [".", /names the output root itself/],
       ];
       for (const [outputPath, cause] of cases) {
-        const result = onlyResult(await saveOne(leader, outputPath));
-        expect(result.success).toBe(false);
+        const outcome = await saveOne(leader, outputPath);
+        const result = onlyResult(outcome);
+        // With no item written there is no capture to put a manifest beside.
+        expect((outcome as { data: SaveResult }).data.manifestPath).toBeNull();
+        expect(result.ok).toBe(false);
         expect(result.error).toMatch(cause);
         expect(result.error).toContain(`outputPath "${outputPath}" is refused`);
         expect(result.error).toContain("The real output root is");
@@ -158,7 +162,7 @@ describe("save_screenshots and the output root", () => {
       const { leader } = await leaderWithPlugin(root.toUpperCase() + "\\", cwd);
 
       const result = onlyResult(await saveOne(leader, join(root.toLowerCase(), "case.png")));
-      expect(result.success).toBe(true);
+      expect(result.ok).toBe(true);
       expect(await readFile(join(root, "case.png"))).toEqual(PNG);
     },
     TIMEOUT_MS
@@ -204,8 +208,8 @@ describe("save_screenshots and the output root", () => {
       expect(follower.role).toBe("FOLLOWER");
 
       const result = onlyResult(await saveOne(follower, "shots/frame.png"));
-      expect(result.success).toBe(true);
-      expect(result.outputPath).toBe(join(followerRoot, "shots", "frame.png"));
+      expect(result.ok).toBe(true);
+      expect(result.path).toBe("shots/frame.png");
       expect(await readFile(join(followerRoot, "shots", "frame.png"))).toEqual(PNG);
 
       // The plugin talks only to the leader, so the capture travelled over /rpc.
@@ -244,18 +248,23 @@ describe("save_screenshots and the output root", () => {
   );
 
   test(
-    "a file that exists is not overwritten",
+    "a file that exists is not overwritten, and the call fails before the capture",
     async () => {
       const root = await h.tempDir("root");
       const cwd = await h.tempDir("cwd");
       const existing = join(root, "frame.png");
       await writeFile(existing, "old");
-      const { leader } = await leaderWithPlugin(root, cwd);
+      const { leader, plugin } = await leaderWithPlugin(root, cwd);
 
-      const result = onlyResult(await saveOne(leader, "frame.png"));
-      expect(result.success).toBe(false);
-      expect(result.error).toContain(`File already exists at outputPath: ${existing}`);
+      const outcome = await saveOne(leader, "frame.png");
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) return;
+      expect(outcome.error).toContain("save_screenshots failed before the first capture");
+      expect(outcome.error).toContain(existing);
+      expect(outcome.error).toContain("Evidence is never overwritten");
       expect(await readFile(existing, "utf8")).toBe("old");
+      expect(screenshotRequests(plugin)).toHaveLength(0);
+      expect(await entries(root)).toEqual(["frame.png"]);
     },
     TIMEOUT_MS
   );
