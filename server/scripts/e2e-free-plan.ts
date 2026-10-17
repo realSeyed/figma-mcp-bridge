@@ -38,7 +38,9 @@
  * change of the golden dump is a change of the serializer: commit it alone,
  * and send it for review. V5 spawns a second server with
  * FIGMA_BRIDGE_DUMP_CHUNK_NODES=2 and its own output root, and removes both at
- * the end.
+ * the end. The last line of the run is the result line of the group:
+ * `CONFORMANCE PASS bridgeCommit=<commit> pluginBuild=<build>`, or
+ * `CONFORMANCE FAIL ... failed=<count>`.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -3075,6 +3077,15 @@ type DumpServer = {
 /** The server process of the script. */
 const MAIN_SERVER: DumpServer = { call: okRecord, root: OUTPUT_DIR };
 
+/** What the result line of group V reports. */
+const conformance = {
+  /** True once the scenario started, so a run that stops early still prints the line. */
+  started: false,
+  /** The instrument identity of the first manifest of the run. */
+  bridgeCommit: undefined as string | undefined,
+  pluginBuild: undefined as string | undefined,
+};
+
 /**
  * Dumps the three roots of the fixture into one folder.
  * @param folder - The folder under the output root.
@@ -3104,6 +3115,8 @@ const dumpFixture = async (
     bytes[root] = (await readDumpFile(manifest, roots[root], server.root)).bytes;
     trees[root] = JSON.parse(bytes[root].toString("utf8")) as unknown;
   }
+  conformance.bridgeCommit ??= String(manifest.bridgeCommit);
+  conformance.pluginBuild ??= String(manifest.pluginBuild);
   console.log(
     `      bridge ${String(manifest.bridgeCommit)}, plugin build ${String(manifest.pluginBuild)}`
   );
@@ -3193,6 +3206,33 @@ const setsAndVariants = (tree: unknown): { sets: number; variants: number } => {
     .map((set) => (Array.isArray(set.children) ? (set.children as Json[]) : []))
     .reduce((sum, children) => sum + children.filter((c) => c.type === "COMPONENT").length, 0);
   return { sets: sets.length, variants };
+};
+
+/** The checks of group V that the result line requires, by their number. */
+const CONFORMANCE_STEPS = ["V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8"];
+
+/**
+ * Prints the result line of group V, once the scenario started. Each check of
+ * `CONFORMANCE_STEPS` must have passed, and each other step of the group that
+ * ran too; a check that did not run counts as failed, and so does a run that
+ * wrote the golden dump in place of the compare.
+ */
+const printConformanceLine = (): void => {
+  if (!conformance.started) return;
+  const ran = outcomes.filter((outcome) => /^V(\d+)? /.test(outcome.name));
+  const missing = CONFORMANCE_STEPS.filter(
+    (id) => !ran.some((outcome) => outcome.name.startsWith(`${id} `))
+  );
+  let failed = ran.filter((outcome) => !outcome.ok).length + missing.length;
+  if (UPDATE_GOLDEN) {
+    console.log("note: E2E_UPDATE_GOLDEN=1 wrote the golden dump, so V2 compared nothing.");
+    failed += 1;
+  }
+  const identity = `bridgeCommit=${conformance.bridgeCommit ?? "unknown"} pluginBuild=${conformance.pluginBuild ?? "unknown"}`;
+  console.log("");
+  console.log(
+    failed === 0 ? `CONFORMANCE PASS ${identity}` : `CONFORMANCE FAIL ${identity} failed=${failed}`
+  );
 };
 
 /**
@@ -3518,6 +3558,7 @@ const main = async (): Promise<number> => {
     console.log("");
 
     try {
+      conformance.started = true;
       await runScenario();
     } finally {
       console.log("");
@@ -3530,12 +3571,15 @@ const main = async (): Promise<number> => {
     console.error("");
     console.error(err instanceof Error ? err.message : String(err));
     if (serverLog.length > 0) console.error(`\nserver log:\n${serverLog.join("\n")}`);
+    printConformanceLine();
     return 1;
   } finally {
     await client.close().catch(() => undefined);
   }
 
-  return summarise();
+  const code = summarise();
+  printConformanceLine();
+  return code;
 };
 
 main()
