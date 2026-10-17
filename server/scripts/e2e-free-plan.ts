@@ -26,6 +26,9 @@
  *
  * Group K spawns a second server with FIGMA_BRIDGE_ROLE=auditor and its own
  * output root under `scripts/e2e-output/`, and removes both at the end.
+ *
+ * Group L checks the capture manifest of save_screenshots against the file on
+ * disk, and removes the capture and its manifest file.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -220,6 +223,19 @@ const itemById = (items: readonly Json[], id: string, what: string): Json => {
 };
 
 /**
+ * Reads the pixel size from the IHDR chunk of a PNG.
+ * @param bytes - The PNG file.
+ * @returns The width and the height.
+ */
+const readPngHeader = (bytes: Buffer): { width: number; height: number } => {
+  check(
+    bytes.byteLength >= 24 && bytes.subarray(12, 16).toString("ascii") === "IHDR",
+    "the data is not a PNG: no IHDR chunk"
+  );
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+};
+
+/**
  * Compares two lists as sets. Figma reorders `scopes` on read, so the order a
  * call sent them in is not the order it gets back.
  * @param actual - The list read back.
@@ -270,6 +286,26 @@ const callTool = async (name: string, args: Json = {}): Promise<ToolOutcome> => 
   } catch {
     return { ok: false, error: `${name} returned text that is not JSON: ${text}` };
   }
+};
+
+/** One content block of a tool result, as the MCP client gives it. */
+type RawBlock = { type: string; text?: string; data?: string; mimeType?: string };
+
+/**
+ * Calls one tool and returns its content blocks as they are, image blocks too.
+ * @param name - The tool name.
+ * @param args - The tool arguments. `fileKey` is added automatically.
+ * @returns The blocks, and whether the tool reported an error.
+ */
+const callRaw = async (
+  name: string,
+  args: Json = {}
+): Promise<{ isError: boolean; content: RawBlock[] }> => {
+  const withKey = fileKey === undefined ? args : { fileKey, ...args };
+  const result = await client.callTool({ name, arguments: withKey }, undefined, {
+    timeout: CALL_TIMEOUT_MS,
+  });
+  return { isError: result.isError === true, content: (result.content ?? []) as RawBlock[] };
 };
 
 /**
@@ -1433,28 +1469,51 @@ const runReadSteps = async (): Promise<void> => {
   });
 
   await step("G1 get_screenshot of the test frame", async () => {
-    for (const format of ["PNG", "SVG"] as const) {
-      const shot = await okRecord("get_screenshot", {
-        nodeIds: [need("rootId")],
-        format,
-        scale: 1,
-      });
-      const exports = readRecords(shot.exports, "get_screenshot.exports");
-      check(exports.length === 1, `get_screenshot returned ${exports.length} exports, expected 1`);
+    // A small PNG comes back as an image block and a text block, with no base64 in text.
+    const png = await callRaw("get_screenshot", {
+      nodeIds: [need("rootId")],
+      format: "PNG",
+      scale: 1,
+    });
+    check(!png.isError, `get_screenshot (PNG) failed: ${show(png.content)}`);
+    const types = png.content.map((block) => block.type).join(",");
+    check(
+      types === "image,text",
+      `get_screenshot (PNG) returned the blocks ${types}, expected image,text: the frame may be above 1568 pixels or 3750000 bytes`
+    );
+    const image = png.content[0];
+    check(image.mimeType === "image/png", `the image block is ${show(image.mimeType)}`);
+    const bytes = Buffer.from(readString(image.data, "the image block's data"), "base64");
+    check(bytes.byteLength > 0, "the PNG image block decoded to 0 bytes");
+    const meta = readRecord(JSON.parse(png.content[1].text ?? ""), "the metadata block");
+    check(meta.nodeId === need("rootId"), `the capture is of ${show(meta.nodeId)}`);
+    check(meta.format === "PNG", `the capture is a ${show(meta.format)}, expected PNG`);
+    check(meta.bytes === bytes.byteLength, `the metadata says ${show(meta.bytes)} bytes`);
+    const header = readPngHeader(bytes);
+    check(
+      meta.pixelWidth === header.width && meta.pixelHeight === header.height,
+      `the metadata says ${show(meta.pixelWidth)} x ${show(meta.pixelHeight)}, the header ${header.width} x ${header.height}`
+    );
+    check(!(png.content[1].text ?? "").includes("base64"), "the metadata block mentions base64");
+    const pngFile = join(OUTPUT_DIR, "mcp-e2e-root.png");
+    await writeFile(pngFile, bytes);
+    console.log(`      wrote ${pngFile} (${bytes.byteLength} bytes)`);
 
-      const single = exports[0];
-      check(single.nodeId === need("rootId"), `the export is of ${show(single.nodeId)}`);
-      check(single.format === format, `the export is a ${show(single.format)}, expected ${format}`);
-      readNumber(single.width, "the export's width");
-      readNumber(single.height, "the export's height");
-
-      const base64 = readString(single.base64, "the export's base64");
-      const bytes = Buffer.from(base64, "base64");
-      check(bytes.byteLength > 0, `the ${format} export decoded to 0 bytes`);
-      const file = join(OUTPUT_DIR, `mcp-e2e-root.${format.toLowerCase()}`);
-      await writeFile(file, bytes);
-      console.log(`      wrote ${file} (${bytes.byteLength} bytes)`);
-    }
+    // An SVG stays JSON text with base64.
+    const shot = await okRecord("get_screenshot", {
+      nodeIds: [need("rootId")],
+      format: "SVG",
+    });
+    const exports = readRecords(shot.exports, "get_screenshot.exports");
+    check(exports.length === 1, `get_screenshot returned ${exports.length} exports, expected 1`);
+    const single = exports[0];
+    check(single.nodeId === need("rootId"), `the export is of ${show(single.nodeId)}`);
+    check(single.format === "SVG", `the export is a ${show(single.format)}, expected SVG`);
+    const svg = Buffer.from(readString(single.base64, "the export's base64"), "base64");
+    check(svg.byteLength > 0, "the SVG export decoded to 0 bytes");
+    const svgFile = join(OUTPUT_DIR, "mcp-e2e-root.svg");
+    await writeFile(svgFile, svg);
+    console.log(`      wrote ${svgFile} (${svg.byteLength} bytes)`);
   });
 
   await step("G2 save_screenshots writes under the output root", async () => {
@@ -1465,28 +1524,30 @@ const runReadSteps = async (): Promise<void> => {
       scale: 1,
     });
     check(saved.succeeded === 1, `save_screenshots reports ${show(saved)}`);
-    const result = readRecords(saved.results, "save_screenshots.results")[0];
+    const result = readRecords(saved.files, "save_screenshots.files")[0];
     const file = join(OUTPUT_DIR, name);
     check(
-      result.outputPath === file,
-      `the file went to ${show(result.outputPath)}, expected ${file} in the output root`
+      result.path === name,
+      `the file went to ${show(result.path)}, expected ${name} in the output root`
     );
+    const manifestFile = join(OUTPUT_DIR, readString(saved.manifestPath, "manifestPath"));
     try {
       const bytes = await readFile(file);
       check(
-        bytes.byteLength === result.bytesWritten,
-        `the file holds ${bytes.byteLength} bytes, the result says ${show(result.bytesWritten)}`
+        bytes.byteLength === result.bytes,
+        `the file holds ${bytes.byteLength} bytes, the result says ${show(result.bytes)}`
       );
       console.log(`      saved ${file} (${bytes.byteLength} bytes)`);
     } finally {
       await rm(file, { force: true });
+      await rm(manifestFile, { force: true });
     }
 
     const refused = await okRecord("save_screenshots", {
       items: [{ nodeId: need("rootId"), outputPath: "../mcp-e2e-outside.png" }],
     });
-    const refusal = readRecords(refused.results, "save_screenshots.results")[0];
-    check(refusal.success === false, `a path out of the root was not refused: ${show(refusal)}`);
+    const refusal = readRecords(refused.files, "save_screenshots.files")[0];
+    check(refusal.ok === false, `a path out of the root was not refused: ${show(refusal)}`);
     check(
       String(refusal.error).includes("leads out of the root"),
       `the refusal does not name its cause: ${show(refusal.error)}`
@@ -2470,6 +2531,8 @@ const runAuditorSteps = async (): Promise<void> => {
       check(saved.succeeded === 1, `save_screenshots reports ${show(saved)}`);
       const shot = join(auditorRoot, "shot.png");
       check(existsSync(shot), `${shot} does not exist`);
+      const savedPath = readString(readRecords(saved.files, "files")[0].path, "the capture path");
+      check(savedPath === "shot.png", `the manifest names the capture ${savedPath}`);
     });
 
     await step("K3 the leader refuses a marked delete_nodes", async () => {
@@ -2513,6 +2576,70 @@ const runAuditorSteps = async (): Promise<void> => {
   }
 };
 
+// ---------------------------------------------------------------------------
+// L Capture manifest
+// ---------------------------------------------------------------------------
+
+/** Captures the test root as a PNG and checks the manifest against the file. */
+const runCaptureSteps = async (): Promise<void> => {
+  await step("L1 save_screenshots returns a manifest that matches the file", async () => {
+    const folder = `mcp-e2e-captures-${Date.now()}`;
+    const name = `${folder}/root.png`;
+    const dir = join(OUTPUT_DIR, folder);
+    check(!existsSync(dir), `${dir} exists already; remove it, then run again`);
+    try {
+      const raw = await callRaw("save_screenshots", {
+        items: [{ nodeId: need("rootId"), outputPath: name }],
+        format: "PNG",
+        scale: 1,
+      });
+      check(!raw.isError, `save_screenshots failed: ${show(raw.content)}`);
+      check(
+        raw.content.length === 1 && raw.content[0].type === "text",
+        `save_screenshots returned the blocks ${raw.content.map((block) => block.type).join(",")}, expected one text block`
+      );
+      const manifest = readRecord(JSON.parse(raw.content[0].text ?? ""), "the manifest");
+      check(manifest.tool === "save_screenshots", `the manifest is of ${show(manifest.tool)}`);
+      check(
+        manifest.succeeded === 1 && manifest.failed === 0,
+        `the manifest reports ${show(manifest)}`
+      );
+
+      const entry = readRecords(manifest.files, "the manifest files")[0];
+      check(entry.ok === true && entry.kind === "capture", `the entry is ${show(entry)}`);
+      check(entry.path === name, `the entry path is ${show(entry.path)}, expected ${name}`);
+      check(entry.scale === 1, `the entry scale is ${show(entry.scale)}, expected 1`);
+
+      const file = join(OUTPUT_DIR, name);
+      check(existsSync(file), `${file} does not exist`);
+      const bytes = await readFile(file);
+      check(entry.bytes === bytes.byteLength, `the entry says ${show(entry.bytes)} bytes`);
+      const digest = createHash("sha256").update(bytes).digest("hex");
+      check(entry.sha256 === digest, `the entry sha256 ${show(entry.sha256)} is not ${digest}`);
+      const header = readPngHeader(bytes);
+      check(
+        entry.pixelWidth === header.width && entry.pixelHeight === header.height,
+        `the entry says ${show(entry.pixelWidth)} x ${show(entry.pixelHeight)}, the header ${header.width} x ${header.height}`
+      );
+
+      const manifestPath = readString(manifest.manifestPath, "manifestPath");
+      check(
+        manifestPath.startsWith(`${folder}/save_screenshots-`) &&
+          manifestPath.endsWith(".manifest.json"),
+        `manifestPath ${manifestPath} is not beside the capture`
+      );
+      const onDisk = JSON.parse(await readFile(join(OUTPUT_DIR, manifestPath), "utf8")) as unknown;
+      check(
+        JSON.stringify(onDisk) === JSON.stringify(manifest),
+        "the manifest file differs from the manifest the call returned"
+      );
+      console.log(`      ${name}: ${bytes.byteLength} bytes, ${header.width} x ${header.height}`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+};
+
 /** Runs every scenario group in order. Each step records its own outcome. */
 const runScenario = async (): Promise<void> => {
   await runVariableSteps();
@@ -2525,6 +2652,7 @@ const runScenario = async (): Promise<void> => {
   await runNegativeSteps();
   await runDumpSteps();
   await runAuditorSteps();
+  await runCaptureSteps();
 };
 
 /**
