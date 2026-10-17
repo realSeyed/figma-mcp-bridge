@@ -1,0 +1,645 @@
+{
+  "button-set": {
+    "bounds": {
+      "height": 96,
+      "width": 392,
+      "x": 4000,
+      "y": 0
+    },
+    "children": [
+      {
+        "bounds": {
+          "height": 48,
+          "width": 160,
+          "x": 24,
+          "y": 24
+        },
+        "children": [
+          {
+            "bounds": {
+              "height": 20,
+              "width": 80,
+              "x": 16,
+              "y": 14
+            },
+            "characters": "Default",
+            "id": "N3",
+            "name": "mcp-e2e/conformance/label",
+            "styles": {
+              "fills": [
+                {
+                  "color": "#11151c",
+                  "type": "SOLID"
+                }
+              ],
+              "fontFamily": "Inter",
+              "fontSize": 14,
+              "fontStyle": "Regular",
+              "fontWeight": 400,
+              "letterSpacing": {
+                "unit": "PERCENT",
+                "value": 0
+              },
+              "lineHeight": {
+                "unit": "AUTO"
+              },
+              "strokeAlign": "OUTSIDE",
+              "textAlignHorizontal": "LEFT",
+              "textAlignVertical": "TOP",
+              "textAutoResize": "NONE",
+              "textDecoration": "NONE"
+            },
+            "type": "TEXT"
+          },
+          {
+            "bounds": {
+              "height": 24,
+              "width": 24,
+              "x": 120,
+              "y": 12
+            },
+            "id": "N4",
+            "name": "mcp-e2e/conformance/icon",
+            "styles": {
+              "clipsContent": true,
+              "fills": [
+                {
+                  "color": "#ff7755",
+                  "type": "SOLID"
+                }
+              ]
+            },
+            "type": "FRAME"
+          },
+          {
+            "bounds": {
+              "height": 12,
+              "width": 12,
+              "x": 140,
+              "y": 4
+            },
+            "id": "N5",
+            "name": "mcp-e2e/conformance/badge",
+            "styles": {
+              "clipsContent": true,
+              "fills": [
+                {
+                  "color": "#d92d20",
+                  "type": "SOLID"
+                }
+              ],
+              "visible": false
+            },
+            "type": "FRAME"
+          }
+        ],
+        "id": "N2",
+        "name": "State=Default",
+        "styles": {
+          "fills": [
+            {
+              "color": "#e8ecf4",
+              "type": "SOLID"
+            }
+          ]
+        },
+        "type": "COMPONENT"
+      },
+      {
+        "bounds": {
+          "height": 48,
+          "width": 160,
+          "x": 208,
+          "y": 24
+        },
+        "children": [
+          {
+            "bounds": {
+              "height": 20,
+              "width": 80,
+              "x": 16,
+              "y": 14
+            },
+            "characters": "Hover",
+            "id": "N7",
+            "name": "mcp-e2e/conformance/label",
+            "styles": {
+              "fills": [
+                {
+                  "color": "#11151c",
+                  "type": "SOLID"
+                }
+              ],
+              "fontFamily": "Inter",
+              "fontSize": 14,
+              "fontStyle": "Regular",
+              "fontWeight": 400,
+              "letterSpacing": {
+                "unit": "PERCENT",
+                "value": 0
+              },
+              "lineHeight": {
+                "unit": "AUTO"
+              },
+              "strokeAlign": "OUTSIDE",
+              "textAlignHorizontal": "LEFT",
+              "textAlignVertical": "TOP",
+              "textAutoResize": "NONE",
+              "textDecoration": "NONE"
+            },
+            "type": "TEXT"
+          },
+          {
+            "bounds": {
+              "height": 24,
+              "width": 24,
+              "x": 120,
+              "y": 12
+            },
+            "id": "N8",
+            "name": "mcp-e2e/conformance/icon",
+            "styles": {
+              "clipsContent": true,
+              "fills": [
+                {
+                  "color": "#ff7755",
+                  "type": "SOLID"
+                }
+              ]
+            },
+            "type": "FRAME"
+          }
+        ],
+        "id": "N6",
+        "name": "State=Hover",
+        "styles": {
+          "fills": [
+            {
+              "color": "#d0d7e6",
+              "type": "SOLID"
+            }
+          ]
+        },
+        "type": "COMPONENT"
+      }
+    ],
+    "id": "N1",
+    "name": "mcp-e2e/conformance/Button",
+    "styles": {
+      "clipsContent": true,
+      "cornerRadius": 5,
+      "dashPattern": [10, 5]
+    },
+    "type": "COMPONENT_SET"
+  },
+  "screen": {
+    "bounds": {
+      "height": 400,
+      "width": 800,
+      "x": 4000,
+      "y": 200
+    },
+    "children": [
+      {
+        "bounds": {
+          "height": 48,
+          "width": 160,
+          "x": 40,
+          "y": 40
+        },
+        "children": [
+          {
+            "bounds": {
+              "height": 20,
+              "width": 80,
+              "x": 16,
+              "y": 14
+            },
+            "characters": "Default",
+            "id": "IN10;N3",
+            "name": "mcp-e2e/conformance/label",
+            "styles": {
+              "fills": [
+                {
+                  "color": "#11151c",
+                  "type": "SOLID"
+                }
+              ],
+              "fontFamily": "Inter",
+              "fontSize": 14,
+              "fontStyle": "Regular",
+              "fontWeight": 400,
+              "letterSpacing": {
+                "unit": "PERCENT",
+                "value": 0
+              },
+              "lineHeight": {
+                "unit": "AUTO"
+              },
+              "strokeAlign": "OUTSIDE",
+              "textAlignHorizontal": "LEFT",
+              "textAlignVertical": "TOP",
+              "textAutoResize": "NONE",
+              "textDecoration": "NONE"
+            },
+            "type": "TEXT"
+          },
+          {
+            "bounds": {
+              "height": 24,
+              "width": 24,
+              "x": 120,
+              "y": 12
+            },
+            "id": "IN10;N4",
+            "name": "mcp-e2e/conformance/icon",
+            "styles": {
+              "clipsContent": true,
+              "fills": [
+                {
+                  "color": "#ff7755",
+                  "type": "SOLID"
+                }
+              ]
+            },
+            "type": "FRAME"
+          },
+          {
+            "bounds": {
+              "height": 12,
+              "width": 12,
+              "x": 140,
+              "y": 4
+            },
+            "id": "IN10;N5",
+            "name": "mcp-e2e/conformance/badge",
+            "styles": {
+              "clipsContent": true,
+              "fills": [
+                {
+                  "color": "#d92d20",
+                  "type": "SOLID"
+                }
+              ],
+              "visible": false
+            },
+            "type": "FRAME"
+          }
+        ],
+        "componentProperties": {
+          "State": "Default"
+        },
+        "componentSetId": "N1",
+        "id": "N10",
+        "mainComponentId": "N2",
+        "name": "mcp-e2e/conformance/Default instance",
+        "styles": {
+          "fills": [
+            {
+              "color": "#e8ecf4",
+              "type": "SOLID"
+            }
+          ]
+        },
+        "type": "INSTANCE"
+      },
+      {
+        "bounds": {
+          "height": 48,
+          "width": 160,
+          "x": 240,
+          "y": 40
+        },
+        "children": [
+          {
+            "bounds": {
+              "height": 20,
+              "width": 80,
+              "x": 16,
+              "y": 14
+            },
+            "characters": "Hover",
+            "id": "N12",
+            "name": "mcp-e2e/conformance/label",
+            "styles": {
+              "fills": [
+                {
+                  "color": "#11151c",
+                  "type": "SOLID"
+                }
+              ],
+              "fontFamily": "Inter",
+              "fontSize": 14,
+              "fontStyle": "Regular",
+              "fontWeight": 400,
+              "letterSpacing": {
+                "unit": "PERCENT",
+                "value": 0
+              },
+              "lineHeight": {
+                "unit": "AUTO"
+              },
+              "strokeAlign": "OUTSIDE",
+              "textAlignHorizontal": "LEFT",
+              "textAlignVertical": "TOP",
+              "textAutoResize": "NONE",
+              "textDecoration": "NONE"
+            },
+            "type": "TEXT"
+          },
+          {
+            "bounds": {
+              "height": 24,
+              "width": 24,
+              "x": 120,
+              "y": 12
+            },
+            "id": "N13",
+            "name": "mcp-e2e/conformance/icon",
+            "styles": {
+              "clipsContent": true,
+              "fills": [
+                {
+                  "color": "#ff7755",
+                  "type": "SOLID"
+                }
+              ]
+            },
+            "type": "FRAME"
+          }
+        ],
+        "detachedInfo": {
+          "componentId": "N6",
+          "type": "local"
+        },
+        "id": "N11",
+        "name": "mcp-e2e/conformance/Hover detached",
+        "styles": {
+          "fills": [
+            {
+              "color": "#d0d7e6",
+              "type": "SOLID"
+            }
+          ]
+        },
+        "type": "FRAME"
+      },
+      {
+        "bounds": {
+          "height": 80,
+          "width": 120,
+          "x": 440,
+          "y": 40
+        },
+        "id": "N14",
+        "name": "mcp-e2e/conformance/Paints",
+        "styles": {
+          "effects": [
+            {
+              "blendMode": "NORMAL",
+              "color": "#000000",
+              "offset": {
+                "x": 0,
+                "y": 4
+              },
+              "opacity": 0.25,
+              "radius": 8,
+              "spread": 0,
+              "type": "DROP_SHADOW",
+              "visible": false
+            }
+          ],
+          "fills": [
+            {
+              "color": "#ff0000",
+              "type": "SOLID",
+              "visible": false
+            },
+            {
+              "color": "#00aa55",
+              "type": "SOLID"
+            }
+          ]
+        },
+        "type": "RECTANGLE"
+      },
+      {
+        "bounds": {
+          "height": 48,
+          "width": 320,
+          "x": 40,
+          "y": 160
+        },
+        "characters": "Body text with one red word",
+        "id": "N15",
+        "name": "mcp-e2e/conformance/Mixed text",
+        "styledTextSegments": [
+          {
+            "characters": "Body",
+            "end": 4,
+            "fillStyleId": "",
+            "fills": [
+              {
+                "color": "#11151c",
+                "type": "SOLID"
+              }
+            ],
+            "fontName": {
+              "family": "Inter",
+              "style": "Bold"
+            },
+            "fontSize": 16,
+            "fontWeight": 700,
+            "letterSpacing": {
+              "unit": "PERCENT",
+              "value": 0
+            },
+            "lineHeight": {
+              "unit": "AUTO"
+            },
+            "start": 0,
+            "textDecoration": "NONE",
+            "textStyleId": "S1"
+          },
+          {
+            "characters": " text with one ",
+            "end": 19,
+            "fillStyleId": "",
+            "fills": [
+              {
+                "color": "#11151c",
+                "type": "SOLID"
+              }
+            ],
+            "fontName": {
+              "family": "Inter",
+              "style": "Regular"
+            },
+            "fontSize": 16,
+            "fontWeight": 400,
+            "letterSpacing": {
+              "unit": "PERCENT",
+              "value": 0
+            },
+            "lineHeight": {
+              "unit": "AUTO"
+            },
+            "start": 4,
+            "textDecoration": "NONE",
+            "textStyleId": ""
+          },
+          {
+            "characters": "red",
+            "end": 22,
+            "fillStyleId": "",
+            "fills": [
+              {
+                "color": "#d92d20",
+                "type": "SOLID"
+              }
+            ],
+            "fontName": {
+              "family": "Inter",
+              "style": "Regular"
+            },
+            "fontSize": 16,
+            "fontWeight": 400,
+            "letterSpacing": {
+              "unit": "PERCENT",
+              "value": 0
+            },
+            "lineHeight": {
+              "unit": "AUTO"
+            },
+            "start": 19,
+            "textDecoration": "NONE",
+            "textStyleId": ""
+          },
+          {
+            "characters": " word",
+            "end": 27,
+            "fillStyleId": "",
+            "fills": [
+              {
+                "color": "#11151c",
+                "type": "SOLID"
+              }
+            ],
+            "fontName": {
+              "family": "Inter",
+              "style": "Regular"
+            },
+            "fontSize": 16,
+            "fontWeight": 400,
+            "letterSpacing": {
+              "unit": "PERCENT",
+              "value": 0
+            },
+            "lineHeight": {
+              "unit": "AUTO"
+            },
+            "start": 22,
+            "textDecoration": "NONE",
+            "textStyleId": ""
+          }
+        ],
+        "styles": {
+          "fills": "mixed",
+          "fontFamily": "mixed",
+          "fontSize": 16,
+          "fontStyle": "mixed",
+          "fontWeight": "mixed",
+          "letterSpacing": {
+            "unit": "PERCENT",
+            "value": 0
+          },
+          "lineHeight": {
+            "unit": "AUTO"
+          },
+          "strokeAlign": "OUTSIDE",
+          "textAlignHorizontal": "LEFT",
+          "textAlignVertical": "TOP",
+          "textAutoResize": "NONE",
+          "textDecoration": "NONE"
+        },
+        "textStyleId": "mixed",
+        "type": "TEXT"
+      },
+      {
+        "bounds": {
+          "height": 48,
+          "width": 160,
+          "x": 40,
+          "y": 260
+        },
+        "id": "N16",
+        "name": "mcp-e2e/conformance/Button area",
+        "reactions": [
+          {
+            "action": {
+              "destinationId": "N17",
+              "navigation": "NAVIGATE",
+              "resetVideoPosition": false,
+              "transition": null,
+              "type": "NODE"
+            },
+            "actions": [
+              {
+                "destinationId": "N17",
+                "navigation": "NAVIGATE",
+                "resetVideoPosition": false,
+                "transition": null,
+                "type": "NODE"
+              }
+            ],
+            "trigger": {
+              "type": "ON_CLICK"
+            }
+          }
+        ],
+        "styles": {
+          "clipsContent": true,
+          "fills": [
+            {
+              "color": "#3355ff",
+              "type": "SOLID"
+            }
+          ]
+        },
+        "type": "FRAME"
+      }
+    ],
+    "id": "N9",
+    "name": "mcp-e2e/conformance/Screen",
+    "styles": {
+      "clipsContent": true,
+      "fills": [
+        {
+          "color": "#ffffff",
+          "type": "SOLID"
+        }
+      ]
+    },
+    "type": "FRAME"
+  },
+  "target": {
+    "bounds": {
+      "height": 400,
+      "width": 400,
+      "x": 4900,
+      "y": 200
+    },
+    "id": "N17",
+    "name": "mcp-e2e/conformance/Target",
+    "styles": {
+      "clipsContent": true,
+      "fills": [
+        {
+          "color": "#f4f6fa",
+          "type": "SOLID"
+        }
+      ]
+    },
+    "type": "FRAME"
+  }
+}
