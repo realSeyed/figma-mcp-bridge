@@ -8,6 +8,9 @@ The scripts in this folder read the evidence that the bridge writes to disk — 
 | `contrast.py`     | The WCAG 2.2 contrast of each text; the contrast table of the colour foundations.        |
 | `sr_precheck.py`  | The surface pre-check: rows that say where to look closer in the captures.               |
 | `completeness.py` | The variant count of a set against `list_components`; page and nested completeness.      |
+| `assert.py`       | The checks runner: evaluates the checks file of a milestone against a dump.              |
+| `diff_dumps.py`   | Compares two dumps byte for byte, by node, or field by field (baseline against a dump).  |
+| `tile.py`         | Cuts a PNG capture into overlapping tiles of about 1,000 pixels, never scaled.           |
 | `selfcheck.py`    | Runs each known answer of a fixtures folder, and the fingerprint of the baseline.        |
 
 ## Rules
@@ -75,7 +78,7 @@ Two deliberate exceptions:
 
 ## The scripts
 
-Each script exits with 0 when it ran, 1 when one of its checks failed (`completeness.py`), and 2 when an input is missing, refused, or does not match its manifest.
+Each script exits with 0 when it ran, 1 when one of its checks failed (`completeness.py`, `assert.py`) or when the two sides differ (`diff_dumps.py`), and 2 when an input is missing, refused, or does not match its manifest.
 
 ### census.py
 
@@ -114,6 +117,89 @@ python tools/audit/completeness.py <dump> [<dump> ...] --components <list_compon
 ```
 
 For each component set root, it compares the variants in the dump with the `variantCount` of the listing, and fails when they differ. A set that the listing does not name gets `UNCHECKED`, and the script exits with 1: the variant count is not proven. For each page root with page child counts, it compares the children. It also reports each nested shortfall of a cut read. It writes `completeness.json`; `expected_source` says where each expected value came from.
+
+### assert.py
+
+```bash
+python tools/audit/assert.py <checks.json> <dump> [--root <id>] [--vars <variables>] [--config <config.json>] [--label <name>] --outputs <folder>
+```
+
+The checks file is a JSON array; each row is one check. The synthetic example below has one check of each kind:
+
+```json
+[
+  {
+    "id": "C-1",
+    "node": "12:34",
+    "field": "styles.fills[0].color",
+    "op": "eq",
+    "expected": "#ffffff"
+  },
+  { "id": "C-2", "node": "12:35", "measure": "variantCount", "op": "ge", "expected": 4 },
+  {
+    "id": "C-3",
+    "node": "12:36",
+    "measure": "contrastRatio",
+    "op": "approx",
+    "expected": 4.5,
+    "tolerance": 0.05
+  },
+  { "id": "C-4", "node": "12:37", "field": "boundVariables.fills", "op": "exists" }
+]
+```
+
+| Key         | Meaning                                                                                                                               |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`        | The ID of the check. Unique in the file.                                                                                              |
+| `node`      | The node ID. The node may sit in any root of a dump folder; `--root` limits the dump to one root.                                     |
+| `field`     | A path into the node: dotted keys and list indexes, `styles.fills[0].color`. Write `["key"]` for a key that holds a dot or a bracket. |
+| `measure`   | A derived figure (below). A row has `field` or `measure`, not both.                                                                   |
+| `op`        | The operator (below).                                                                                                                 |
+| `expected`  | The value to compare with. `exists` and `absent` take none.                                                                           |
+| `tolerance` | A number of 0 or more. `approx` needs it, and no other operator takes it.                                                             |
+| `comment`   | Free text; it goes to the output.                                                                                                     |
+
+The operators: `eq` and `ne` (the parsed values; `true` is not `1`, and `1` is `1.0`), `lt`, `le`, `gt`, `ge` (numbers), `approx` (the difference is at most `tolerance`), `in` (the value is one of a list), `contains` (a substring of a text, a member of a list, or a key of an object), `exists`, `absent`, and `matches` (a regular expression, searched with Python `re.search`).
+
+A value that is not there, or is `null`, is absent. A check on an absent value fails for each operator except `absent`; `ne` does not pass on a missing field, so a value that was not observed never turns into a pass. A value of the wrong type fails the numeric and text operators.
+
+The checks read the full tree of the dump, hidden content included, so a check can address a hidden node. The measures:
+
+| Measure                  | Value                                                                                                                                          |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `childCount`             | The children of the node, hidden ones included.                                                                                                |
+| `visibleChildCount`      | The children that are not hidden (`styles.visible` is not `false`).                                                                            |
+| `variantCount`           | The `COMPONENT` children of a `COMPONENT_SET`, hidden variants included, as Figma counts them. Another node type is an input error.            |
+| `boundVariable(<field>)` | The variable ID in `boundVariables` at the path: `boundVariable(paddingTop)`, `boundVariable(fills[0])`; a list for `boundVariable(fills)`.    |
+| `contrastRatio`          | The WCAG ratio of a visible text node, from `contrast.py` (a number with two decimals). Needs `--vars` and `--config`. A hidden text has none. |
+
+`assert.py` writes `<label>.assert.json` (the checks file with its SHA-256, the dump sources, the totals, and one result for each check) and `<label>.assert.txt` (the table and the result line). A row has `id`, `node`, `field` or `measure`, `op`, `expected`, `observed`, and `PASS` or `FAIL`. The label is the name of the checks file. Exit codes: 0 when each check passes, 1 when a check fails, 2 when an input is wrong: an unknown node, an unknown operator or measure, a bad path or regular expression, a bad row, a dump that does not match its manifest. All rows are checked before the first runs; an input error lists each bad row (`checks[<index>]: <cause>`) and writes no result. A real checks file belongs in the fixtures folder, not in the repository.
+
+### diff_dumps.py
+
+```bash
+python tools/audit/diff_dumps.py --mode bytes  <dump folder A> <dump folder B> --outputs <folder>
+python tools/audit/diff_dumps.py --mode nodes  <dump A> <dump B> [--root <id>] [--root-b <id>] [--only <node IDs file>] --outputs <folder>
+python tools/audit/diff_dumps.py --mode fields <baseline file> <dump B> [--root-b <id>] [--only <node IDs file>] --outputs <folder>
+```
+
+- **`bytes`** compares two `dump_nodes` folders (or their `manifest.json` files) file by file by SHA-256: `equal`, `different`, `only_in_a`, or `only_in_b`. Each manifest and each file it lists is checked first; a file that changed after the bridge wrote it stops the run with exit code 2. Files are matched by file name. The manifests themselves are not compared, because they hold times.
+- **`nodes`** compares two dumps of the same format by node ID. It lists the nodes added, the nodes removed, and the nodes changed with the paths of the changed fields (`styles.fills[1].color`). `parentId` stands for a move, and `childOrder` for a different order of the children that both sides hold. A folder of more than one root is one set of nodes, unless `--root` names one root. The two sides need the same `includeHidden` option, because every hidden node would show as added or removed. `--only` takes a change set: a JSON array of node IDs, or a text file with one ID on each line (`#` starts a comment). The diff then covers those nodes only, and `outside_change_set` counts the other differences. An ID that neither side holds is an input error.
+- **`fields`** compares a package written before T-1 (side A, the baseline format) with `dump_nodes` output (side B, the same root as A unless `--root-b` says otherwise), field by field. It compares the parsed values, so key order and whitespace play no part. Both sides are reduced to the visible projection first, so the content that the old format cannot carry is ignored: a hidden node with its subtree, a hidden paint or effect, the fields `mainComponentId`, `componentSetId`, `detachedInfo`, `reactions`, `flowStartingPoints`, and `styledTextSegments`, and the `boundVariables` of a paint. The list is in the `ignored` key of the output.
+
+It writes `<label>.diff.json` and `<label>.diff.txt` (default label `diff_<mode>`). Exit codes: 0 when the sides are equal, 1 when they differ, 2 when an input is wrong or does not match its manifest.
+
+### tile.py
+
+```bash
+python tools/audit/tile.py <capture.png> [--manifest <save_screenshots manifest>] [--tile-size 1000] [--overlap 100] [--label <name>] --outputs <folder>
+```
+
+An image read is scaled down above 1,568 pixels on the long edge, which loses small text. `tile.py` cuts the capture into tiles of at most `--tile-size` pixels, in rows from the top left. A tile starts `tile size - overlap` pixels after the one before it, and the last tile on an axis ends at the image edge, so a tile at an edge can be smaller. An image smaller than one tile gives one tile. No tile is scaled; its pixels are those of the capture.
+
+With `--manifest`, the capture is read through the capture manifest: its size and SHA-256 are checked, and its `pixelWidth` and `pixelHeight` must match the PNG header. The reader and writer handle 8-bit RGB and RGBA PNG without interlace, with `zlib` from the standard library. Any other PNG (indexed, greyscale, 16-bit, interlaced) and any JPEG is refused with an error that names the reason; capture with the format PNG. The other chunks of the PNG (colour profile, text) are not copied to the tiles.
+
+It writes `<label>.r<row>c<column>.png` for each tile and `<label>.tiles.json`: the source (path, SHA-256, size, pixel size, colour type), the options, and for each tile its file, `x`, `y`, `width`, `height`, `bytes`, and `sha256`. The tile manifest is not named `manifest.json`, because a folder with that name counts as an evidence folder. Exit codes: 0 when the tiles are written, 2 when an input is wrong.
 
 ## The self-check
 
@@ -194,4 +280,4 @@ The earlier scripts kept their known answers in another shape. When you write th
 python -m unittest discover -s tools/audit/tests -t .
 ```
 
-Run it from the repository root. The tests need no Figma and no fixtures folder. Their data is synthetic: the golden dump of the conformance fixture, and small dumps written by hand in both formats in `tests/data/`. Each test writes its `dump_nodes` folders at run time, as the bridge does, and works out its expected figures by hand.
+Run it from the repository root. The tests need no Figma and no fixtures folder. Their data is synthetic: the golden dump of the conformance fixture, and small dumps written by hand in both formats in `tests/data/`. Each test writes its `dump_nodes` folders and its PNG files at run time, as the bridge does, and works out its expected figures by hand.
