@@ -497,12 +497,23 @@ or `CONFORMANCE FAIL bridgeCommit=<commit> pluginBuild=<build> failed=<count>`. 
 
 `E2E_UPDATE_GOLDEN=1 bun run e2e` writes the golden dump in place of the compare, and the result line then says `FAIL`: nothing was compared. A change of the golden dump is a change of the serializer. It goes in a commit of its own, and the auditor reviews it before an audit uses the new output.
 
+## Audit toolset
+
+`tools/audit/` holds the Python scripts that read the dumps and captures and calculate each figure of an audit: the binding census, the WCAG 2.2 contrast, the surface pre-check, and the completeness check. They read the `dump_nodes` output and the baseline reads that came before it, check each dump file against its manifest, and write only to an outputs folder apart from the evidence. `selfcheck.py` runs the known answers of a fixtures folder before each audit. The repository holds no design-file data: the fixtures stay outside it.
+
+The auditor process runs the toolset from a checkout of a tagged commit. See [tools/audit/README.md](tools/audit/README.md) for the inputs, the outputs, and the format of the known answers.
+
+```bash
+python -m unittest discover -s tools/audit/tests -t .
+```
+
 ## Structure
 
 ```
 Figma-MCP-Bridge/
-├── plugin/   # Figma plugin (TypeScript/React)
-└── server/   # MCP server (TypeScript/Node.js)
+├── plugin/       # Figma plugin (TypeScript/React)
+├── tools/audit/  # Audit scripts that read the dumps (Python)
+└── server/       # MCP server (TypeScript/Node.js)
     └── src/
         ├── index.ts      # Entry point
         ├── bridge.ts     # WebSocket bridge to Figma plugin
