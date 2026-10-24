@@ -1,0 +1,54 @@
+{
+  "id": "40:1",
+  "name": "synthetic/Size",
+  "type": "COMPONENT_SET",
+  "bounds": {
+    "x": 0,
+    "y": 0,
+    "width": 300,
+    "height": 100
+  },
+  "styles": {
+    "clipsContent": true
+  },
+  "children": [
+    {
+      "id": "40:2",
+      "name": "Size=S",
+      "type": "COMPONENT",
+      "bounds": {
+        "x": 20,
+        "y": 20,
+        "width": 60,
+        "height": 60
+      },
+      "styles": {}
+    },
+    {
+      "id": "40:3",
+      "name": "Size=M",
+      "type": "COMPONENT",
+      "bounds": {
+        "x": 100,
+        "y": 20,
+        "width": 60,
+        "height": 60
+      },
+      "styles": {}
+    },
+    {
+      "id": "40:4",
+      "name": "Size=L",
+      "type": "COMPONENT",
+      "bounds": {
+        "x": 180,
+        "y": 20,
+        "width": 60,
+        "height": 60
+      },
+      "styles": {
+        "visible": false
+      }
+    }
+  ]
+}
