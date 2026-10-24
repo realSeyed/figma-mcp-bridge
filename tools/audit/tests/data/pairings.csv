@@ -1,0 +1,4 @@
+pairing,category,threshold,token1,token2
+ink on paper,text,4.5,palette/ink,palette/paper
+sand on paper,decorative,,palette/sand,paper
+surface on paper,large text,3,roles/surface,palette/paper
