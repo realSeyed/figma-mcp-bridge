@@ -499,9 +499,22 @@ or `CONFORMANCE FAIL bridgeCommit=<commit> pluginBuild=<build> failed=<count>`. 
 
 ## Audit toolset
 
-`tools/audit/` holds the Python scripts that read the dumps and captures and calculate each figure of an audit: the binding census, the WCAG 2.2 contrast, the surface pre-check, and the completeness check. They read the `dump_nodes` output and the baseline reads that came before it, check each dump file against its manifest, and write only to an outputs folder apart from the evidence. `selfcheck.py` runs the known answers of a fixtures folder before each audit. The repository holds no design-file data: the fixtures stay outside it.
+`tools/audit/` holds the Python scripts that read the dumps and captures and calculate each figure of an audit. They check each dump file against its manifest and write only to an outputs folder apart from the evidence. The repository holds no design-file data: the fixtures stay outside it.
 
-The auditor process runs the toolset from a checkout of a tagged commit. See [tools/audit/README.md](tools/audit/README.md) for the inputs, the outputs, and the format of the known answers.
+| Script             | Role                                                                                         |
+| ------------------ | -------------------------------------------------------------------------------------------- |
+| `census.py`        | The binding census and the layout audit; the list of instanced component sets.               |
+| `contrast.py`      | The WCAG 2.2 contrast of each text, and of the colour foundations.                           |
+| `sr_precheck.py`   | The surface pre-check: where to look closer in the captures.                                 |
+| `completeness.py`  | The variant count of a set and the child count of a page against the listings.               |
+| `assert.py`        | The checks runner: a checks file against a dump.                                             |
+| `diff_dumps.py`    | The dump diff: byte for byte, by node, or field by field.                                    |
+| `tile.py`          | Cuts a PNG capture into overlapping tiles, never scaled.                                     |
+| `render_report.py` | Renders the audit report from script outputs only, with the anchors and the verdict.         |
+| `run_audit.py`     | Reproduces each figure of an audit package offline, with the toolset at the recorded commit. |
+| `selfcheck.py`     | Runs the known answers of a fixtures folder before each audit.                               |
+
+**The pin rule.** The auditor process runs the toolset only from a checkout of a tagged commit of this repository, in its own workspace, and runs `selfcheck.py` before each audit. It never runs a script from a package under audit. See [tools/audit/README.md](tools/audit/README.md) for the inputs, the outputs, the package layout, and the format of the known answers.
 
 ```bash
 python -m unittest discover -s tools/audit/tests -t .
