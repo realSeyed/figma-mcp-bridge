@@ -187,3 +187,6 @@ server/scripts/e2e-output/
 
 # Measurement output
 server/scripts/perf-output/
+
+# Python bytecode of the audit toolset
+__pycache__/
