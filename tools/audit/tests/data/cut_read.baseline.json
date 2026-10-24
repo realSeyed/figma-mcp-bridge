@@ -1,0 +1,28 @@
+{
+  "id": "50:1",
+  "name": "synthetic/long-list",
+  "type": "FRAME",
+  "bounds": { "x": 0, "y": 0, "width": 200, "height": 600 },
+  "styles": {},
+  "childCount": 3,
+  "children": [
+    {
+      "id": "50:2",
+      "name": "synthetic/item",
+      "type": "FRAME",
+      "bounds": { "x": 0, "y": 0, "width": 200, "height": 40 },
+      "styles": {},
+      "children": [
+        {
+          "id": "50:3",
+          "name": "synthetic/item-text",
+          "type": "FRAME",
+          "bounds": { "x": 0, "y": 0, "width": 200, "height": 40 },
+          "styles": {}
+        }
+      ]
+    }
+  ],
+  "truncated": true,
+  "note": "The subtree is larger than the budget, so it was cut where the budget ran out."
+}
