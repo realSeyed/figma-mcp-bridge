@@ -160,6 +160,15 @@ the manifest only. A failure removes each file of the call.
 | `server/scripts/golden/`                   | The golden dump of the conformance fixture. Synthetic data from the test file only.             |
 | `server/test/`                             | `bun test` tests. Real server processes against a simulated plugin. Helpers in `helpers/`.      |
 | `plugin/test/`                             | `bun test` tests of the serializer, the dump form, and the chunk walk. Synthetic nodes.         |
+| `tools/audit/`                             | The audit toolset in Python 3.11, standard library only. `README.md` holds its rules.           |
+| `tools/audit/auditlib/`                    | `dumps.py` (both formats, the visible projection), `manifest.py`, `outputs.py`, `config.py`.    |
+| `tools/audit/*.py`                         | `census.py`, `contrast.py`, `sr_precheck.py`, `completeness.py`, and `selfcheck.py`.            |
+| `tools/audit/tests/`                       | `unittest` tests. Synthetic data in `data/` and the golden dump; dump folders made at run time. |
+
+The audit toolset holds no name, ID, or figure of a design file: the configuration, the
+exemptions, the baseline dumps, and `expected.json` stay in a fixtures folder outside the
+repository. Its figures use the visible projection of a dump, the projection of
+`server/scripts/conformance.ts`; a change of that projection changes both.
 
 An extension file must not import `schema.ts` or `tools.ts`; this prevents an import cycle.
 It imports only `schema-common.ts`, `tool-helpers.ts`, `output-root.ts`, `identity.ts`,
@@ -230,6 +239,22 @@ mimeType }`), never base64 in text. A capture that is large or that serves as ev
 | `bun run perf`  | In `server/`. The measurement script. Needs `FIGMA_FILE_KEY`. Reads `FIGMA_READ_FILE_KEY` as well. |
 
 Run `bun run check` before each commit. Commit only if the check passes.
+
+The audit toolset has its own commands. Run them from the root, with Python 3.11 or later:
+
+```bash
+python -m unittest discover -s tools/audit/tests -t .
+```
+
+```bash
+python tools/audit/selfcheck.py --fixtures C:/audit-fixtures --outputs C:/audit-output/selfcheck
+```
+
+The tests need no Figma and no fixtures. The self-check reads the known answers of the
+fixtures folder and exits with a code other than 0 at a mismatch or a missing input. Write
+its outputs outside the fixtures folder; the toolset refuses an outputs folder in it. Run
+the tests after each change in `tools/audit/`, and the self-check on the real fixtures when
+the owner has them.
 
 `FIGMA_BRIDGE_DUMP_CHUNK_NODES` is a setting for tests only: the most records that one
 `dump_nodes_chunk` request returns, an integer of 1 or more. The default is 1,000. The test
