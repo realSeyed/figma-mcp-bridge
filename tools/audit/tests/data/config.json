@@ -1,0 +1,6 @@
+{
+  "spacing_collection": "space-scale",
+  "theme_collections": ["palette-a"],
+  "context_base": "roles/surface",
+  "disabled_variant": { "property": "Status", "value": "Off" }
+}
