@@ -80,6 +80,23 @@ def iter_tree(root):
             stack.append((child, below))
 
 
+def index_nodes(root: dict) -> dict:
+    """Each node of a tree by ID: `{id: (node, parent ID or None)}`, in pre-order.
+
+    Raises `DumpError` when an ID appears twice, because a figure by node ID
+    would then be ambiguous.
+    """
+    found: dict = {}
+    for node, ancestors in iter_tree(root):
+        node_id = node.get('id')
+        if not isinstance(node_id, str):
+            raise DumpError(f'a node without an id sits below {root.get("id")}.')
+        if node_id in found:
+            raise DumpError(f'the node ID {node_id} appears twice below {root.get("id")}.')
+        found[node_id] = (node, ancestors[-1].get('id') if ancestors else None)
+    return found
+
+
 def visible_projection(node: dict) -> dict:
     """The visible projection of a dumped node and its subtree: the `get_node` form.
 
