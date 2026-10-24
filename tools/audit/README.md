@@ -2,16 +2,18 @@
 
 The scripts in this folder read the evidence that the bridge writes to disk — the dumps of `dump_nodes`, and the baseline reads that came before them — and calculate each figure of a design audit. The auditor process runs them on the files. It does not count nodes or compute a ratio by reading node data in its conversation.
 
-| Script            | Role                                                                                     |
-| ----------------- | ---------------------------------------------------------------------------------------- |
-| `census.py`       | The binding census and the layout audit of a root; the list of instanced component sets. |
-| `contrast.py`     | The WCAG 2.2 contrast of each text; the contrast table of the colour foundations.        |
-| `sr_precheck.py`  | The surface pre-check: rows that say where to look closer in the captures.               |
-| `completeness.py` | The variant count of a set against `list_components`; page and nested completeness.      |
-| `assert.py`       | The checks runner: evaluates the checks file of a milestone against a dump.              |
-| `diff_dumps.py`   | Compares two dumps byte for byte, by node, or field by field (baseline against a dump).  |
-| `tile.py`         | Cuts a PNG capture into overlapping tiles of about 1,000 pixels, never scaled.           |
-| `selfcheck.py`    | Runs each known answer of a fixtures folder, and the fingerprint of the baseline.        |
+| Script             | Role                                                                                                              |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `census.py`        | The binding census and the layout audit of a root; the list of instanced component sets.                          |
+| `contrast.py`      | The WCAG 2.2 contrast of each text; the contrast table of the colour foundations.                                 |
+| `sr_precheck.py`   | The surface pre-check: rows that say where to look closer in the captures.                                        |
+| `completeness.py`  | The variant count of a set against `list_components`; page and nested completeness.                               |
+| `assert.py`        | The checks runner: evaluates the checks file of a milestone against a dump.                                       |
+| `diff_dumps.py`    | Compares two dumps byte for byte, by node, or field by field (baseline against a dump).                           |
+| `tile.py`          | Cuts a PNG capture into overlapping tiles of about 1,000 pixels, never scaled.                                    |
+| `render_report.py` | Renders the audit report from script outputs only: acceptance table, surfaces, errors, defects, anchors, verdict. |
+| `run_audit.py`     | Reproduces each figure of an audit package offline, with the toolset at the recorded commit.                      |
+| `selfcheck.py`     | Runs each known answer of a fixtures folder, and the fingerprint of the baseline.                                 |
 
 ## Rules
 
@@ -78,7 +80,7 @@ Two deliberate exceptions:
 
 ## The scripts
 
-Each script exits with 0 when it ran, 1 when one of its checks failed (`completeness.py`, `assert.py`) or when the two sides differ (`diff_dumps.py`), and 2 when an input is missing, refused, or does not match its manifest.
+Each script exits with 0 when it ran, 1 when one of its checks failed (`completeness.py`, `assert.py`), when the two sides differ (`diff_dumps.py`), when the verdict is `FAIL` (`render_report.py`), or when a figure differs from the recorded one (`run_audit.py`), and 2 when an input is missing, refused, or does not match its manifest.
 
 ### census.py
 
@@ -201,6 +203,191 @@ With `--manifest`, the capture is read through the capture manifest: its size an
 
 It writes `<label>.r<row>c<column>.png` for each tile and `<label>.tiles.json`: the source (path, SHA-256, size, pixel size, colour type), the options, and for each tile its file, `x`, `y`, `width`, `height`, `bytes`, and `sha256`. The tile manifest is not named `manifest.json`, because a folder with that name counts as an evidence folder. Exit codes: 0 when the tiles are written, 2 when an input is wrong.
 
+### render_report.py
+
+```bash
+python tools/audit/render_report.py --assert <label.assert.json> [...] --surfaces <surfaces.json> --prescription-errors <errors.json> --defects <defects.json> --manifest [LABEL=]<manifest> [...] [--tiles <label.tiles.json> ...] [--seeds <seeds.json>] [--toolset-dir <folder>] [--name report.md] --outputs <folder>
+```
+
+The report is Markdown, rendered from script outputs only. A person types no figure: the acceptance table comes from the `<label>.assert.json` output of `assert.py`, the counts of the captures and tiles are worked out, and the anchors come from the manifests and from `git`. It holds no time and no path, so the same inputs give the same text.
+
+| Section             | Source                                                                                                                                                                                                                                                                                  |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Acceptance          | One table for each `--assert` output: a row for each check (`ID`, `Node`, `Field / measure`, `Op`, `Expected`, `Observed`, `Result`), the totals, and the SHA-256 of the checks file. The totals are worked out again from the rows; a summary that does not match its rows is refused. |
+| Surfaces            | The surface declaration, below. Each declared capture must be listed by a capture manifest (`--manifest`), and each declared tile by a tile output (`--tiles`).                                                                                                                         |
+| Prescription errors | The list below, with its status.                                                                                                                                                                                                                                                        |
+| Carried defects     | The list below.                                                                                                                                                                                                                                                                         |
+| Anchors             | The toolset commit; for each manifest its SHA-256, tool, bridge commit, leader commit, plugin build, epoch, leader start, and each listed file with its size and SHA-256; the seed of each script that uses one.                                                                        |
+| Verdict             | The rule below.                                                                                                                                                                                                                                                                         |
+
+**The toolset commit** is `git rev-parse HEAD` of the toolset checkout, with `-dirty` added when `git status --porcelain` prints a line. Without git, or outside a checkout, the renderer stops. `--toolset-dir` names another checkout; the default is the folder of the scripts.
+
+**The anchors of a manifest.** Each manifest is checked first: every file that it lists is read and compared with its size and SHA-256. A manifest without `bridgeCommit`, `leaderCommit`, `pluginBuild`, `epoch`, or `leaderStartedAt` is refused. `LABEL=` names a manifest in the report; without it the label is the folder name and the file name.
+
+**The seeds.** No script of the toolset uses a seed today. `--seeds` takes a JSON object of script name to a seed (an integer of 0 or more), for a script that does. Without it the report says "None declared".
+
+**The verdict** follows a written rule, which the report prints with its reasons: `PASS` when at least one acceptance check ran, each acceptance check passed, and no prescription error is open; otherwise `FAIL`. A carried defect does not change the verdict.
+
+Exit codes: 0 when the verdict is `PASS`, 1 when it is `FAIL`, 2 when an input is missing, wrong, or does not match its manifest. An input error writes no report. Every bad row of an input file is listed in one error, as `surfaces[<index>].<key>: <cause>`.
+
+#### The input files
+
+The auditor writes three files, each a JSON array. A key that is not listed is refused, so a typo does not pass silently. A real file belongs in the audit workspace, not in the repository.
+
+`surfaces.json`: the surface declaration of each frame.
+
+```json
+[
+  {
+    "frame": "Checkout screen",
+    "surface": "default",
+    "read": ["dump run1, root 12:34", "census run census-screen", "capture frame.png"],
+    "captures": ["captures/frame.png"],
+    "tiles": ["frame.r00c00.png", "frame.r00c01.png"]
+  }
+]
+```
+
+| Key        | Meaning                                                                                                                                      |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `frame`    | The frame. A text that is not empty.                                                                                                         |
+| `surface`  | The surface of the frame, for example its state. A text that is not empty.                                                                   |
+| `read`     | What was read: a list of texts, one at least. A surface that read nothing is not declared.                                                   |
+| `captures` | The captures that were looked at: the `path` of each, as a capture manifest lists it. May be empty. Each must be listed by a given manifest. |
+| `tiles`    | The tiles that were looked at: the `file` of each, as a `tile.py` output lists it. May be empty. Each must be listed by a given tile output. |
+
+`prescription-errors.json`: the errors of the prescription (the design instructions) that the audit found.
+
+```json
+[
+  {
+    "id": "PE-1",
+    "frame": "Checkout screen",
+    "text": "The prescription names a size that the file lacks.",
+    "status": "open"
+  }
+]
+```
+
+`id` (unique), `text`, and `status` (`open` or `closed`) are required; `frame` is optional. An open error makes the verdict `FAIL`.
+
+`defects.json`: the defects carried from an earlier audit.
+
+```json
+[
+  {
+    "id": "D-1",
+    "frame": "Checkout screen",
+    "since": "audit 2",
+    "text": "A contrast pair that was accepted."
+  }
+]
+```
+
+`id` (unique) and `text` are required; `frame` and `since` are optional.
+
+### run_audit.py
+
+```bash
+python tools/audit/run_audit.py <package> --outputs <folder> [--allow-other-commit] [--toolset-dir <folder>]
+```
+
+It reproduces each figure of an audit from the dumps of a package, with the toolset at the recorded commit. The steps:
+
+1. Check each file of each manifest of the package against its size and SHA-256.
+2. Compare the toolset commit (as `render_report.py` works it out) with the recorded one. A commit that differs stops the run with exit code 2; `--allow-other-commit` runs with the current one, prints a `WARNING` line, and records the difference in `run_audit.json`.
+3. Run each script of the package. A script always comes from this toolset; the package holds data only, and `run_audit.py` never runs a file of the package.
+4. Render the report with `render_report.py`.
+5. Compare each figure with the figure that the package recorded, when it holds one.
+
+It writes only under `--outputs`, which may not lie in the package or in an evidence folder: the outputs of each script under `scripts/<id>/`, `report.md`, `run_audit.txt`, and `run_audit.json`. It prints one line for each compared figure, `MATCH` or `MISMATCH` with the observed and the expected value, and a result line:
+
+```text
+MATCH census-screen unbound_paints.count observed=9 expected=9
+MISMATCH frame-tiles tile_count observed=6 expected=4
+RERUN MISMATCH figures=2 mismatched=1 verdict=PASS
+```
+
+The `verdict` is the verdict of the report that this run rendered. Exit codes: 0 when each recorded figure matches (or the package recorded none, which the output says), 1 at a mismatch, 2 when an input is wrong: a file that does not match its manifest, a toolset commit that differs, a package that does not follow the layout, or a script that stops on its input.
+
+#### The package layout
+
+```text
+<package>/
+  audit-package.json
+  checks.json
+  dumps/<call>/manifest.json        one folder for each dump_nodes call, as the bridge wrote it
+  captures/save_screenshots-<UTC time>.manifest.json     and the captures it lists
+  inputs/                           the configuration, the exemptions, the listings, and the three input files
+```
+
+Every path in `audit-package.json` is relative to the package, with no `..`. A path that leaves the package, or a file that is missing, is refused.
+
+```json
+{
+  "schema": 1,
+  "toolset_commit": "<the full commit of 40 characters; -dirty for an unclean tree>",
+  "seeds": {},
+  "config": "inputs/config.json",
+  "dump_calls": [{ "name": "run1", "manifest": "dumps/run1/manifest.json" }],
+  "capture_calls": [
+    {
+      "name": "shots",
+      "manifest": "captures/save_screenshots-20260101T000000Z.manifest.json"
+    }
+  ],
+  "inputs": {
+    "surfaces": "inputs/surfaces.json",
+    "prescription_errors": "inputs/prescription-errors.json",
+    "defects": "inputs/defects.json"
+  },
+  "runs": [
+    {
+      "id": "census-screen",
+      "script": "census",
+      "inputs": {
+        "dump": "dumps/run1",
+        "root": "12:34",
+        "variables": "dumps/run1/variables.json",
+        "exemptions": "inputs/exemptions.json"
+      },
+      "figures": { "unbound_paints.count": 9 },
+      "match": "exact"
+    },
+    {
+      "id": "frame-tiles",
+      "script": "tile",
+      "inputs": {
+        "capture": "captures/frame.png",
+        "manifest": "captures/save_screenshots-20260101T000000Z.manifest.json"
+      },
+      "figures": { "tile_count": 6 }
+    }
+  ],
+  "acceptance": {
+    "checks": "checks.json",
+    "dump": "dumps/run1",
+    "figures": { "summary.checks": 3, "summary.failed": 0, "checks.C-1.observed": 2 }
+  },
+  "recorded": { "verdict": "PASS" }
+}
+```
+
+| Key              | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schema`         | The version of the layout: `1`.                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `toolset_commit` | The commit that the figures were made with. Step 2 compares it.                                                                                                                                                                                                                                                                                                                                                                       |
+| `seeds`          | Script name to seed, for a script that uses one. Optional.                                                                                                                                                                                                                                                                                                                                                                            |
+| `config`         | The configuration file (see "The other inputs"). Required when a run uses `census` or `contrast`.                                                                                                                                                                                                                                                                                                                                     |
+| `dump_calls`     | The `dump_nodes` calls: a `name` (unique) and the `manifest`. At least one dump call or capture call is required. A manifest of another tool is refused.                                                                                                                                                                                                                                                                              |
+| `capture_calls`  | The `save_screenshots` calls, in the same form.                                                                                                                                                                                                                                                                                                                                                                                       |
+| `inputs`         | The three input files of the report: `surfaces`, `prescription_errors`, `defects`. All three are required; an empty list is a valid statement.                                                                                                                                                                                                                                                                                        |
+| `runs`           | The scripts to run. `id` is a name of letters, digits, `.`, `_` and `-`, unique. `script` is `census`, `contrast`, `sr_precheck`, `completeness`, or `tile`. `inputs` are those of the self-check (below), with every path relative to the package; `tile` takes `capture`, `manifest`, `tile_size`, and `overlap`. Optional `figures` (figure path to the recorded value) and `match` (`exact`, `unordered`, `subset`, or `prefix`). |
+| `acceptance`     | The checks runner: the `checks` file and the `dump`; optional `root`, `format`, `vars`, `label` (default `acceptance`). `figures` records values of `{ "summary": { checks, passed, failed }, "checks": { "<id>": { result, observed } } }`.                                                                                                                                                                                          |
+| `recorded`       | `verdict`: the verdict of the report that the audit reached.                                                                                                                                                                                                                                                                                                                                                                          |
+
+A figure is a dotted path into the figures of the script, as in the self-check. The figures of `tile` are its `<id>.tiles.json` output plus `tile_count`. A recorded figure that the script no longer gives is a mismatch, not an input error. A run of `contrast` with a `dumps` list runs the script on each dump, labelled `<id>.<n>`; a run of `completeness` runs the script on all roots of its dump folder, and compares the figures of the root that `inputs.root` names.
+
 ## The self-check
 
 ```bash
@@ -280,4 +467,4 @@ The earlier scripts kept their known answers in another shape. When you write th
 python -m unittest discover -s tools/audit/tests -t .
 ```
 
-Run it from the repository root. The tests need no Figma and no fixtures folder. Their data is synthetic: the golden dump of the conformance fixture, and small dumps written by hand in both formats in `tests/data/`. Each test writes its `dump_nodes` folders and its PNG files at run time, as the bridge does, and works out its expected figures by hand.
+Run it from the repository root. The tests need no Figma and no fixtures folder. Their data is synthetic: the golden dump of the conformance fixture, and small dumps written by hand in both formats in `tests/data/`. The package of the report and re-run tests is built at run time from the golden dump, with a PNG capture that the test writes (`tests/package_helpers.py`). Each test writes its `dump_nodes` folders and its PNG files at run time, as the bridge does, and works out its expected figures by hand.
