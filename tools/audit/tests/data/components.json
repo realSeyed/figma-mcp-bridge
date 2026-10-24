@@ -1,0 +1,17 @@
+{
+  "items": [
+    {
+      "id": "40:1",
+      "name": "synthetic/Size",
+      "type": "COMPONENT_SET",
+      "variantCount": 3
+    },
+    {
+      "id": "N1",
+      "name": "mcp-e2e/conformance/Button",
+      "type": "COMPONENT_SET",
+      "variantCount": 2
+    }
+  ],
+  "truncated": false
+}

@@ -1,0 +1,89 @@
+{
+  "collections": [
+    {
+      "id": "VariableCollectionId:90:1",
+      "name": "space-scale",
+      "defaultModeId": "90:0",
+      "modes": [{ "modeId": "90:0", "name": "Mode 1" }],
+      "variables": [
+        {
+          "id": "VariableID:90:2",
+          "name": "space/sm",
+          "resolvedType": "FLOAT",
+          "description": "",
+          "scopes": ["GAP"],
+          "valuesByMode": { "90:0": 8 }
+        },
+        {
+          "id": "VariableID:90:3",
+          "name": "space/md",
+          "resolvedType": "FLOAT",
+          "description": "",
+          "scopes": ["GAP"],
+          "valuesByMode": { "90:0": 16 }
+        }
+      ]
+    },
+    {
+      "id": "VariableCollectionId:91:1",
+      "name": "palette-a",
+      "defaultModeId": "91:0",
+      "modes": [{ "modeId": "91:0", "name": "Mode 1" }],
+      "variables": [
+        {
+          "id": "VariableID:91:2",
+          "name": "palette/ink",
+          "resolvedType": "COLOR",
+          "description": "",
+          "scopes": ["ALL_SCOPES"],
+          "valuesByMode": { "91:0": { "type": "COLOR", "r": 0.2, "g": 0.2, "b": 0.2, "a": 1 } }
+        },
+        {
+          "id": "VariableID:91:3",
+          "name": "palette/paper",
+          "resolvedType": "COLOR",
+          "description": "",
+          "scopes": ["ALL_SCOPES"],
+          "valuesByMode": { "91:0": { "type": "COLOR", "r": 1, "g": 1, "b": 1, "a": 1 } }
+        },
+        {
+          "id": "VariableID:91:4",
+          "name": "palette/sand",
+          "resolvedType": "COLOR",
+          "description": "",
+          "scopes": ["ALL_SCOPES"],
+          "valuesByMode": { "91:0": { "type": "COLOR", "r": 0.8, "g": 0.8, "b": 0.8, "a": 1 } }
+        }
+      ]
+    },
+    {
+      "id": "VariableCollectionId:92:1",
+      "name": "roles",
+      "defaultModeId": "92:0",
+      "modes": [{ "modeId": "92:0", "name": "Mode 1" }],
+      "variables": [
+        {
+          "id": "VariableID:92:2",
+          "name": "roles/surface",
+          "resolvedType": "COLOR",
+          "description": "",
+          "scopes": ["ALL_SCOPES"],
+          "valuesByMode": { "92:0": { "type": "VARIABLE_ALIAS", "id": "VariableID:91:4" } }
+        },
+        {
+          "id": "VariableID:92:3",
+          "name": "roles/veil",
+          "resolvedType": "COLOR",
+          "description": "",
+          "scopes": ["ALL_SCOPES"],
+          "valuesByMode": {
+            "92:0": {
+              "color": { "type": "VARIABLE_ALIAS", "id": "VariableID:91:2" },
+              "opacity": 50
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

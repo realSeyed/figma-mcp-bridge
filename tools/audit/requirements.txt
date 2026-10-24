@@ -1,0 +1,2 @@
+# The audit toolset uses the Python standard library only (Python 3.11 or later).
+# Pin a third-party package here with an exact version, for example: name==1.2.3
