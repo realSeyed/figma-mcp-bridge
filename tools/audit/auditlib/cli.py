@@ -13,6 +13,7 @@ from .config import ConfigError
 from .dumps import DumpError
 from .manifest import ManifestError
 from .outputs import OutputError
+from .toolset import ToolsetError
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -23,7 +24,7 @@ class InputError(Exception):
     """An input of a script holds a value that the script cannot use."""
 
 
-INPUT_ERRORS = (ConfigError, DumpError, InputError, ManifestError, OutputError)
+INPUT_ERRORS = (ConfigError, DumpError, InputError, ManifestError, OutputError, ToolsetError)
 
 
 def run(main) -> None:
