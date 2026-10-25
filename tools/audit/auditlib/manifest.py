@@ -1,14 +1,15 @@
 """The SHA-256 check of evidence files against their manifest.
 
-`dump_nodes` and `save_screenshots` each return a manifest and write it to
-disk beside the files: the path, the size, and the SHA-256 of each file. A
-script reads an evidence file only through `Manifest.read_verified`, which
-reads the bytes one time, checks them against the manifest, and returns them.
-A mismatch raises `ManifestError`, and the script stops: the file is not the
-file that the bridge wrote.
+`dump_nodes`, `dump_journal` and `save_screenshots` each return a manifest and
+write it to disk beside the files: the path, the size, and the SHA-256 of each
+file. A script reads an evidence file only through `Manifest.read_verified`,
+which reads the bytes one time, checks them against the manifest, and returns
+them. A mismatch raises `ManifestError`, and the script stops: the file is not
+the file that the bridge wrote.
 
 A dump manifest is `manifest.json` in the dump folder, and each path is
-`<outputPath>/<name>`. A capture manifest is
+`<outputPath>/<name>`. A journal dump is a dump in this sense: its one file is
+`<outputPath>/journal.json`, of `kind: "journal"`. A capture manifest is
 `save_screenshots-<UTC time>.manifest.json` beside the first capture, and each
 path is relative to the output root, as its `manifestPath` is. Both resolve
 against the folder that holds the manifest now, so a copied evidence folder
@@ -27,6 +28,11 @@ from pathlib import Path, PurePosixPath
 
 DUMP_MANIFEST_NAME = 'manifest.json'
 CAPTURE_MANIFEST_SUFFIX = '.manifest.json'
+JOURNAL_TOOL = 'dump_journal'
+JOURNAL_FILE_NAME = 'journal.json'
+JOURNAL_FILE_KIND = 'journal'
+GENESIS_HASH = '0' * 64
+"""The `prevHash` of the first entry of a journal, and the head of an empty one."""
 
 _SHA256 = re.compile(r'[0-9a-f]{64}')
 _SURROGATE = re.compile('[\ud800-\udfff]')
@@ -130,7 +136,7 @@ class ManifestEntry:
 
 
 class Manifest:
-    """A manifest of `dump_nodes` or `save_screenshots`, with the local path of each file."""
+    """A manifest of `dump_nodes`, `dump_journal` or `save_screenshots`, with the local path of each file."""
 
     def __init__(self, path: Path, data: dict, base: Path, entries: tuple[ManifestEntry, ...]):
         self.path = path
@@ -149,6 +155,18 @@ class Manifest:
             if _same_path_key(entry.local_path) == target:
                 return entry
         return None
+
+    def journal_entry(self) -> ManifestEntry:
+        """The one file of a `dump_journal` manifest.
+
+        Raises `ManifestError` when this is the manifest of another tool.
+        """
+        if self.tool != JOURNAL_TOOL or len(self.entries) != 1:
+            raise ManifestError(
+                f'{self.path}: this is not the manifest of a dump_journal call (its tool is '
+                f'{self.tool!r}). Give the folder that dump_journal wrote, or its {DUMP_MANIFEST_NAME}.'
+            )
+        return self.entries[0]
 
     def read_verified(self, entry: ManifestEntry) -> bytes:
         """Reads a listed file one time and checks its size and its SHA-256.
@@ -235,7 +253,25 @@ def load_manifest(path) -> Manifest:
                 record=record,
             )
         )
+    if data.get('tool') == JOURNAL_TOOL:
+        _check_journal_files(path, entries)
     return Manifest(path, data, base, tuple(entries))
+
+
+def _check_journal_files(path: Path, entries: list[ManifestEntry]) -> None:
+    """A journal dump lists one file: `journal.json`, of kind `journal`."""
+    if len(entries) != 1:
+        raise ManifestError(
+            f'{path}: a dump_journal manifest lists one file, but this one lists {len(entries)}. '
+            'Use the manifest as the bridge wrote it.'
+        )
+    entry = entries[0]
+    if entry.record.get('kind') != JOURNAL_FILE_KIND or entry.local_path.name != JOURNAL_FILE_NAME:
+        raise ManifestError(
+            f'{path}: the file of a dump_journal manifest must be {JOURNAL_FILE_NAME} of the kind '
+            f'{JOURNAL_FILE_KIND}, but the manifest lists {entry.listed_path} of the kind '
+            f'{entry.record.get("kind")!r}. Use the manifest as the bridge wrote it.'
+        )
 
 
 def _dump_paths(path: Path, data: dict, folder: Path):

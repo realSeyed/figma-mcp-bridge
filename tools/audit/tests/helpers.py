@@ -23,9 +23,10 @@ GOLDEN = REPO / 'server' / 'scripts' / 'golden' / 'dump-conformance.json'
 if str(AUDIT) not in sys.path:
     sys.path.insert(0, str(AUDIT))
 
-from auditlib.manifest import canonical_json, sha256_bytes  # noqa: E402
+from auditlib.manifest import GENESIS_HASH, canonical_json, sha256_bytes  # noqa: E402
 
 OUTPUT_PATH = 'dumps/20260101T000000Z'
+JOURNAL_OUTPUT_PATH = 'journal/20260101T000000Z'
 
 
 def data(name):
@@ -106,6 +107,80 @@ def write_dump_folder(folder, roots, include_hidden=True, variables=None):
         'includeVariables': variables is not None,
         'includeStyles': False,
     }
+    (folder / 'manifest.json').write_bytes(canonical_json(manifest).encode('utf-8'))
+    return folder
+
+
+def entry_hash(entry):
+    """The `hash` of an entry: the SHA-256 of its canonical JSON without `hash`."""
+    return sha256_bytes(canonical_json({k: v for k, v in entry.items() if k != 'hash'}).encode('utf-8'))
+
+
+def make_entries(specs, start_head=GENESIS_HASH, start_seq=0):
+    """A valid chain of synthetic journal entries.
+
+    A spec is a tool name, or a dict of the fields to set (`tool` is required;
+    `ok` False makes an error response). The entries follow `start_head`.
+    """
+    entries = []
+    previous = start_head
+    for index, spec in enumerate(specs):
+        spec = {'tool': spec} if isinstance(spec, str) else dict(spec)
+        ok = spec.pop('ok', True)
+        seq = start_seq + index + 1
+        entry = {
+            'seq': seq,
+            'timestamp': f'2026-01-01T00:00:{seq % 60:02d}.000Z',
+            'fileKey': 'synthetic-file-key',
+            'epoch': 1,
+            'auditor': False,
+            'nodeIds': [f'{seq}:1'],
+            'params': {'name': f'synthetic-{seq}'},
+            'response': {'data': {'id': f'{seq}:1'}} if ok else {'error': 'synthetic error'},
+            'prevHash': previous,
+        }
+        entry.update(spec)
+        entry['hash'] = entry_hash(entry)
+        entries.append(entry)
+        previous = entry['hash']
+    return entries
+
+
+def write_journal_folder(folder, entries, manifest_overrides=None, tamper=None):
+    """Writes a `dump_journal` folder: `journal.json` as canonical bytes and `manifest.json`.
+
+    `manifest_overrides` changes top-level fields of the manifest. `tamper`
+    maps the bytes of `journal.json` to other bytes after the manifest has
+    taken the SHA-256 and the size of the original.
+    """
+    folder = Path(folder)
+    folder.mkdir(parents=True)
+    raw = canonical_json({'genesisHash': GENESIS_HASH, 'entries': entries}).encode('utf-8')
+    head = entries[-1]['hash'] if entries else GENESIS_HASH
+    manifest = {
+        'tool': 'dump_journal',
+        'bridgeCommit': '0' * 40,
+        'leaderCommit': '0' * 40,
+        'leaderStartedAt': '2026-01-01T00:00:00.000Z',
+        'outputRoot': '/synthetic/output-root',
+        'outputPath': JOURNAL_OUTPUT_PATH,
+        'startedAt': '2026-01-01T00:00:00.000Z',
+        'finishedAt': '2026-01-01T00:00:01.000Z',
+        'entryCount': len(entries),
+        'headHash': head,
+        'genesisHash': GENESIS_HASH,
+        'files': [
+            {
+                'kind': 'journal',
+                'path': f'{JOURNAL_OUTPUT_PATH}/journal.json',
+                'sha256': sha256_bytes(raw),
+                'bytes': len(raw),
+                'entryCount': len(entries),
+            }
+        ],
+    }
+    manifest.update(manifest_overrides or {})
+    (folder / 'journal.json').write_bytes(tamper(raw) if tamper else raw)
     (folder / 'manifest.json').write_bytes(canonical_json(manifest).encode('utf-8'))
     return folder
 

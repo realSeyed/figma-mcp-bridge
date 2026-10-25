@@ -128,3 +128,51 @@ class CaptureManifestTest(TempDirTestCase):
         with self.assertRaises(ManifestError) as caught:
             load_manifest(moved)
         self.assertIn('renamed or moved', str(caught.exception))
+
+
+class JournalManifestTest(TempDirTestCase):
+    def setUp(self):
+        super().setUp()
+        self.entries = helpers.make_entries(['create_frame', 'clear_paints'])
+        self.folder = helpers.write_journal_folder(self.tmp / 'journal', self.entries)
+
+    def test_match(self):
+        manifest = load_manifest(self.folder / 'manifest.json')
+        self.assertEqual(manifest.tool, 'dump_journal')
+        entry = manifest.journal_entry()
+        self.assertEqual(entry.local_path.name, 'journal.json')
+        self.assertEqual(entry.listed_path, f'{helpers.JOURNAL_OUTPUT_PATH}/journal.json')
+        data = json.loads(manifest.read_verified(entry))
+        self.assertEqual(data['entries'], self.entries)
+
+    def test_changed_byte_stops(self):
+        path = self.folder / 'journal.json'
+        path.write_bytes(path.read_bytes().replace(b'create_frame', b'create_fraMe'))
+        manifest = load_manifest(self.folder / 'manifest.json')
+        with self.assertRaises(ManifestError) as caught:
+            manifest.read_verified(manifest.journal_entry())
+        self.assertIn('SHA-256', str(caught.exception))
+
+    def test_other_file_kind_is_refused(self):
+        manifest_path = self.folder / 'manifest.json'
+        data = json.loads(manifest_path.read_text(encoding='utf-8'))
+        data['files'][0]['kind'] = 'nodes'
+        manifest_path.write_text(json.dumps(data), encoding='utf-8')
+        with self.assertRaises(ManifestError) as caught:
+            load_manifest(manifest_path)
+        self.assertIn('journal.json', str(caught.exception))
+
+    def test_more_than_one_file_is_refused(self):
+        manifest_path = self.folder / 'manifest.json'
+        data = json.loads(manifest_path.read_text(encoding='utf-8'))
+        data['files'].append(dict(data['files'][0]))
+        manifest_path.write_text(json.dumps(data), encoding='utf-8')
+        with self.assertRaises(ManifestError) as caught:
+            load_manifest(manifest_path)
+        self.assertIn('lists one file', str(caught.exception))
+
+    def test_journal_entry_of_a_node_dump_is_refused(self):
+        folder = helpers.write_dump_folder(self.tmp / 'nodes', [helpers.golden('target')])
+        with self.assertRaises(ManifestError) as caught:
+            load_manifest(folder / 'manifest.json').journal_entry()
+        self.assertIn('dump_journal', str(caught.exception))
