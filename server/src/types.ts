@@ -41,9 +41,9 @@ export interface ConnectedFile {
 export interface JournalState {
   /** `broken` when the chain failed its check or an append failed. */
   status: "ok" | "broken";
-  /** The entries in the file. */
+  /** The entries in the file. When broken: the valid entries before the first bad line. */
   entryCount: number;
-  /** The `hash` of the last entry, or the genesis hash. */
+  /** The `hash` of the last of those entries, or the genesis hash. */
   headHash: string;
   /** Why the journal is broken: the line and the cause. Only with `broken`. */
   reason?: string;

@@ -274,7 +274,8 @@ export class WriteJournal {
   }
 
   /**
-   * Checks each line, and sets the count and the head of a valid file.
+   * Checks each line, and sets the count and the head of the valid lines
+   * before the first failure.
    * @returns The first failure as `line <n>: <cause>`, or null.
    */
   private checkLines(bytes: Buffer): string | null {
@@ -330,10 +331,11 @@ export class WriteJournal {
         return `line ${lineNumber}: hash is not the SHA-256 of the entry without hash`;
       }
       previousHash = entry.hash;
+      // The valid lines so far: a broken journal reports the count and the
+      // head of the lines before the first bad one.
+      this.entryCount = lineNumber;
+      this.headHash = previousHash;
     }
-
-    this.entryCount = lineNumber;
-    this.headHash = previousHash;
     return null;
   }
 }
