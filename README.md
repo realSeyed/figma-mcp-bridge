@@ -604,6 +604,7 @@ or `CONFORMANCE FAIL bridgeCommit=<commit> pluginBuild=<build> failed=<count>`. 
 | `completeness.py`  | The variant count of a set and the child count of a page against the listings.               |
 | `assert.py`        | The checks runner: a checks file against a dump.                                             |
 | `diff_dumps.py`    | The dump diff: byte for byte, by node, or field by field.                                    |
+| `journal_check.py` | The hash chain of a `dump_journal` folder, and its new entries against the expected writes.  |
 | `tile.py`          | Cuts a PNG capture into overlapping tiles, never scaled.                                     |
 | `render_report.py` | Renders the audit report from script outputs only, with the anchors and the verdict.         |
 | `run_audit.py`     | Reproduces each figure of an audit package offline, with the toolset at the recorded commit. |
