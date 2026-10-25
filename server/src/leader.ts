@@ -35,6 +35,7 @@ export function leaderUrl(port: number): string {
 const SERVED_BY_EACH_PROCESS: ReadonlyMap<string, string> = new Map([
   ["save_screenshots", "it fetches each capture with get_screenshot"],
   ["dump_nodes", "it fetches each root in chunks with dump_nodes_chunk"],
+  ["dump_journal", "it fetches the entries with dump_journal_chunk"],
 ]);
 
 /**

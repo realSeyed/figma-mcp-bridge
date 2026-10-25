@@ -1,6 +1,6 @@
 /**
  * BR-3: the auditor role. A process with FIGMA_BRIDGE_ROLE=auditor registers
- * 15 read tools and marks each request it sends; the leader refuses a marked
+ * 16 read tools and marks each request it sends; the leader refuses a marked
  * request for any other tool. Runs real server processes and a simulated
  * plugin.
  */
@@ -22,7 +22,7 @@ const NODE_ID = "1:1";
 const TIMEOUT_MS = 60_000;
 const MARK = { "X-Figma-Bridge-Role": "auditor" };
 
-/** The 15 names of BR-3, written out here so a change to the list needs a change to its test. */
+/** The 16 names of BR-3 and BR-8, written out here so a change to the list needs a change to its test. */
 const EXPECTED_AUDITOR_TOOLS = [
   "list_files",
   "get_document",
@@ -39,6 +39,7 @@ const EXPECTED_AUDITOR_TOOLS = [
   "dump_nodes",
   "save_screenshots",
   "scroll_and_zoom_into_view",
+  "dump_journal",
 ];
 
 let h: Harness;
@@ -111,11 +112,11 @@ async function outcomeOk(server: ServerProcess, name: string, args: Record<strin
 
 describe("the tool list", () => {
   test(
-    "an auditor process lists exactly the 15 tools",
+    "an auditor process lists exactly the 16 tools",
     async () => {
       const { server } = await start(await h.freePort(), AUDITOR_ENV);
       const names = await server.listTools();
-      expect(names).toHaveLength(15);
+      expect(names).toHaveLength(16);
       expect(new Set(names)).toEqual(new Set(EXPECTED_AUDITOR_TOOLS));
       expect(names).not.toContain("get_screenshot");
       expect(names).not.toContain("delete_nodes");
@@ -133,7 +134,7 @@ describe("the tool list", () => {
     async () => {
       const { server } = await start(await h.freePort());
       const names = await server.listTools();
-      expect(names.length).toBeGreaterThan(15);
+      expect(names.length).toBeGreaterThan(16);
       for (const tool of EXPECTED_AUDITOR_TOOLS) expect(names).toContain(tool);
       expect(names).toContain("delete_nodes");
       expect(names).toContain("get_screenshot");

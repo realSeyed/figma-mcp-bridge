@@ -89,6 +89,7 @@ export const READ_ONLY_REQUESTS: ReadonlySet<string> = new Set([
   "get_motion_styles",
   "get_node_motion",
   // The dump of the journal. The leader serves the chunk command itself.
+  "dump_journal",
   JOURNAL_CHUNK_REQUEST,
 ]);
 

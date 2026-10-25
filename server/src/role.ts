@@ -42,6 +42,7 @@ export const AUDITOR_TOOLS: readonly string[] = [
   "dump_nodes",
   "save_screenshots",
   "scroll_and_zoom_into_view",
+  "dump_journal",
 ];
 
 /**

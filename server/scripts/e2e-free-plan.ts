@@ -2453,8 +2453,9 @@ const runDumpSteps = async (): Promise<void> => {
 // K Auditor role
 // ---------------------------------------------------------------------------
 
-/** The 15 tools of the auditor role (BR-3), written out here and not imported. */
+/** The 16 tools of the auditor role (BR-3, BR-8), written out here and not imported. */
 const AUDITOR_TOOL_NAMES = [
+  "dump_journal",
   "dump_nodes",
   "get_component",
   "get_document",
