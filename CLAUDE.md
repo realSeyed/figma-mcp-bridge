@@ -43,18 +43,18 @@ in Dev Mode, which is read-only. If no entry exists, control goes to the switch 
 of the core tools. `runExtension` wraps each extension call and puts the tool name in front
 of an error that does not carry it, thus a handler throws cause and correction only.
 
-`FIGMA_BRIDGE_ROLE=auditor` (`server/src/role.ts`) makes a process register the 15 tools of
+`FIGMA_BRIDGE_ROLE=auditor` (`server/src/role.ts`) makes a process register the 16 tools of
 `AUDITOR_TOOLS` and no other: `registerTools` gets a wrapper of the server that drops each
 other tool, and `index.ts` exits if a listed tool is not registered. A set value other than
 exactly `auditor` stops the process at start. The follower of an auditor process adds
 `X-Figma-Bridge-Role: auditor` to each `/rpc` request. For a request with that header the
-leader runs `AUDITOR_TOOLS` and the internal commands `dump_nodes_chunk` and `get_screenshot`
-only; it answers 403 to another tool, before it forwards anything, and 400 to another header
-value. A request without the header runs as before, whatever the role of the leader process
-is: the role governs the tools and the requests of its own process, and the own MCP calls of
-a leader never pass `/rpc`. Thus an auditor leader still relays the writes of the executor
-process. The role is a guardrail, not a sandbox: a process that can read the install token can
-send a request without the mark.
+leader runs `AUDITOR_TOOLS` and the internal commands `dump_nodes_chunk`, `get_screenshot`
+and `dump_journal_chunk` only; it answers 403 to another tool, before it forwards anything,
+and 400 to another header value. A request without the header runs as before, whatever the
+role of the leader process is: the role governs the tools and the requests of its own
+process, and the own MCP calls of a leader never pass `/rpc`. Thus an auditor leader still
+relays the writes of the executor process. The role is a guardrail, not a sandbox: a process
+that can read the install token can send a request without the mark.
 
 The bridge reports its identity in `/ping` and `list_files`: `bridgeCommit` (the serving
 process), `leaderCommit`, `leaderStartedAt`, and for each file `pluginBuild` and `epoch`.
@@ -67,9 +67,10 @@ and a read leave it. The epoch lives in memory. `list_files` returns an object, 
 
 Each process writes evidence files only under its own output root
 (`FIGMA_BRIDGE_OUTPUT_ROOT`, else its working directory). The leader writes no file for
-another process: `/rpc` refuses `save_screenshots` and `dump_nodes` with 400, and a
-follower fetches each capture with `get_screenshot`, and each dump chunk with
-`dump_nodes_chunk`, over `/rpc` and writes the files itself.
+another process: `/rpc` refuses `save_screenshots`, `dump_nodes` and `dump_journal` with
+400, and a follower fetches each capture with `get_screenshot`, each dump chunk with
+`dump_nodes_chunk`, and each journal chunk with `dump_journal_chunk`, over `/rpc` and writes
+the files itself.
 
 `save_screenshots` (`server/src/captures.ts`) runs in the serving process too, and returns a manifest in
 the envelope of `evidence.ts`: the identity of the file, one entry for each item, the totals, and
@@ -123,11 +124,25 @@ request that reaches no connection adds none. `hash` is the SHA-256 of `canonica
 the entry without `hash`; the first `prevHash` is the genesis hash, 64 times `0`. The file
 is JSON Lines, `FIGMA_BRIDGE_JOURNAL_FILE` or `write-journal.jsonl` in the state folder of
 the install. Only the leader opens it: it loads and checks the file in the `listen`
-callback, appends with `fsync`, and keeps the count and the head in memory. A failed check
-or a failed append makes the journal broken: the leader logs it one time, reports it in the
-`journal` field of `/ping` and `list_files`, refuses each write before the plugin sees it,
-and serves each read. It never truncates, repairs, or rewrites the file. The journal holds
-the params and the responses of each write: it is private data of the owner.
+callback, appends with `fsync`, and keeps the count, the head and the byte offset of each
+line in memory. A failed check or a failed append makes the journal broken: the leader logs
+it one time, reports it in the `journal` field of `/ping` and `list_files`, refuses each
+write before the plugin sees it, and serves each read. It never truncates, repairs, or
+rewrites the file. The journal holds the params and the responses of each write: it is
+private data of the owner.
+
+`dump_journal_chunk` is an internal command that the leader serves itself, from the journal
+file: `handleRPC` answers it before the validation and the bridge, as it answers `list_files`,
+and `Node.sendWithParams` gives the own call of a leader process to `Leader.journalChunk`. It
+never reaches a plugin. Its params are `afterSeq`, `throughSeq` (`null` on the first request)
+and `maxEntries`; the answer is `{ status, entryCount, headHash, entries }`, at most
+`maxEntries` entries and about 4,000,000 bytes, one entry at least. A broken journal answers an
+error with the reason. `dump_journal` (`server/src/extensions/journal.ts`) runs in the serving
+process: it refuses a target that exists, reads the identity with `node.identityReport()`,
+fetches the chunks up to the count of the first one, checks the chain against that head, fails
+if `leaderStartedAt` changed, and writes `journal.json` and `manifest.json` through
+`EvidenceSet`. The manifest holds no `fileKey`, `pluginBuild` or `epoch`. `fileKey` filters
+nothing. A dump adds no entry.
 
 ## 4. File map
 
@@ -173,6 +188,7 @@ the params and the responses of each write: it is private data of the owner.
 | `server/src/extensions/sections.ts`        | Section tools.                                                                                                         |
 | `server/src/extensions/paints.ts`          | Paint tools: `clear_paints`.                                                                                           |
 | `server/src/extensions/dumps.ts`           | `dump_nodes`: the chunk loop, `TreeBuilder`, the files, and the manifest.                                              |
+| `server/src/extensions/journal.ts`         | `dump_journal`: the chunk loop, the chain check, the files, and the manifest.                                          |
 | `server/scripts/e2e-free-plan.ts`          | The end-to-end script. Drives every extension tool against a real file.                                                |
 | `server/scripts/perf-free-plan.ts`         | The measurement script. Holds each tool to 30 seconds and 50,000 characters.                                           |
 | `server/scripts/conformance.ts`            | The dump-conformance test: ID placeholders, the golden file text, the visible projection.                              |
@@ -243,7 +259,7 @@ import neither `schema.ts` nor `tools.ts`. `evidence.ts` imports only Node built
 mimeType }`), never base64 in text. A capture that is large or that serves as evidence goes to
     disk with `save_screenshots`, and the result is a manifest.
 17. A read tool joins `AUDITOR_TOOLS` in `server/src/role.ts` only on purpose: change the list
-    and its test (`server/test/auditor-role.test.ts`, which writes the 15 names out) together,
+    and its test (`server/test/auditor-role.test.ts`, which writes the 16 names out) together,
     and the e2e list in group K. A new tool never reaches the auditor role by default.
 18. `e2e_fixture` (`plugin/src/main/extensions/e2e.ts`, `edit: true`) is a test helper. No
     MCP tool and no role exposes it, and the README does not list it. The e2e script sends it
@@ -300,7 +316,15 @@ other than the recorded one, unless `--allow-other-commit` is given.
 harness removes it from each test process unless the test gives it. Do not document it in
 the README.
 
-`bun run e2e` ends with the result line of the conformance group V:
+`FIGMA_BRIDGE_JOURNAL_CHUNK_ENTRIES` is a setting for tests only, in the same way: the most
+entries that one `dump_journal_chunk` request asks for, an integer of 1 or more. The default
+is 500. The harness removes it too. Do not document it in the README.
+
+`bun run e2e` prints the result line of the journal group W just before the last line:
+`JOURNAL PASS start=<count>:<head> end=<count>:<head> writes=<n>`, or `JOURNAL FAIL ...
+failed=<count>`. `E2E_JOURNAL_EVIDENCE`, an absolute folder outside the repository, gets the
+dump of W4 and `expected-writes.json`. The run ends with the result line of the conformance
+group V:
 `CONFORMANCE PASS bridgeCommit=<commit> pluginBuild=<build>`, or
 `CONFORMANCE FAIL bridgeCommit=<commit> pluginBuild=<build> failed=<count>`. The commit and
 the build come from a manifest of the run. `E2E_UPDATE_GOLDEN=1 bun run e2e` writes
