@@ -30,6 +30,14 @@
  * Group L checks the capture manifest of save_screenshots against the file on
  * disk, and removes the capture and its manifest file.
  *
+ * Group P (BR-9) builds paints under the frame `mcp-e2e/paints`, with a
+ * variable collection of the same name, and clears them with clear_paints:
+ * one fill, a bound fill, two fills, a text fill, a stroke, and the fill of an
+ * instance child. It checks `previous` against a dump made before the write,
+ * that a dump made after it differs only in the cleared lists, that the
+ * variable and the instance stay, and that a batch with a group writes
+ * nothing. Its dumps go to one folder of the run, which the group removes.
+ *
  * Group V builds the dump-conformance fixture (BR-7), dumps it, and compares
  * the normalised dumps with the golden dump in `scripts/golden/`. Some parts
  * of the fixture need the test helper `e2e_fixture`, a plugin command that no
@@ -2664,6 +2672,457 @@ const runCaptureSteps = async (): Promise<void> => {
 };
 
 // ---------------------------------------------------------------------------
+// P Paint clearing (BR-9)
+// ---------------------------------------------------------------------------
+
+/** The name of the top-level frame and of the variable collection of group P. */
+const PAINTS = `${PREFIX}paints`;
+
+/** The paint lists clear_paints empties. */
+type PaintTarget = "fills" | "strokes";
+
+/** The IDs of the group P fixture. */
+type PaintFixture = {
+  rootId: string;
+  collectionId: string;
+  variableId: string;
+  /** 1: one solid fill. */
+  solidId: string;
+  /** 2: a solid fill bound to a COLOR variable. */
+  boundId: string;
+  /** 3: two fills. */
+  twoPaintsId: string;
+  /** 4: a text node with a fill. */
+  textId: string;
+  /** 5: a fill and a stroke. */
+  strokedId: string;
+  /** 6: an instance, and its child with a fill. */
+  componentId: string;
+  instanceId: string;
+  sublayerId: string;
+  /** 7: a group, which carries no fills. */
+  groupId: string;
+  /** 8: the fill the refused batch keeps. */
+  keptId: string;
+};
+
+const paints: Partial<PaintFixture> = {};
+
+/**
+ * Reads an ID of the group P fixture.
+ * @param key - The fixture key.
+ * @returns The ID.
+ */
+const paintPart = (key: keyof PaintFixture): string => {
+  const value = paints[key];
+  check(value !== undefined, `this step needs ${key} from P1, which did not produce it`);
+  return value as string;
+};
+
+/**
+ * Each node of a dumped tree by its ID, without its children.
+ * @param tree - The dumped root.
+ * @returns The nodes.
+ */
+const nodesById = (tree: unknown): Map<string, Json> => {
+  const byId = new Map<string, Json>();
+  for (const node of findNodes(tree, () => true)) {
+    const { children: _children, ...rest } = node;
+    byId.set(readString(rest.id, "the id of a dumped node"), rest);
+  }
+  return byId;
+};
+
+/**
+ * Reads one paint list of a node. A missing field is the empty list.
+ * @param node - A node in the read form or in the dump form.
+ * @param target - The paint list.
+ * @returns The paints.
+ */
+const paintList = (node: Json, target: PaintTarget): unknown[] => {
+  const list = (node.styles as Json | undefined)?.[target];
+  return list === undefined ? [] : readArray(list, `${String(node.id)} ${target}`);
+};
+
+/**
+ * A dumped node without the fields clear_paints may change: the paint list,
+ * its entry of `boundVariables`, and `boundVariables` when that leaves it empty.
+ * @param node - The dumped node.
+ * @param target - The paint list.
+ * @returns The copy.
+ */
+const withoutPaintList = (node: Json, target: PaintTarget): Json => {
+  const copy = JSON.parse(JSON.stringify(node)) as Json;
+  const styles = copy.styles as Json | undefined;
+  if (styles) delete styles[target];
+  const bound = copy.boundVariables as Json | undefined;
+  if (bound) {
+    delete bound[target];
+    if (Object.keys(bound).length === 0) delete copy.boundVariables;
+  }
+  return copy;
+};
+
+/**
+ * Builds a fixture of paints, clears them, and checks the answer against a
+ * dump made before the write, and the file against a dump made after it. The
+ * dumps land in one folder of this run under the output root, which the group
+ * removes again.
+ */
+const runPaintSteps = async (): Promise<void> => {
+  const runFolder = `mcp-e2e-paints-${Date.now()}`;
+  const runPath = join(OUTPUT_DIR, runFolder);
+  check(!existsSync(runPath), `${runPath} exists already; remove it, then run again`);
+
+  const dumpRoot = async (name: string): Promise<Map<string, Json>> => {
+    const manifest = await okRecord("dump_nodes", {
+      nodeIds: [paintPart("rootId")],
+      outputPath: `${runFolder}/${name}`,
+    });
+    const { bytes } = await readDumpFile(manifest, paintPart("rootId"));
+    return nodesById(JSON.parse(bytes.toString("utf8")));
+  };
+  const readVariable = async (): Promise<Json> => {
+    const defs = await okRecord("get_variable_defs");
+    const collections = readRecords(defs.collections, "get_variable_defs.collections");
+    const collection = itemById(collections, paintPart("collectionId"), "the collections");
+    const variables = readRecords(collection.variables, `${PAINTS} variables`);
+    return itemById(variables, paintPart("variableId"), `${PAINTS} variables`);
+  };
+
+  let before = new Map<string, Json>();
+  let after = new Map<string, Json>();
+  let variableBefore: Json = {};
+  let mainBefore = "";
+
+  try {
+    const built = await step("P1 build the paint fixture, read it, and dump it", async () => {
+      paints.rootId = await created("create_frame", {
+        name: PAINTS,
+        parentId: need("pageId"),
+        x: 0,
+        y: 1200,
+        width: 1000,
+        height: 160,
+      });
+      const root = paints.rootId;
+      const frame = (name: string, x: number, fillHex?: string): Promise<string> =>
+        created("create_frame", {
+          name: `${PAINTS}/${name}`,
+          parentId: root,
+          x,
+          y: 40,
+          width: 80,
+          height: 80,
+          ...(fillHex === undefined ? {} : { fillHex }),
+        });
+
+      paints.collectionId = readString(
+        (await okRecord("create_variable_collection", { name: PAINTS })).id,
+        "create_variable_collection.id"
+      );
+      const variables = allWritten(
+        await ok("create_variables", {
+          collectionId: paints.collectionId,
+          variables: [{ name: `${PAINTS}/brand`, type: "COLOR", value: "#3366FF" }],
+        }),
+        "create_variables",
+        1
+      );
+      paints.variableId = readString(variables[0].id, "create_variables results[0].id");
+
+      paints.solidId = await frame("solid", 40, "#FF0000");
+
+      paints.boundId = await frame("bound", 140, "#00FF00");
+      allWritten(
+        await ok("bind_variables", {
+          bindings: [
+            {
+              nodeId: paints.boundId,
+              field: "fills",
+              variableId: paints.variableId,
+              paintIndex: 0,
+            },
+          ],
+        }),
+        "bind_variables",
+        1
+      );
+
+      paints.twoPaintsId = await frame("two-paints", 240);
+      await ok("set_solid_fill", { nodeId: paints.twoPaintsId, hex: "#0000FF" });
+      await fixtureOp("addPaint", { nodeId: paints.twoPaintsId, target: "fills", hex: "#00AA55" });
+
+      paints.textId = await created("create_text", {
+        name: `${PAINTS}/text`,
+        parentId: root,
+        characters: "Paint",
+        fontFamily: "Inter",
+        fontStyle: "Regular",
+        fontSize: 14,
+        fillHex: "#11151C",
+        x: 340,
+        y: 40,
+      });
+
+      paints.strokedId = await frame("stroked", 440, "#FFAA00");
+      await ok("set_solid_fill", { nodeId: paints.strokedId, hex: "#222222", target: "stroke" });
+
+      paints.componentId = await created(
+        "create_component",
+        { name: `${PAINTS}/component`, parentId: root, x: 540, y: 40, width: 80, height: 80 },
+        "id"
+      );
+      await created("create_frame", {
+        name: `${PAINTS}/component-child`,
+        parentId: paints.componentId,
+        x: 16,
+        y: 16,
+        width: 48,
+        height: 48,
+        fillHex: "#D92D20",
+      });
+      paints.instanceId = await created(
+        "create_instance",
+        { componentId: paints.componentId, parentId: root, x: 640, y: 40 },
+        "id"
+      );
+      const instance = await okRecord("get_node", { nodeId: paints.instanceId });
+      const sublayers = readRecords(instance.children, "the children of the instance");
+      check(sublayers.length === 1, `the instance has ${sublayers.length} children, expected 1`);
+      paints.sublayerId = readString(sublayers[0].id, "the ID of the instance child");
+      check(
+        paints.sublayerId.startsWith(`I${paints.instanceId};`),
+        `the instance child has the ID ${paints.sublayerId}, expected I${paints.instanceId};<child>`
+      );
+
+      const member = await created("create_shape", {
+        shapeType: "RECTANGLE",
+        name: `${PAINTS}/group-member`,
+        parentId: root,
+        x: 740,
+        y: 40,
+        width: 40,
+        height: 40,
+        fillHex: "#888888",
+      });
+      paints.groupId = await created("group_nodes", {
+        nodeIds: [member],
+        name: `${PAINTS}/group`,
+      });
+
+      paints.keptId = await frame("kept", 840, "#00AAFF");
+
+      const counts: Array<[keyof PaintFixture, PaintTarget, number]> = [
+        ["solidId", "fills", 1],
+        ["boundId", "fills", 1],
+        ["twoPaintsId", "fills", 2],
+        ["textId", "fills", 1],
+        ["strokedId", "fills", 1],
+        ["strokedId", "strokes", 1],
+        ["sublayerId", "fills", 1],
+        ["groupId", "fills", 0],
+        ["keptId", "fills", 1],
+      ];
+      for (const [key, target, count] of counts) {
+        const read = await okRecord("get_node", { nodeId: paintPart(key) });
+        const list = paintList(read, target);
+        check(list.length === count, `${key} has ${list.length} ${target}, expected ${count}`);
+      }
+      const bound = await okRecord("get_node", { nodeId: paints.boundId });
+      const fillBindings = readArray(
+        readRecord(bound.boundVariables, "the boundVariables of the bound frame").fills,
+        "boundVariables.fills"
+      );
+      check(
+        fillBindings.includes(paints.variableId),
+        `the bound frame binds the fills to ${show(fillBindings)}, expected ${paints.variableId}`
+      );
+      const group = await okRecord("get_node", { nodeId: paints.groupId });
+      check(group.type === "GROUP", `the group is a ${show(group.type)} node`);
+
+      variableBefore = await readVariable();
+      const main = readRecord(
+        (await okRecord("get_instance", { nodeId: paints.instanceId })).mainComponent,
+        "get_instance.mainComponent"
+      );
+      mainBefore = readString(main.id, "get_instance.mainComponent.id");
+      check(
+        mainBefore === paints.componentId,
+        `the instance follows ${mainBefore}, expected ${paints.componentId}`
+      );
+
+      before = await dumpRoot("before");
+    });
+    if (!built) return;
+
+    await step("P2 clear_paints empties the fills and returns the paints it removed", async () => {
+      const keys = ["solidId", "boundId", "twoPaintsId", "textId", "sublayerId"] as const;
+      const nodeIds = keys.map(paintPart);
+      const results = allWritten(
+        await ok("clear_paints", { nodeIds, target: "fills" }),
+        "clear_paints",
+        nodeIds.length
+      );
+      results.forEach((result, index) => {
+        const nodeId = nodeIds[index];
+        const at = `clear_paints results[${index}]`;
+        check(result.index === index, `${at}.index is ${show(result.index)}`);
+        check(result.nodeId === nodeId, `${at} names ${show(result.nodeId)}, expected ${nodeId}`);
+        check(result.target === "fills", `${at}.target is ${show(result.target)}`);
+        check(result.applied === true, `${at}.applied is ${show(result.applied)}`);
+        check(
+          result.previousStyleId === null,
+          `${at}.previousStyleId is ${show(result.previousStyleId)}`
+        );
+        const dumped = before.get(nodeId);
+        check(dumped !== undefined, `the before dump holds no node ${nodeId}`);
+        const expected = paintList(dumped as Json, "fills");
+        const difference = firstDifference(result.previous, expected);
+        check(difference === null, `${at}.previous and the before dump differ at ${difference}`);
+        check(
+          result.previousCount === expected.length,
+          `${at}.previousCount is ${show(result.previousCount)}, expected ${expected.length}`
+        );
+      });
+
+      const lengths = results.map(
+        (result, index) =>
+          readArray(result.previous, `clear_paints results[${index}].previous`).length
+      );
+      check(
+        lengths.join() === "1,1,2,1,1",
+        `previous holds [${lengths.join(", ")}] paints, expected [1, 1, 2, 1, 1]`
+      );
+      const boundPaint = readRecords(results[1].previous, "the previous of the bound frame")[0];
+      const paintBinding = readRecord(boundPaint.boundVariables, "the boundVariables of the paint");
+      check(
+        paintBinding.color === paintPart("variableId"),
+        `the previous paint of the bound frame binds ${show(paintBinding)}, expected color ${paintPart("variableId")}`
+      );
+    });
+
+    await step("P3 clear_paints empties the strokes and keeps the fill", async () => {
+      const nodeId = paintPart("strokedId");
+      const [result] = allWritten(
+        await ok("clear_paints", { nodeIds: [nodeId], target: "strokes" }),
+        "clear_paints",
+        1
+      );
+      check(result.target === "strokes", `results[0].target is ${show(result.target)}`);
+      const expected = paintList(before.get(nodeId) ?? {}, "strokes");
+      check(expected.length === 1, `the before dump holds ${expected.length} strokes, expected 1`);
+      const difference = firstDifference(result.previous, expected);
+      check(difference === null, `previous and the before dump differ at ${difference}`);
+      check(result.previousCount === 1, `previousCount is ${show(result.previousCount)}`);
+
+      const read = await okRecord("get_node", { nodeId });
+      const fills = paintList(read, "fills");
+      check(fills.length === 1, `the stroked frame has ${fills.length} fills after the write`);
+    });
+
+    await step("P4 get_node shows no target field on each cleared node", async () => {
+      const cleared: Array<[keyof PaintFixture, PaintTarget]> = [
+        ["solidId", "fills"],
+        ["boundId", "fills"],
+        ["twoPaintsId", "fills"],
+        ["textId", "fills"],
+        ["sublayerId", "fills"],
+        ["strokedId", "strokes"],
+      ];
+      for (const [key, target] of cleared) {
+        const read = await okRecord("get_node", { nodeId: paintPart(key) });
+        const field = (read.styles as Json | undefined)?.[target];
+        check(field === undefined, `get_node of ${key} shows ${target} ${show(field)}`);
+      }
+    });
+
+    await step("P5 the after dump differs only in the cleared paint lists", async () => {
+      after = await dumpRoot("after");
+      const ids = (map: Map<string, Json>): string => [...map.keys()].sort().join(", ");
+      check(
+        ids(before) === ids(after),
+        `the dumps hold different nodes: [${ids(before)}] against [${ids(after)}]`
+      );
+      const targets = new Map<string, PaintTarget>([
+        [paintPart("solidId"), "fills"],
+        [paintPart("boundId"), "fills"],
+        [paintPart("twoPaintsId"), "fills"],
+        [paintPart("textId"), "fills"],
+        [paintPart("sublayerId"), "fills"],
+        [paintPart("strokedId"), "strokes"],
+      ]);
+      for (const [id, node] of before) {
+        const target = targets.get(id);
+        const left = target ? withoutPaintList(node, target) : node;
+        const right = target ? withoutPaintList(after.get(id) as Json, target) : after.get(id);
+        const difference = firstDifference(left, right);
+        check(difference === null, `the dumps of ${id} differ at ${difference}`);
+        if (target) {
+          const list = paintList(after.get(id) as Json, target);
+          check(list.length === 0, `the after dump shows ${list.length} ${target} on ${id}`);
+        }
+      }
+    });
+
+    await step("P6 the binding is gone and the variable is unchanged", async () => {
+      const read = await okRecord("get_node", { nodeId: paintPart("boundId") });
+      const fills = (read.boundVariables as Json | undefined)?.fills;
+      check(fills === undefined, `the bound frame still binds the fills to ${show(fills)}`);
+      const difference = firstDifference(variableBefore, await readVariable());
+      check(difference === null, `the variable changed at ${difference}`);
+    });
+
+    await step("P7 the instance stays an instance and carries the override", async () => {
+      const instanceId = paintPart("instanceId");
+      const read = await okRecord("get_node", { nodeId: instanceId });
+      check(read.type === "INSTANCE", `the instance is now a ${show(read.type)} node`);
+      const instance = await okRecord("get_instance", { nodeId: instanceId });
+      const main = readRecord(instance.mainComponent, "get_instance.mainComponent");
+      check(
+        main.id === mainBefore,
+        `the instance follows ${show(main.id)}, expected ${mainBefore}`
+      );
+      const overrides = readRecords(instance.overrides, "get_instance.overrides");
+      const override = overrides.find((entry) => entry.id === paintPart("sublayerId"));
+      check(
+        override !== undefined &&
+          readArray(override.overriddenFields, "overriddenFields").includes("fills"),
+        `get_instance shows no fills override on ${paintPart("sublayerId")}: ${show(overrides)}`
+      );
+      const dumped = after.get(instanceId);
+      check(dumped !== undefined, `the after dump holds no node ${instanceId}`);
+      check(
+        (dumped as Json).type === "INSTANCE",
+        `the after dump shows ${show((dumped as Json).type)}`
+      );
+      check(
+        !("detachedInfo" in (dumped as Json)),
+        `the after dump shows detachedInfo ${show((dumped as Json).detachedInfo)}`
+      );
+      check(
+        (dumped as Json).mainComponentId === mainBefore,
+        `the after dump shows mainComponentId ${show((dumped as Json).mainComponentId)}`
+      );
+    });
+
+    await step("P8 clear_paints refuses a batch with a group and writes nothing", async () => {
+      await rejects("clear_paints", { nodeIds: [paintPart("keptId"), paintPart("groupId")] }, [
+        "nodeIds[1]",
+        paintPart("groupId"),
+        "wrote nothing",
+      ]);
+      const read = await okRecord("get_node", { nodeId: paintPart("keptId") });
+      const fills = paintList(read, "fills");
+      check(fills.length === 1, `the kept frame has ${fills.length} fills after the refusal`);
+    });
+  } finally {
+    // Only the folder of this run, which the run made.
+    await rm(runPath, { recursive: true, force: true });
+  }
+};
+
+// ---------------------------------------------------------------------------
 // V Dump conformance
 // ---------------------------------------------------------------------------
 
@@ -3473,6 +3932,7 @@ const runScenario = async (): Promise<void> => {
   await runDumpSteps();
   await runAuditorSteps();
   await runCaptureSteps();
+  await runPaintSteps();
   await runConformanceSteps();
 };
 
