@@ -113,6 +113,22 @@ process, reads the identity again, fails if the epoch, the plugin build, or the 
 start changed, gives each file its final name, and writes `manifest.json`. The result is
 the manifest only. A failure removes each file of the call.
 
+The leader keeps a write journal (`server/src/journal.ts`, BR-8). `Bridge.sendWithParams`
+records, after it resolves the connection: the own calls of the leader and the `/rpc` calls
+of a follower both pass there, so no write path skips it. Each request that reaches a plugin
+connection and is not on `READ_ONLY_REQUESTS` adds one entry when the plugin answers or the
+wait ends (a time-out, a disconnect): `seq`, `timestamp`, `fileKey`, `epoch`, `auditor`,
+`tool`, `nodeIds`, `params`, `response` (`{ data }` or `{ error }`), `prevHash`, `hash`. A
+request that reaches no connection adds none. `hash` is the SHA-256 of `canonicalJson` of
+the entry without `hash`; the first `prevHash` is the genesis hash, 64 times `0`. The file
+is JSON Lines, `FIGMA_BRIDGE_JOURNAL_FILE` or `write-journal.jsonl` in the state folder of
+the install. Only the leader opens it: it loads and checks the file in the `listen`
+callback, appends with `fsync`, and keeps the count and the head in memory. A failed check
+or a failed append makes the journal broken: the leader logs it one time, reports it in the
+`journal` field of `/ping` and `list_files`, refuses each write before the plugin sees it,
+and serves each read. It never truncates, repairs, or rewrites the file. The journal holds
+the params and the responses of each write: it is private data of the owner.
+
 ## 4. File map
 
 | File                                       | Purpose                                                                                                                |
@@ -139,6 +155,7 @@ the manifest only. A failure removes each file of the call.
 | `server/src/evidence.ts`                   | Canonical JSON, SHA-256, `EvidenceSet` (the `.partial` write), the manifest envelope.                                  |
 | `server/src/rpc-token.ts`                  | The install token: the path of its file, its creation, its checks. Node built-ins only.                                |
 | `server/src/role.ts`                       | The auditor role: `AUDITOR_TOOLS`, the internal commands, the role parse, the wrapper.                                 |
+| `server/src/journal.ts`                    | The write journal: `READ_ONLY_REQUESTS`, the path, the entry hash, the load check, the append.                         |
 | `server/src/captures.ts`                   | `save_screenshots`: the plan, the captures, the manifest. The image blocks of `get_screenshot`.                        |
 | `server/src/image-size.ts`                 | The pixel size of a PNG or a JPG, read from its header. Imports nothing.                                               |
 | `server/src/identity.ts`                   | File selection and the identity of one file, for the manifests. Imports types only.                                    |
@@ -234,6 +251,11 @@ mimeType }`), never base64 in text. A capture that is large or that serves as ev
     `setRangeFill`, `getSkipInvisibleInstanceChildren`, `setSkipInvisibleInstanceChildren`, or
     `setFlowStartingPoints`. It refuses a node off the page `MCP E2E` or under a top-level node
     whose name does not start with `mcp-e2e/`, and a page other than `MCP E2E`.
+19. A new write tool records itself in the write journal and needs no code for it: each
+    request type that is not on `READ_ONLY_REQUESTS` in `server/src/journal.ts` is recorded.
+    A new read tool joins `READ_ONLY_REQUESTS` only on purpose: change the list and its test
+    (`server/test/write-journal.test.ts`, which writes the names out) together. A read that is
+    not on the list is recorded as a write, which is the safe failure.
 
 ## 7. Commands
 
