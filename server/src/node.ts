@@ -1,5 +1,7 @@
 import { Leader, leaderUrl } from "./leader.js";
 import { Follower } from "./follower.js";
+import { JOURNAL_CHUNK_REQUEST } from "./journal.js";
+import { AUDITOR_ROLE } from "./role.js";
 import type { ProcessRole } from "./role.js";
 import { Role } from "./types.js";
 import type { BridgeResponse, IdentityReport } from "./types.js";
@@ -15,11 +17,12 @@ export class Node {
 
   /**
    * @param port - The bridge port.
-   * @param processRole - The `FIGMA_BRIDGE_ROLE` of this process. The follower marks each request with it.
+   * @param processRole - The `FIGMA_BRIDGE_ROLE` of this process. The follower marks each
+   *   request with it, and the write journal of a leader records it with each own call.
    */
   constructor(
     private port: number,
-    processRole: ProcessRole = null
+    private processRole: ProcessRole = null
   ) {
     this.follower = new Follower(leaderUrl(port), processRole);
   }
@@ -50,7 +53,16 @@ export class Node {
     fileKey?: string
   ): Promise<BridgeResponse> {
     if (this._role === Role.Leader && this.leader) {
-      return this.leader.getBridge().sendWithParams(requestType, nodeIds, params, fileKey);
+      // The leader reads its own journal: the chunk command never reaches the plugin.
+      if (requestType === JOURNAL_CHUNK_REQUEST) {
+        const leader = this.leader;
+        return new Promise((resolve) => {
+          resolve({ type: requestType, requestId: "", data: leader.journalChunk(params) });
+        });
+      }
+      return this.leader
+        .getBridge()
+        .sendWithParams(requestType, nodeIds, params, fileKey, this.processRole === AUDITOR_ROLE);
     }
     return this.follower.sendWithParams(requestType, nodeIds, params, fileKey);
   }

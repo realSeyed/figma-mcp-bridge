@@ -10,6 +10,7 @@ The scripts in this folder read the evidence that the bridge writes to disk — 
 | `completeness.py`  | The variant count of a set against `list_components`; page and nested completeness.                               |
 | `assert.py`        | The checks runner: evaluates the checks file of a milestone against a dump.                                       |
 | `diff_dumps.py`    | Compares two dumps byte for byte, by node, or field by field (baseline against a dump).                           |
+| `journal_check.py` | Calculates the hash chain of a `dump_journal` folder again, and compares the new entries with expected writes.    |
 | `tile.py`          | Cuts a PNG capture into overlapping tiles of about 1,000 pixels, never scaled.                                    |
 | `render_report.py` | Renders the audit report from script outputs only: acceptance table, surfaces, errors, defects, anchors, verdict. |
 | `run_audit.py`     | Reproduces each figure of an audit package offline, with the toolset at the recorded commit.                      |
@@ -34,7 +35,7 @@ Each script that reads a dump takes either format and gives the same node model:
 | `baseline`   | One JSON file with a `get_node` result, saved before `dump_nodes` existed. It holds no hidden content. A cut read marks a node with `childCount`.                                     | A file with no `manifest.json` beside it.                                                                                                                             |
 | `dump_nodes` | A folder with `manifest.json` and one canonical file for each root, `12:34` as `12_34.json` (see "Dumps" in the main README). It holds the hidden content and the fields a dump adds. | The folder, or a file that the `manifest.json` beside it lists. A folder of more than one root needs `--root`; `completeness.py` and `instanced-sets` read each root. |
 
-- **The manifest check.** A script reads a `dump_nodes` file only through its manifest: it reads the bytes one time, compares the size and the SHA-256 with the manifest, and parses those bytes. A mismatch stops the script with exit code 2. `auditlib/manifest.py` also resolves the manifest of `save_screenshots`, whose paths are relative to the output root.
+- **The manifest check.** A script reads a `dump_nodes` file only through its manifest: it reads the bytes one time, compares the size and the SHA-256 with the manifest, and parses those bytes. A mismatch stops the script with exit code 2. `auditlib/manifest.py` also resolves the manifest of `save_screenshots`, whose paths are relative to the output root, and the manifest of `dump_journal`, which lists one file, `journal.json`, of the kind `journal`.
 - **A dump file without its manifest.** A file with no manifest beside it is read as a baseline, and is refused when it holds content that only `dump_nodes` writes: a hidden node below the root, a hidden paint or effect, an added field, or the binding of a paint. Read the dump through its folder. For a baseline file in an older read form that keeps hidden nodes, give `--format baseline`.
 - **`includeHidden: false`.** Such a dump is not audit evidence. The scripts compute the visible figures, and report the hidden content as not dumped.
 
@@ -80,7 +81,7 @@ Two deliberate exceptions:
 
 ## The scripts
 
-Each script exits with 0 when it ran, 1 when one of its checks failed (`completeness.py`, `assert.py`), when the two sides differ (`diff_dumps.py`), when the verdict is `FAIL` (`render_report.py`), or when a figure differs from the recorded one (`run_audit.py`), and 2 when an input is missing, refused, or does not match its manifest.
+Each script exits with 0 when it ran, 1 when one of its checks failed (`completeness.py`, `assert.py`, `journal_check.py`), when the two sides differ (`diff_dumps.py`), when the verdict is `FAIL` (`render_report.py`), or when a figure differs from the recorded one (`run_audit.py`), and 2 when an input is missing, refused, or does not match its manifest.
 
 ### census.py
 
@@ -190,6 +191,56 @@ python tools/audit/diff_dumps.py --mode fields <baseline file> <dump B> [--root-
 - **`fields`** compares a package written before T-1 (side A, the baseline format) with `dump_nodes` output (side B, the same root as A unless `--root-b` says otherwise), field by field. It compares the parsed values, so key order and whitespace play no part. Both sides are reduced to the visible projection first, so the content that the old format cannot carry is ignored: a hidden node with its subtree, a hidden paint or effect, the fields `mainComponentId`, `componentSetId`, `detachedInfo`, `reactions`, `flowStartingPoints`, and `styledTextSegments`, and the `boundVariables` of a paint. The list is in the `ignored` key of the output.
 
 It writes `<label>.diff.json` and `<label>.diff.txt` (default label `diff_<mode>`). Exit codes: 0 when the sides are equal, 1 when they differ, 2 when an input is wrong or does not match its manifest.
+
+### journal_check.py
+
+```bash
+python tools/audit/journal_check.py <journal dump folder, or its manifest.json> [--after <hash>] [--expected <expected-writes.json>] [--label <name>] --outputs <folder>
+```
+
+The input is the folder of one `dump_journal` call, or its `manifest.json` (see "The write journal" in the main README). The script reads `journal.json` only through the manifest: the bytes one time, the size and the SHA-256 compared with the manifest. A mismatch stops it with exit code 2. It then calculates the chain again with `canonical_json` of `auditlib/manifest.py`, from the file alone, and prints one `PASS` or `FAIL` line for each check:
+
+- **`genesis`**: the `genesisHash` of the file is 64 times `0`.
+- **`seq`**: the entries run from `seq` 1 with no gap.
+- **`prevHash`**: the `prevHash` of the first entry is the genesis hash, and each later one is the `hash` of the entry before.
+- **`hash`**: the `hash` of each entry is the SHA-256 of its canonical JSON without `hash`.
+- **`entryCount`, `files.entryCount`, `head`**: the count of entries, and the calculated head (the `hash` of the last entry, the genesis hash for an empty journal), equal the figures of the manifest.
+
+A `FAIL` line for an entry names its `seq` and its position, and gives the observed and the expected value. A value in a line is cut to 120 characters. A broken entry does not stop the other checks.
+
+**The new entries.** `--after <hash>` names the head before the writes: the genesis hash, or the `hash` of an entry. The entries after it are the new entries. Without `--after`, the script takes `afterHead` of the expected file. With neither, it checks the chain only. An `--after` value that is not 64 hexadecimal characters is an input error (exit code 2); a hash that is in no entry gives the `FAIL` line `after` (exit code 1).
+
+**The expected writes.** `--expected` compares the new entries with a list, one for one, in order, and in number:
+
+```json
+{
+  "afterHead": "<the head before the writes>",
+  "writes": [
+    { "tool": "create_frame", "fileKey": "<key>", "ok": true },
+    { "tool": "clear_paints", "fileKey": "<key>", "ok": false }
+  ]
+}
+```
+
+| Key of an item | Required | The check                                                                     |
+| -------------- | -------- | ----------------------------------------------------------------------------- |
+| `tool`         | yes      | Equals `tool` of the entry.                                                   |
+| `fileKey`      | no       | Equals `fileKey` of the entry.                                                |
+| `nodeIds`      | no       | Equals `nodeIds` of the entry.                                                |
+| `params`       | no       | Each given key equals the same key of `params` of the entry (a subset match). |
+| `ok`           | no       | `true`: the response has `data`. `false`: the response has `error`.           |
+| `response`     | no       | Equals the response of the entry, compared as canonical JSON.                 |
+
+The values are compared as canonical JSON, so key order and `2` against `2.0` play no part. An unknown key, an item without `tool`, a `writes` that is not a list, or an `afterHead` that is not a hash is an input error (exit code 2): the error lists each bad item as `writes[<index>]: <cause>`, and nothing is read or written before it. The e2e script writes such a file when `E2E_JOURNAL_EVIDENCE` is set: `afterHead` is the head before the first group, and `writes` are the writes that the run kept, so a run checks its own journal with `--expected <folder>/expected-writes.json` and the dump in `<folder>/journal`. Any other list of the owner's plan has the same form.
+
+**The outputs.** `<label>.journal_check.json` and `<label>.journal_check.txt` under `--outputs`; the default label is `journal_check`. The text holds the lines that the script prints. The JSON holds the result, the entry count, the head, the path, the SHA-256 and the size of the journal file, the `--after` hash, the number of new entries, and every check. It holds no entry: the journal is private data of the owner. The last line is the result line:
+
+```text
+JOURNAL_CHECK PASS entries=<n> head=<hash>
+JOURNAL_CHECK FAIL entries=<n> head=<hash> failed=<count>
+```
+
+`entries` is the number of entries in the file, `head` is the calculated head, and `failed` is the number of `FAIL` lines. Exit codes: 0 when each check passes, 1 when a check fails, 2 when an input is wrong, a file does not match its manifest, or the outputs folder lies in an evidence folder.
 
 ### tile.py
 
@@ -467,4 +518,4 @@ The earlier scripts kept their known answers in another shape. When you write th
 python -m unittest discover -s tools/audit/tests -t .
 ```
 
-Run it from the repository root. The tests need no Figma and no fixtures folder. Their data is synthetic: the golden dump of the conformance fixture, and small dumps written by hand in both formats in `tests/data/`. The package of the report and re-run tests is built at run time from the golden dump, with a PNG capture that the test writes (`tests/package_helpers.py`). Each test writes its `dump_nodes` folders and its PNG files at run time, as the bridge does, and works out its expected figures by hand.
+Run it from the repository root. The tests need no Figma and no fixtures folder. Their data is synthetic: the golden dump of the conformance fixture, and small dumps written by hand in both formats in `tests/data/`. `tests/data/journal_entries.json` is a sample journal of ten synthetic entries whose hashes the built bridge code made; `server/test/journal-sample.test.ts` calculates them again with `entryHash`, and `tests/test_journal_sample.py` with `canonical_json`, so both languages agree on numbers, key order, and escapes. The package of the report and re-run tests is built at run time from the golden dump, with a PNG capture that the test writes (`tests/package_helpers.py`). Each test writes its `dump_nodes` folders and its PNG files at run time, as the bridge does, and works out its expected figures by hand.

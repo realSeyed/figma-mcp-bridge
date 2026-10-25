@@ -15,7 +15,9 @@ export const SERVER_ENTRY = join(SERVER_ROOT, "dist", "index.js");
 const STRIPPED_VARIABLES = [
   "FIGMA_BRIDGE_OUTPUT_ROOT",
   "FIGMA_BRIDGE_TOKEN_FILE",
+  "FIGMA_BRIDGE_JOURNAL_FILE",
   "FIGMA_BRIDGE_DUMP_CHUNK_NODES",
+  "FIGMA_BRIDGE_JOURNAL_CHUNK_ENTRIES",
   "FIGMA_BRIDGE_ROLE",
 ];
 
@@ -31,10 +33,12 @@ export interface ServerOptions {
   /**
    * Changes to the environment of this test process. A value of `undefined`
    * removes the variable. `FIGMA_BRIDGE_OUTPUT_ROOT`,
-   * `FIGMA_BRIDGE_TOKEN_FILE`, `FIGMA_BRIDGE_DUMP_CHUNK_NODES`, and
-   * `FIGMA_BRIDGE_ROLE` are removed unless they are given here, so a variable of the developer does not leak
-   * into a test.
-   * `FIGMA_BRIDGE_TOKEN_FILE` is required: no test reads the real token file.
+   * `FIGMA_BRIDGE_TOKEN_FILE`, `FIGMA_BRIDGE_JOURNAL_FILE`,
+   * `FIGMA_BRIDGE_DUMP_CHUNK_NODES`, `FIGMA_BRIDGE_JOURNAL_CHUNK_ENTRIES`, and
+   * `FIGMA_BRIDGE_ROLE` are removed unless
+   * they are given here, so a variable of the developer does not leak into a test.
+   * `FIGMA_BRIDGE_TOKEN_FILE` and `FIGMA_BRIDGE_JOURNAL_FILE` are required: no
+   * test reads the real token file or the real write journal.
    */
   env?: Record<string, string | undefined>;
 }
@@ -170,6 +174,11 @@ export function serverEnv(options: Pick<ServerOptions, "port" | "env">): Record<
   if (!env.FIGMA_BRIDGE_TOKEN_FILE) {
     throw new Error(
       "A test server needs FIGMA_BRIDGE_TOKEN_FILE: no test reads the real token file."
+    );
+  }
+  if (!env.FIGMA_BRIDGE_JOURNAL_FILE) {
+    throw new Error(
+      "A test server needs FIGMA_BRIDGE_JOURNAL_FILE: no test reads or writes the real write journal."
     );
   }
   return env;

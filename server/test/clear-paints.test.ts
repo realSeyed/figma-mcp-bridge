@@ -192,7 +192,7 @@ describe("the auditor role", () => {
 
       const names = await auditor.listTools();
 
-      expect(names).toHaveLength(15);
+      expect(names).toHaveLength(16);
       expect(names).not.toContain("clear_paints");
     },
     TIMEOUT_MS

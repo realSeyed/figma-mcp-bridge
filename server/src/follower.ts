@@ -102,6 +102,9 @@ export class Follower {
       leaderCommit: leader.leaderCommit,
       leaderStartedAt: leader.leaderStartedAt,
       files: leader.files,
+      // A leader of an older build sends no journal.
+      journal:
+        typeof leader.journal === "object" && leader.journal !== null ? leader.journal : null,
     };
   }
 

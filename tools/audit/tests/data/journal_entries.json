@@ -1,0 +1,226 @@
+{
+  "genesisHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "entries": [
+    {
+      "seq": 1,
+      "timestamp": "2026-01-01T00:00:00.000Z",
+      "fileKey": "synthetic-file-key",
+      "epoch": 1,
+      "auditor": false,
+      "tool": "create_frame",
+      "nodeIds": null,
+      "params": {
+        "name": "synthetic frame",
+        "x": 0,
+        "y": -2.5,
+        "width": 0.1,
+        "height": 100
+      },
+      "response": {
+        "data": {
+          "id": "10:1"
+        }
+      },
+      "prevHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "hash": "8971762ff68c6e463fe5c22f9107d46778303d7707a30da9e27059dc74b3028c"
+    },
+    {
+      "seq": 2,
+      "timestamp": "2026-01-01T00:00:01.037Z",
+      "fileKey": "synthetic-file-key",
+      "epoch": 1,
+      "auditor": false,
+      "tool": "set_solid_fill",
+      "nodeIds": ["10:1"],
+      "params": {
+        "color": "#112233",
+        "opacity": 0.1
+      },
+      "response": {
+        "data": null
+      },
+      "prevHash": "8971762ff68c6e463fe5c22f9107d46778303d7707a30da9e27059dc74b3028c",
+      "hash": "c0a5103874400756ecfb83dd7eef41d5067f4ad4495b39e4e476244b5a53cec7"
+    },
+    {
+      "seq": 3,
+      "timestamp": "2026-01-01T00:00:02.074Z",
+      "fileKey": "synthetic-file-key",
+      "epoch": 1,
+      "auditor": false,
+      "tool": "set_node_properties",
+      "nodeIds": ["10:1", "10:2"],
+      "params": {
+        "": 1,
+        "😀": 2,
+        "Ａ": 3,
+        "b": 4,
+        "a": {
+          "z": [1e-7, 1e21],
+          "y": null
+        }
+      },
+      "response": {
+        "data": {
+          "ok": true
+        }
+      },
+      "prevHash": "c0a5103874400756ecfb83dd7eef41d5067f4ad4495b39e4e476244b5a53cec7",
+      "hash": "f018875836bb6fea74748e0573fee38fab66cd6a24adf43d883a68965cb13100"
+    },
+    {
+      "seq": 4,
+      "timestamp": "2026-01-01T00:00:03.111Z",
+      "fileKey": "synthetic-file-key",
+      "epoch": 1,
+      "auditor": true,
+      "tool": "set_text_content",
+      "nodeIds": ["10:3"],
+      "params": {
+        "text": "say \"hi\"\\there\nnew line\u0001 and \u001f end"
+      },
+      "response": {
+        "error": "font \"Synthetic Sans\" is missing\nLoad it first."
+      },
+      "prevHash": "f018875836bb6fea74748e0573fee38fab66cd6a24adf43d883a68965cb13100",
+      "hash": "e1108bb1c546208d12351b8c287f789d9d615dc21df03fd3e4070cc923e80e45"
+    },
+    {
+      "seq": 5,
+      "timestamp": "2026-01-01T00:00:04.148Z",
+      "fileKey": "synthetic-file-key",
+      "epoch": 2,
+      "auditor": false,
+      "tool": "clear_paints",
+      "nodeIds": ["10:1", "10:2", "10:3"],
+      "params": {
+        "target": "fills",
+        "nested": {
+          "list": [
+            {
+              "n": -2.5
+            },
+            {
+              "n": 0
+            },
+            {
+              "n": 1e21
+            }
+          ],
+          "empty": {}
+        }
+      },
+      "response": {
+        "data": {
+          "cleared": 3
+        }
+      },
+      "prevHash": "e1108bb1c546208d12351b8c287f789d9d615dc21df03fd3e4070cc923e80e45",
+      "hash": "c0cfe0685b7bd09e433d9e53203da48a0660b47f13ecf6e6dff0e71a32307562"
+    },
+    {
+      "seq": 6,
+      "timestamp": "2026-01-01T00:00:05.185Z",
+      "fileKey": "synthetic-file-key",
+      "epoch": 2,
+      "auditor": false,
+      "tool": "bind_variables",
+      "nodeIds": ["10:1"],
+      "params": {
+        "bindings": [
+          {
+            "field": "opacity",
+            "variableId": null
+          }
+        ]
+      },
+      "response": {
+        "data": null
+      },
+      "prevHash": "c0cfe0685b7bd09e433d9e53203da48a0660b47f13ecf6e6dff0e71a32307562",
+      "hash": "3b25ff05ae110c5defb38ce27dedd350c80bc30f82d77f42874542d67b1ce589"
+    },
+    {
+      "seq": 7,
+      "timestamp": "2026-01-01T00:00:06.222Z",
+      "fileKey": "synthetic-file-key",
+      "epoch": 2,
+      "auditor": false,
+      "tool": "set_effects",
+      "nodeIds": ["10:2"],
+      "params": {
+        "effects": [
+          {
+            "type": "DROP_SHADOW",
+            "radius": 4,
+            "offset": {
+              "x": 0,
+              "y": 1e-7
+            }
+          }
+        ]
+      },
+      "response": {
+        "data": {
+          "ok": true
+        }
+      },
+      "prevHash": "3b25ff05ae110c5defb38ce27dedd350c80bc30f82d77f42874542d67b1ce589",
+      "hash": "5532230455d7e89c49f31e5a0bd57cb49b5362707bde65f3c968e03baa0487bd"
+    },
+    {
+      "seq": 8,
+      "timestamp": "2026-01-01T00:00:07.259Z",
+      "fileKey": "synthetic-file-key",
+      "epoch": 2,
+      "auditor": false,
+      "tool": "delete_nodes",
+      "nodeIds": ["10:3"],
+      "params": {
+        "confirm": true
+      },
+      "response": {
+        "error": "the node 10:3 was not found"
+      },
+      "prevHash": "5532230455d7e89c49f31e5a0bd57cb49b5362707bde65f3c968e03baa0487bd",
+      "hash": "54b4f90ff95101b51ec32e80c1ad5d6bdf976173bf09bb464cc49f212895a3b3"
+    },
+    {
+      "seq": 9,
+      "timestamp": "2026-01-01T00:00:08.296Z",
+      "fileKey": "synthetic-file-key",
+      "epoch": 3,
+      "auditor": false,
+      "tool": "e2e_fixture",
+      "nodeIds": null,
+      "params": null,
+      "response": {
+        "data": null
+      },
+      "prevHash": "54b4f90ff95101b51ec32e80c1ad5d6bdf976173bf09bb464cc49f212895a3b3",
+      "hash": "68512135edbb9d591186ed1d686598a3892327b8096d42e3edc0a11d0f24cf88"
+    },
+    {
+      "seq": 10,
+      "timestamp": "2026-01-01T00:00:09.333Z",
+      "fileKey": "synthetic-file-key",
+      "epoch": 3,
+      "auditor": false,
+      "tool": "create_text",
+      "nodeIds": ["10:1"],
+      "params": {
+        "text": "€ ü 日本語 😀",
+        "fontSize": 16,
+        "lineHeight": -0.5
+      },
+      "response": {
+        "data": {
+          "id": "10:9",
+          "values": [0, 0.1, -2.5, 1e-7, 1e21]
+        }
+      },
+      "prevHash": "68512135edbb9d591186ed1d686598a3892327b8096d42e3edc0a11d0f24cf88",
+      "hash": "7c27355d119b6b3a68bea0d46477be29245189f74f29d8f7c68f8495b898252f"
+    }
+  ]
+}

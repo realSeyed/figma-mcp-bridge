@@ -42,14 +42,20 @@ export const AUDITOR_TOOLS: readonly string[] = [
   "dump_nodes",
   "save_screenshots",
   "scroll_and_zoom_into_view",
+  "dump_journal",
 ];
 
 /**
- * The internal commands behind `dump_nodes` and `save_screenshots`. A marked
- * request may use them. `get_screenshot` is also a tool, but the auditor
- * process does not register it. No command that can write is on this list.
+ * The internal commands behind `dump_nodes`, `save_screenshots` and
+ * `dump_journal`. A marked request may use them. `get_screenshot` is also a
+ * tool, but the auditor process does not register it. No command that can
+ * write is on this list.
  */
-export const AUDITOR_INTERNAL_COMMANDS: readonly string[] = ["dump_nodes_chunk", "get_screenshot"];
+export const AUDITOR_INTERNAL_COMMANDS: readonly string[] = [
+  "dump_nodes_chunk",
+  "get_screenshot",
+  "dump_journal_chunk",
+];
 
 export type ProcessRole = "auditor" | null;
 

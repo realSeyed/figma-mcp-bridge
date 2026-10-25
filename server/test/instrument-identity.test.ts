@@ -251,6 +251,7 @@ describe("the identity helper", () => {
     leaderCommit: "leading",
     leaderStartedAt: "2000-01-01T00:00:00.000Z",
     files,
+    journal: null,
   });
   const fileA: ConnectedFile = { fileKey: "a", fileName: "A", pluginBuild: "pb-a", epoch: 4 };
   const fileB: ConnectedFile = { fileKey: "b", fileName: "B", pluginBuild: "pb-b", epoch: 7 };
