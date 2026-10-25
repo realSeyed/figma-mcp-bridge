@@ -41,7 +41,7 @@ The plugin is named **Figma MCP Bridge (Fork)** and the bridge listens on **port
 | **Text styles** | `list_fonts`, `create_text_style`, `update_text_style`, `delete_text_style`, `apply_text_style`                                                                                                                                                                                              |
 | **Components**  | `list_components`, `get_component`, `get_instance`, `create_component`, `combine_as_variants`, `create_instance`, `swap_instance`, `detach_instance`, `add_component_property`, `edit_component_property`, `delete_component_property`, `bind_component_property`, `set_instance_properties` |
 | **Sections**    | `list_sections`, `get_section`, `create_section`, `move_to_section`, `move_out_of_section`, `fit_section`. The core `ungroup_node` takes a section as well as a group or a frame.                                                                                                            |
-| **Audit**       | `dump_nodes`, which writes complete dumps to disk and returns a manifest. See [Dumps](#dumps).                                                                                                                                                                                               |
+| **Audit**       | `dump_nodes`, which writes complete dumps to disk and returns a manifest (see [Dumps](#dumps)), and `dump_journal`, which does the same for the [write journal](#the-write-journal).                                                                                                         |
 
 The read tools grew with them: `get_variable_defs` reports each collection's `defaultModeId` and each variable's `description` and `scopes`, `get_styles` reports a text style's `description`, `paragraphSpacing`, `paragraphIndent`, `textCase`, `leadingTrim`, and `boundVariables`, `list_components` names the nearest section holding each component as `sectionId` and `sectionName`, and a node reports its `boundVariables`, `textStyleId`, `componentProperties`, and, on a collapsed section, `sectionContentsHidden`.
 
@@ -176,19 +176,19 @@ On macOS or Linux, read `~/.config/figma-mcp-bridge/rpc-token` instead. Use `127
 
 ### The auditor role
 
-An audit only reads. `FIGMA_BRIDGE_ROLE=auditor` makes a server process register these 15 tools, and no other tool, also no other read tool:
+An audit only reads. `FIGMA_BRIDGE_ROLE=auditor` makes a server process register these 16 tools, and no other tool, also no other read tool:
 
-`list_files`, `get_document`, `get_metadata`, `get_node`, `get_instance`, `get_component`, `list_components`, `get_variable_defs`, `get_styles`, `list_fonts`, `list_sections`, `get_section`, `dump_nodes`, `save_screenshots`, `scroll_and_zoom_into_view`
+`list_files`, `get_document`, `get_metadata`, `get_node`, `get_instance`, `get_component`, `list_components`, `get_variable_defs`, `get_styles`, `list_fonts`, `list_sections`, `get_section`, `dump_nodes`, `save_screenshots`, `scroll_and_zoom_into_view`, `dump_journal`
 
 `get_screenshot` is not on the list: the auditor process saves captures with `save_screenshots`.
 
 | Variable            | Meaning                                                                                     | When unset or empty |
 | ------------------- | ------------------------------------------------------------------------------------------- | ------------------- |
-| `FIGMA_BRIDGE_ROLE` | `auditor`: the process registers the 15 tools above. No other value is allowed (see below). | The full tool set.  |
+| `FIGMA_BRIDGE_ROLE` | `auditor`: the process registers the 16 tools above. No other value is allowed (see below). | The full tool set.  |
 
 - **Fail closed.** A value other than exactly `auditor`, for example `Auditor` or `x`, stops the process at start with an error that names the variable. The process never starts with the full tool set after a typo.
 - **The mark.** Each `/rpc` request that an auditor process sends carries the header `X-Figma-Bridge-Role: auditor`.
-- **The rule of the leader.** For a request with the mark, the leader runs the 15 tools and the two internal commands behind `dump_nodes` and `save_screenshots` (`dump_nodes_chunk` and `get_screenshot`), and nothing else. Another tool gets 403, with an error that names the tool and the role, and the plugin receives nothing. A header value other than `auditor` gets 400.
+- **The rule of the leader.** For a request with the mark, the leader runs the 16 tools and the three internal commands behind `dump_nodes`, `save_screenshots`, and `dump_journal` (`dump_nodes_chunk`, `get_screenshot`, and `dump_journal_chunk`), and nothing else. Another tool gets 403, with an error that names the tool and the role, and the plugin receives nothing. A header value other than `auditor` gets 400.
 - **The relay.** A request without the header runs as before, whatever the role of the leader process is. The role governs the tools and the requests of its own process only. When the auditor process is the leader, it still relays each request of the executor process, so the writes of the executor do not fail when the auditor session starts first.
 - **The limit.** The role keeps an agent in check. It is not a sandbox: a local process that can read the install token can still send a request without the mark.
 
@@ -240,7 +240,7 @@ The leader records each write request that it sends to the plugin, with the answ
 
 **The read-only list.** These requests add no entry:
 
-`list_files`, `get_document`, `get_metadata`, `get_node`, `get_instance`, `get_component`, `list_components`, `get_variable_defs`, `get_styles`, `list_fonts`, `list_sections`, `get_section`, `dump_nodes`, `save_screenshots`, `scroll_and_zoom_into_view`, the internal commands `dump_nodes_chunk` and `get_screenshot`, and `get_selection`, `get_design_context`, `get_motion_styles`, `get_node_motion`
+`list_files`, `get_document`, `get_metadata`, `get_node`, `get_instance`, `get_component`, `list_components`, `get_variable_defs`, `get_styles`, `list_fonts`, `list_sections`, `get_section`, `dump_nodes`, `save_screenshots`, `scroll_and_zoom_into_view`, `dump_journal`, the internal commands `dump_nodes_chunk`, `get_screenshot`, and `dump_journal_chunk`, and `get_selection`, `get_design_context`, `get_motion_styles`, `get_node_motion`
 
 Each other request type is recorded, `set_selection` and an unknown type included.
 
@@ -277,6 +277,32 @@ The leader never truncates, repairs, or rewrites the file. A failed append after
 
 **The repair.** Stop each bridge process. Move the journal file aside, and keep it for the auditor. Start the bridge again: a new chain starts at the genesis hash. Tell the auditor, who keeps the old file and its head as the record up to that point.
 
+**The dump.** `dump_journal` writes the whole journal to disk, under the [output root](#audit-configuration) of the server process that serves the call, and returns only a manifest. Each process serves it itself, as `dump_nodes`: it fetches the entries with the internal command `dump_journal_chunk`, which the leader answers from the journal file and never sends to the plugin. The leader refuses `dump_journal` over `/rpc` with 400.
+
+- **Files.** `journal.json` and `manifest.json`, in `outputPath`, a folder under the output root; the default is `journal/<UTC time>`, for example `journal/20260101T120000Z`.
+- **`journal.json`.** The canonical JSON of `{ "genesisHash": "<64 times 0>", "entries": [ … ] }`: each entry with all its fields, `hash` included, in `seq` order. The canonical form is that of the [dumps](#dumps).
+- **The pinned head.** The first chunk gives the count and the head of that moment. The call fetches the entries up to that count, also when a write adds an entry during the dump, and checks the chain of what it fetched: `seq` from 1 with no gap, each `prevHash`, each `hash` calculated again, and the last `hash` equal to that head.
+- **Failure.** A broken journal (the error gives the `reason`), a chain that does not hold, a failed chunk, or a leader that started again during the call (a new `leaderStartedAt`) fails the call, and no file of the call remains.
+- **No overwrite.** If `journal.json` or `manifest.json` exists in `outputPath`, the call stops before it reads the journal.
+- **No entry.** A dump only reads: it adds no entry and does not change the head.
+- **`fileKey`.** The journal covers each file, and a filter would break the chain, so `fileKey` filters nothing. No connected file is needed.
+
+The manifest is the result of the call, and `manifest.json` holds the same text. The journal belongs to no Figma file, so the manifest has no `fileKey`, no `pluginBuild`, and no `epoch`.
+
+| Field                                             | Meaning                                                                                                                      |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `tool`                                            | `dump_journal`.                                                                                                              |
+| `bridgeCommit`, `leaderCommit`, `leaderStartedAt` | The [instrument identity](#instrument-identity) at the start of the call. The call fails if the leader start changed.        |
+| `outputRoot`                                      | The real absolute path of the output root.                                                                                   |
+| `outputPath`                                      | The folder of the files, relative to `outputRoot`, with `/`.                                                                 |
+| `startedAt`, `finishedAt`                         | ISO 8601 UTC with milliseconds. `finishedAt` is when `journal.json` got its final name.                                      |
+| `entryCount`                                      | The entries in `journal.json`: the count that the first chunk pinned.                                                        |
+| `headHash`                                        | The `hash` of the last entry, or the genesis hash for an empty journal. Compare it with the head of `/ping` or `list_files`. |
+| `genesisHash`                                     | 64 times `0`, the `prevHash` of the first entry.                                                                             |
+| `files`                                           | One entry: `kind` (`journal`), `path` (relative to `outputRoot`, with `/`), `sha256`, `bytes`, and `entryCount`.             |
+
+The dump holds the params and the responses of each write, as the journal does: keep it outside each repository.
+
 ## Available Tools
 
 | Tool                           | Description                                                                                                                                                                                                                                                                                          |
@@ -292,6 +318,7 @@ The leader never truncates, repairs, or rewrites the file. A failed append after
 | `get_screenshot`               | Export nodes as PNG/SVG/JPG/PDF. A PNG or JPG up to 1,568 pixels on its long edge and 3,750,000 bytes comes back as an image block (see [Captures](#captures)); any other export is JSON text with base64                                                                                            |
 | `save_screenshots`             | Export screenshots, save them under the output root, and return a manifest with the path, bytes, SHA-256, pixel size, and scale of each capture, never image data (see [Captures](#captures))                                                                                                        |
 | `dump_nodes`                   | Write the complete subtree of each root, hidden content included, as canonical JSON under the output root, and return only a manifest (see [Dumps](#dumps))                                                                                                                                          |
+| `dump_journal`                 | Write the whole write journal of the leader as canonical JSON under the output root, and return only a manifest with the entry count and the head. Adds no entry (see [The write journal](#the-write-journal))                                                                                       |
 | `get_motion_styles`            | List all available animation presets (beta)                                                                                                                                                                                                                                                          |
 | `get_node_motion`              | Read a node's current animation styles and properties (beta)                                                                                                                                                                                                                                         |
 | `apply_animation_style`        | Apply a preset animation style to a node (beta)                                                                                                                                                                                                                                                      |
@@ -521,7 +548,25 @@ Before running it, build the server, open the plugin in the file you want to tes
 cd server && FIGMA_FILE_KEY='<key>' bun run e2e
 ```
 
-`FIGMA_FILE_KEY` is required, and must name a connected file. Without it the script refuses to start, lists each connected file with its key and its name, and exits with code 1; it writes nothing before that check. `bun run perf` follows the same rule, and also takes an optional `FIGMA_READ_FILE_KEY`. Everything the e2e script makes is named `mcp-e2e/…` and is removed again in a `finally` block, after a failure as well. It sets the output root of its server to `server/scripts/e2e-output/` (git-ignored), where the screenshots and the dumps of the test frame land; the dump group removes its own folder again. Group K starts a second server process with `FIGMA_BRIDGE_ROLE=auditor` and its own output root under that folder, checks its 15 tools, runs `dump_nodes` and `save_screenshots` through it, and checks that the leader refuses a marked `delete_nodes`; it removes the process and its root at the end. Group L saves a capture of the test frame and checks the manifest against the file: the SHA-256, the pixel size from the PNG header, and the manifest file. A failed step exits with code 1. `bun run perf` sets the output root of its server to `server/scripts/perf-output/` (git-ignored) for its dump measurement, and removes the dump again.
+`FIGMA_FILE_KEY` is required, and must name a connected file. Without it the script refuses to start, lists each connected file with its key and its name, and exits with code 1; it writes nothing before that check. `bun run perf` follows the same rule, and also takes an optional `FIGMA_READ_FILE_KEY`. Everything the e2e script makes is named `mcp-e2e/…` and is removed again in a `finally` block, after a failure as well. It sets the output root of its server to `server/scripts/e2e-output/` (git-ignored), where the screenshots and the dumps of the test frame land; the dump group removes its own folder again. Group K starts a second server process with `FIGMA_BRIDGE_ROLE=auditor` and its own output root under that folder, checks its 16 tools, runs `dump_nodes`, `save_screenshots`, and `dump_journal` through it, and checks that the leader refuses a marked `delete_nodes`; it removes the process and its root at the end. Group L saves a capture of the test frame and checks the manifest against the file: the SHA-256, the pixel size from the PNG header, and the manifest file. A failed step exits with code 1. `bun run perf` sets the output root of its server to `server/scripts/perf-output/` (git-ignored) for its dump measurement, and removes the dump again.
+
+#### The write journal in the run
+
+Group W checks the [write journal](#the-write-journal) of the leader over the whole run. Before the first group, W1 reads the journal state from `/ping`; a state other than `ok` stops the run before its first write. From then on, each call of the run (each MCP call of each server process that the script starts, and each raw `/rpc` request) reads the state before and after it. A read must leave the count and the head as they are, a write that succeeds must add one entry, and a write that fails adds one entry (the plugin refused it) or none (a server refused it first). The script keeps each forwarded write in order, and sends one call at a time.
+
+| Check | What it proves                                                                                                                                                                                                                  |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| W2    | `get_node`, `dump_nodes`, `save_screenshots`, `dump_journal`, and `list_files` leave the count and the head.                                                                                                                    |
+| W3    | One write adds one entry, with the tool, the file key, the epoch of `list_files`, `auditor: false`, the response of the call, and the head before the write as `prevHash`.                                                      |
+| W4    | After the cleanup, a dump of the journal matches its manifest, its chain holds, its head is the head of `/ping`, and the entries after the start head are the kept writes, one for one; a raw `/rpc` request with its response. |
+
+Just before the `CONFORMANCE` line the run prints `JOURNAL PASS start=<count>:<head> end=<count>:<head> writes=<n>`, or `JOURNAL FAIL … failed=<count>`, which counts the failed W checks and each call whose change of the journal did not fit. The dumps of the group go to one folder under `server/scripts/e2e-output/`, which the script removes at the end, also after a failure.
+
+`E2E_JOURNAL_EVIDENCE`, an absolute folder outside the repository, keeps the evidence for the [audit toolset](#audit-toolset): W4 copies its `journal.json` and `manifest.json` to `<folder>/journal/`, and writes `<folder>/expected-writes.json`, with `afterHead` (the head before the first group) and `writes` (each kept write: `tool`, `fileKey`, `ok`, and the `response` of a raw `/rpc` request). The script refuses a folder inside the repository, and a target file that exists, before the first group. The files hold private data of the owner, as the journal does.
+
+```bash
+cd server && FIGMA_FILE_KEY='<key>' E2E_JOURNAL_EVIDENCE='C:/audit-output/journal-run' bun run e2e
+```
 
 #### Dump conformance
 
@@ -537,7 +582,7 @@ An audit reads the dumps with its own scripts, so the bridge is a measuring inst
 | V7    | The `variantCount` of the set in the manifest equals that of `list_components`. For the screen frame it is 0: an instance of a variant is not a variant.                                                                                                                                                                                        |
 | V8    | `dump_nodes` turns `skipInvisibleInstanceChildren` off itself. With the flag on and with it off, the dumps of the screen frame are byte-identical and hold the hidden child of the instance, and the flag keeps its value.                                                                                                                      |
 
-The last line of the run is the result line:
+The last line of the run is the result line of group V, after the `JOURNAL` line:
 
 ```text
 CONFORMANCE PASS bridgeCommit=<commit> pluginBuild=<build>
@@ -583,7 +628,7 @@ Figma-MCP-Bridge/
         ├── leader.ts     # Leader: HTTP server + bridge
         ├── follower.ts   # Follower: proxies to leader via HTTP
         ├── rpc-token.ts  # The install token that each /rpc request carries
-        ├── role.ts       # The auditor role: its 15 tools and the request mark
+        ├── role.ts       # The auditor role: its 16 tools and the request mark
         ├── journal.ts    # The write journal: each write the leader sends, in a hash chain
         ├── identity.ts   # File selection and the identity of one file
         ├── evidence.ts   # Canonical JSON, SHA-256, and the write of evidence files
