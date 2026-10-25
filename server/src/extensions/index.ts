@@ -4,6 +4,7 @@ import * as variables from "./variables.js";
 import * as typography from "./typography.js";
 import * as components from "./components.js";
 import * as sections from "./sections.js";
+import * as paints from "./paints.js";
 import * as dumps from "./dumps.js";
 
 export type {
@@ -26,6 +27,7 @@ export const extensionSchemas = {
   ...typography.schemas,
   ...components.schemas,
   ...sections.schemas,
+  ...paints.schemas,
   ...dumps.schemas,
 };
 
@@ -35,6 +37,7 @@ export const extensionRpcToArgs = {
   ...typography.rpcToArgs,
   ...components.rpcToArgs,
   ...sections.rpcToArgs,
+  ...paints.rpcToArgs,
   ...dumps.rpcToArgs,
 };
 
@@ -48,5 +51,6 @@ export function registerExtensionTools(server: McpServer, node: Node): void {
   typography.register(server, node);
   components.register(server, node);
   sections.register(server, node);
+  paints.register(server, node);
   dumps.register(server, node);
 }
