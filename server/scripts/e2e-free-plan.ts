@@ -19,13 +19,37 @@
  *                      connected files. It makes no write before that check.
  *   FIGMA_BRIDGE_PORT  passed to the spawned server, which gets the whole
  *                      environment of this script.
+ *   E2E_JOURNAL_EVIDENCE  optional. An absolute folder outside the repository.
+ *                      W4 copies its dump of the journal to `<folder>/journal/`
+ *                      and writes `<folder>/expected-writes.json` (`afterHead`,
+ *                      the start head, and `writes`, the kept writes) for the
+ *                      chain check of the toolset. The script refuses a folder
+ *                      inside the repository, and a target file that exists,
+ *                      before the first group.
  *
  * The script sets FIGMA_BRIDGE_OUTPUT_ROOT of the spawned server to
  * `scripts/e2e-output/`, so each file that save_screenshots or dump_nodes
  * writes lands there. The dump group removes the one folder it made.
  *
  * Group K spawns a second server with FIGMA_BRIDGE_ROLE=auditor and its own
- * output root under `scripts/e2e-output/`, and removes both at the end.
+ * output root under `scripts/e2e-output/`, and removes both at the end. K4
+ * dumps the journal through it.
+ *
+ * Group W (BR-8) checks the write journal of the leader. A recorder covers the
+ * whole run: each MCP call of each spawned server and each raw `/rpc` request
+ * passes `journaled`, which reads the journal state from `/ping` before and
+ * after the call. A request on READ_ONLY_REQUESTS of `src/journal.ts` leaves
+ * the count and the head; a write that succeeds adds one entry; a write that
+ * fails adds one (the plugin refused it) or none (a server refused it first).
+ * The recorder keeps each forwarded write in order. The calls of the run go
+ * one at a time, so each change belongs to one call. W1 runs before the first
+ * call that can write, and stops the run when the journal is not ok. W2 and
+ * W3 run after group J; W4 runs after the cleanup and compares the entries
+ * after the start head with the kept writes. Its dumps go to one folder of the
+ * run, which the script removes at the end, also after a failure. Just before
+ * the CONFORMANCE line the run prints
+ * `JOURNAL PASS start=<count>:<head> end=<count>:<head> writes=<n>`, or
+ * `JOURNAL FAIL ... failed=<count>`.
  *
  * Group L checks the capture manifest of save_screenshots against the file on
  * disk, and removes the capture and its manifest file.
@@ -54,9 +78,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { constants, existsSync } from "node:fs";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   comparableForm,
@@ -67,6 +91,8 @@ import {
   visibleProjection,
 } from "./conformance.js";
 import type { GoldenRoot } from "./conformance.js";
+import { canonicalJson, sha256Hex } from "../src/evidence.js";
+import { GENESIS_HASH, READ_ONLY_REQUESTS } from "../src/journal.js";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const SERVER_ROOT = resolve(SCRIPT_DIR, "..");
@@ -290,6 +316,170 @@ type ToolOutcome = { ok: true; data: unknown } | { ok: false; error: string };
 let client: Client;
 let fileKey: string | undefined;
 
+// ---------------------------------------------------------------------------
+// W The journal recorder: each call of the run passes `journaled`
+// ---------------------------------------------------------------------------
+
+/** The journal state of `/ping` of the leader. */
+type JournalHead = { status: string; entryCount: number; headHash: string; reason?: string };
+
+/** One write that the leader forwarded to the plugin, as the run saw it. */
+type KeptWrite = { tool: string; fileKey: string; ok: boolean; response?: unknown };
+
+/** What the recorder keeps for the whole run. */
+const recorder = {
+  /** The state before the first group. Set by W1. */
+  start: undefined as JournalHead | undefined,
+  /** The forwarded writes, in order. */
+  writes: [] as KeptWrite[],
+  /** Each call whose change of the journal did not fit the call. */
+  violations: [] as string[],
+};
+
+/**
+ * Reads the journal state from `/ping` of the leader. `/ping` needs no token.
+ * @returns The state.
+ */
+const readJournalHead = async (): Promise<JournalHead> => {
+  const response = await fetch(`http://127.0.0.1:${leaderPort()}/ping`, {
+    signal: AbortSignal.timeout(10_000),
+  });
+  check(response.ok, `/ping of the leader answered HTTP ${response.status}`);
+  const journal = (await response.json()) as { journal?: unknown };
+  const state = readRecord(
+    journal.journal,
+    "the journal field of /ping (a leader of an older build sends none)"
+  );
+  return {
+    status: readString(state.status, "journal.status"),
+    entryCount: readNumber(state.entryCount, "journal.entryCount"),
+    headHash: readString(state.headHash, "journal.headHash"),
+    reason: typeof state.reason === "string" ? state.reason : undefined,
+  };
+};
+
+/** The state as `<count>:<head>`, for the JOURNAL line. */
+const headLabel = (state: JournalHead | undefined): string =>
+  state === undefined ? "unknown" : `${state.entryCount}:${state.headHash}`;
+
+/**
+ * Runs one call that can reach the leader, and checks the journal before and
+ * after it. A request on the read-only list leaves the count and the head as
+ * they are. A write that succeeds adds one entry. A write that fails adds one
+ * entry (the plugin refused it) or none (a server refused it first). Each
+ * forwarded write is kept, in order. A change that does not fit fails the
+ * step of the call. The run sends one call at a time, so each change belongs
+ * to one call.
+ * @param tool - The request type that the call sends.
+ * @param key - The file key that the call names.
+ * @param run - The call.
+ * @param verdict - Whether the call succeeded, and the body of a raw `/rpc` request.
+ * @returns What the call returned.
+ */
+const journaled = async <T>(
+  tool: string,
+  key: string | undefined,
+  run: () => Promise<T>,
+  verdict: (result: T) => { ok: boolean; response?: unknown }
+): Promise<T> => {
+  if (recorder.start === undefined) return run();
+  const before = await readJournalHead();
+  let result: T | undefined;
+  let thrown: unknown;
+  let threw = false;
+  try {
+    result = await run();
+  } catch (err) {
+    threw = true;
+    thrown = err;
+  }
+  const after = await readJournalHead();
+
+  const outcome = threw ? { ok: false } : verdict(result as T);
+  const added = after.entryCount - before.entryCount;
+  const moved = after.headHash !== before.headHash;
+  const change = `the journal went from ${headLabel(before)} to ${headLabel(after)}`;
+  let violation: string | null = null;
+  if (after.status !== "ok") {
+    violation = `after ${tool} the journal is ${after.status} (${after.reason ?? "no reason"})`;
+  } else if (READ_ONLY_REQUESTS.has(tool)) {
+    if (added !== 0 || moved) violation = `${tool} is on the read-only list, but ${change}`;
+  } else if (added === 1 && moved) {
+    recorder.writes.push({
+      tool,
+      fileKey: key ?? "",
+      ok: outcome.ok,
+      ...(outcome.response === undefined ? {} : { response: outcome.response }),
+    });
+  } else if (outcome.ok || added !== 0 || moved) {
+    violation = `${tool} ${outcome.ok ? "succeeded" : "failed"}, but ${change}`;
+  }
+
+  if (violation !== null) recorder.violations.push(violation);
+  if (threw) throw thrown;
+  if (violation !== null) throw new AssertionError(`journal recorder: ${violation}`);
+  return result as T;
+};
+
+/** The answer of a raw `/rpc` request. */
+type RawAnswer = { status: number; body: { data?: unknown; error?: string } };
+
+/**
+ * Sends one raw `/rpc` request to the leader through the recorder, with the
+ * install token, which it reads from the file as a server process reads it.
+ * The token is never printed.
+ * @param request - The request: `tool`, and optionally `nodeIds`, `params`, `fileKey`.
+ * @param headers - More headers, for example the role mark.
+ * @returns The status and the parsed body.
+ */
+const rawRpc = async (
+  request: { tool: string; fileKey?: string } & Json,
+  headers: Record<string, string> = {}
+): Promise<RawAnswer> => {
+  const { rpcToken } = await import("../src/rpc-token.js");
+  return journaled(
+    request.tool,
+    request.fileKey,
+    async () => {
+      const response = await fetch(`http://127.0.0.1:${leaderPort()}/rpc`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${rpcToken()}`,
+          ...headers,
+        },
+        body: JSON.stringify(request),
+        signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+      });
+      const body = (await response.json().catch(() => ({}))) as RawAnswer["body"];
+      return { status: response.status, body };
+    },
+    (answer) => ({
+      ok: answer.status === 200 && answer.body.error === undefined,
+      response: answer.body,
+    })
+  );
+};
+
+/**
+ * Calls one tool of an MCP client through the recorder.
+ * @param mcp - The client of a server process of the run.
+ * @param name - The tool name.
+ * @param args - The arguments, with the file key.
+ * @returns The raw result.
+ */
+const journaledCall = (
+  mcp: Client,
+  name: string,
+  args: Json
+): Promise<Awaited<ReturnType<Client["callTool"]>>> =>
+  journaled(
+    name,
+    typeof args.fileKey === "string" ? args.fileKey : undefined,
+    () => mcp.callTool({ name, arguments: args }, undefined, { timeout: CALL_TIMEOUT_MS }),
+    (result) => ({ ok: result.isError !== true })
+  );
+
 /**
  * Calls one tool and parses its result.
  * @param name - The tool name.
@@ -298,9 +488,7 @@ let fileKey: string | undefined;
  */
 const callTool = async (name: string, args: Json = {}): Promise<ToolOutcome> => {
   const withKey = fileKey === undefined ? args : { fileKey, ...args };
-  const result = await client.callTool({ name, arguments: withKey }, undefined, {
-    timeout: CALL_TIMEOUT_MS,
-  });
+  const result = await journaledCall(client, name, withKey);
 
   const parts = (result.content ?? []) as Array<{ type: string; text?: string }>;
   const text = parts
@@ -331,9 +519,7 @@ const callRaw = async (
   args: Json = {}
 ): Promise<{ isError: boolean; content: RawBlock[] }> => {
   const withKey = fileKey === undefined ? args : { fileKey, ...args };
-  const result = await client.callTool({ name, arguments: withKey }, undefined, {
-    timeout: CALL_TIMEOUT_MS,
-  });
+  const result = await journaledCall(client, name, withKey);
   return { isError: result.isError === true, content: (result.content ?? []) as RawBlock[] };
 };
 
@@ -2515,9 +2701,7 @@ const runAuditorSteps = async (): Promise<void> => {
   );
 
   const callAuditor = async (name: string, args: Json): Promise<unknown> => {
-    const result = await auditor.callTool({ name, arguments: { fileKey, ...args } }, undefined, {
-      timeout: CALL_TIMEOUT_MS,
-    });
+    const result = await journaledCall(auditor, name, { fileKey, ...args });
     const parts = (result.content ?? []) as Array<{ type: string; text?: string }>;
     const text = parts.map((part) => part.text ?? "").join("\n");
     check(result.isError !== true, `${name} through the auditor process failed: ${text}`);
@@ -2525,7 +2709,7 @@ const runAuditorSteps = async (): Promise<void> => {
   };
 
   try {
-    const started = await step("K1 the auditor process lists exactly the 15 tools", async () => {
+    const started = await step("K1 the auditor process lists exactly the 16 tools", async () => {
       try {
         await auditor.connect(transport);
       } catch (err) {
@@ -2581,26 +2765,34 @@ const runAuditorSteps = async (): Promise<void> => {
         ).nodeId,
         "create_frame.nodeId"
       );
-      // The token is read from the file as a server process reads it, and is never printed.
-      const { rpcToken } = await import("../src/rpc-token.js");
-      const response = await fetch(`http://127.0.0.1:${leaderPort()}/rpc`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${rpcToken()}`,
-          "X-Figma-Bridge-Role": "auditor",
-        },
-        body: JSON.stringify({
-          tool: "delete_nodes",
-          nodeIds: [target],
-          params: { confirm: true },
-          fileKey,
-        }),
-        signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
-      });
+      const response = await rawRpc(
+        { tool: "delete_nodes", nodeIds: [target], params: { confirm: true }, fileKey },
+        { "X-Figma-Bridge-Role": "auditor" }
+      );
       check(response.status === 403, `the leader answered ${response.status}, expected 403`);
       const read = await okRecord("get_node", { nodeId: target });
       check(read.id === target, `get_node no longer finds ${target}`);
+    });
+
+    await step("K4 the auditor process dumps the journal, and the head stays", async () => {
+      const before = await readJournalHead();
+      const manifest = readRecord(
+        await callAuditor("dump_journal", { outputPath: "journal" }),
+        "dump_journal result"
+      );
+      check(manifest.tool === "dump_journal", `the manifest names the tool ${show(manifest.tool)}`);
+      check(
+        manifest.entryCount === before.entryCount && manifest.headHash === before.headHash,
+        `the manifest has ${show(manifest.entryCount)}:${show(manifest.headHash)}, the journal ${headLabel(before)}`
+      );
+      const file = readRecords(manifest.files, "dump_journal.files")[0];
+      const dumped = join(auditorRoot, readString(file?.path, "the manifest path"));
+      check(existsSync(dumped), `${dumped} does not exist`);
+      const after = await readJournalHead();
+      check(
+        headLabel(after) === headLabel(before),
+        `the journal went from ${headLabel(before)} to ${headLabel(after)}`
+      );
     });
   } finally {
     await auditor.close().catch(() => undefined);
@@ -3186,17 +3378,14 @@ const part = (key: keyof Fixture): string => {
  * @returns The data of the answer.
  */
 const fixtureOp = async (op: string, params: Json = {}): Promise<Json> => {
-  const { rpcToken } = await import("../src/rpc-token.js");
-  const response = await fetch(`http://127.0.0.1:${leaderPort()}/rpc`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${rpcToken()}` },
-    body: JSON.stringify({ tool: "e2e_fixture", params: { op, ...params }, fileKey }),
-    signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+  const { status, body } = await rawRpc({
+    tool: "e2e_fixture",
+    params: { op, ...params },
+    fileKey,
   });
-  const body = (await response.json()) as { data?: unknown; error?: string };
   check(
-    response.status === 200 && body.error === undefined,
-    `e2e_fixture ${op} failed (HTTP ${response.status}): ${body.error ?? show(body)}`
+    status === 200 && body.error === undefined,
+    `e2e_fixture ${op} failed (HTTP ${status}): ${body.error ?? show(body)}`
   );
   return readRecord(body.data, `e2e_fixture ${op} result`);
 };
@@ -3639,13 +3828,7 @@ const startSecondServer = async (
   }
 
   const call = async (tool: string, args: Json): Promise<Json> => {
-    const result = await second.callTool(
-      { name: tool, arguments: { fileKey, ...args } },
-      undefined,
-      {
-        timeout: CALL_TIMEOUT_MS,
-      }
-    );
+    const result = await journaledCall(second, tool, { fileKey, ...args });
     const parts = (result.content ?? []) as Array<{ type: string; text?: string }>;
     const text = parts.map((part) => part.text ?? "").join("\n");
     check(result.isError !== true, `${tool} through the second server process failed: ${text}`);
@@ -3920,6 +4103,269 @@ const runConformanceSteps = async (): Promise<void> => {
   }
 };
 
+// ---------------------------------------------------------------------------
+// W Write journal
+// ---------------------------------------------------------------------------
+
+/** The folder of the dumps of group W, under the output root. */
+const JOURNAL_RUN_FOLDER = `mcp-e2e-journal-${Date.now()}`;
+const JOURNAL_RUN_PATH = join(OUTPUT_DIR, JOURNAL_RUN_FOLDER);
+
+/** The checks of group W that the JOURNAL line requires, by their number. */
+const JOURNAL_STEPS = ["W1", "W2", "W3", "W4"];
+
+/** The repository root. The evidence folder must lie outside it. */
+const REPO_ROOT = resolve(SERVER_ROOT, "..");
+
+/** `E2E_JOURNAL_EVIDENCE`: where W4 copies its dump for the toolset, or undefined. */
+const JOURNAL_EVIDENCE = process.env.E2E_JOURNAL_EVIDENCE?.trim() || undefined;
+
+/** The files that `E2E_JOURNAL_EVIDENCE` gets. */
+const evidenceTargets = (folder: string) => ({
+  journal: join(folder, "journal", "journal.json"),
+  manifest: join(folder, "journal", "manifest.json"),
+  expected: join(folder, "expected-writes.json"),
+});
+
+/**
+ * Checks `E2E_JOURNAL_EVIDENCE` before the first group: an absolute folder
+ * outside the repository, with no target file in it yet.
+ * @returns Null when the value is good or unset, else the refusal to print.
+ */
+const evidenceRefusal = (): string | null => {
+  if (JOURNAL_EVIDENCE === undefined) return null;
+  if (!isAbsolute(JOURNAL_EVIDENCE)) {
+    return `E2E_JOURNAL_EVIDENCE is "${JOURNAL_EVIDENCE}", but it must be an absolute folder. Give an absolute folder outside the repository.`;
+  }
+  const comparable = (p: string): string =>
+    process.platform === "win32" ? resolve(p).toLowerCase() : resolve(p);
+  const inside = relative(comparable(REPO_ROOT), comparable(JOURNAL_EVIDENCE));
+  if (inside === "" || (!inside.startsWith("..") && !isAbsolute(inside))) {
+    return `E2E_JOURNAL_EVIDENCE is "${JOURNAL_EVIDENCE}", which is inside the repository. The journal is private data of the owner: give a folder outside the repository.`;
+  }
+  const taken = Object.values(evidenceTargets(JOURNAL_EVIDENCE)).filter((file) => existsSync(file));
+  if (taken.length > 0) {
+    return `E2E_JOURNAL_EVIDENCE already holds ${taken.join(", ")}. Evidence is never overwritten: give a new folder.`;
+  }
+  return null;
+};
+
+/**
+ * W1, before the first group: the journal state is ok. Keeps the start state,
+ * which turns the recorder on.
+ * @returns Whether the run may go on.
+ */
+const runJournalStart = async (): Promise<boolean> =>
+  step("W1 the journal state is ok before the first group", async () => {
+    const state = await readJournalHead();
+    check(
+      state.status === "ok",
+      `the write journal of the leader is ${state.status} (${state.reason ?? "no reason"}). Repair it as the README says, then run again; the run made no write.`
+    );
+    recorder.start = state;
+    console.log(`      journal ${headLabel(state)}`);
+  });
+
+/**
+ * Dumps the journal through the server of the script and reads the file.
+ * @param folder - The folder under the output root.
+ * @returns The manifest, the bytes, and the parsed entries.
+ */
+const dumpJournal = async (
+  folder: string
+): Promise<{ manifest: Json; bytes: Buffer; entries: Json[] }> => {
+  const manifest = await okRecord("dump_journal", { outputPath: folder });
+  check(manifest.tool === "dump_journal", `the manifest names the tool ${show(manifest.tool)}`);
+  const files = readRecords(manifest.files, "dump_journal.files");
+  check(files.length === 1, `the manifest names ${files.length} files, expected 1`);
+  const bytes = await readFile(join(OUTPUT_DIR, readString(files[0].path, "the journal path")));
+  const content = readRecord(JSON.parse(bytes.toString("utf8")), "journal.json");
+  check(
+    content.genesisHash === GENESIS_HASH,
+    `journal.json has the genesis hash ${show(content.genesisHash)}`
+  );
+  return { manifest, bytes, entries: readRecords(content.entries, "journal.json entries") };
+};
+
+/** W2 and W3: the reads leave the journal as it is, and one write adds one entry. */
+const runJournalSteps = async (): Promise<void> => {
+  check(
+    !existsSync(JOURNAL_RUN_PATH),
+    `${JOURNAL_RUN_PATH} exists already; remove it, then run again`
+  );
+
+  await step("W2 reads, dumps, captures and list_files leave the head and the count", async () => {
+    const before = await readJournalHead();
+    await okRecord("get_node", { nodeId: need("rootId") });
+    await okRecord("dump_nodes", {
+      nodeIds: [need("rootId")],
+      outputPath: `${JOURNAL_RUN_FOLDER}/w2-nodes`,
+    });
+    await okRecord("save_screenshots", {
+      items: [{ nodeId: need("rootId"), outputPath: `${JOURNAL_RUN_FOLDER}/w2.png` }],
+      scale: 1,
+    });
+    await dumpJournal(`${JOURNAL_RUN_FOLDER}/w2-journal`);
+    await okRecord("list_files");
+    const after = await readJournalHead();
+    check(
+      headLabel(after) === headLabel(before),
+      `the journal went from ${headLabel(before)} to ${headLabel(after)}`
+    );
+  });
+
+  await step("W3 one write adds one entry with the call, the file and its epoch", async () => {
+    const listed = await okRecord("list_files");
+    const file = readRecords(listed.files, "list_files files").find(
+      (entry) => entry.fileKey === fileKey
+    );
+    check(file !== undefined, `list_files does not list ${String(fileKey)}`);
+    const epoch = readNumber((file as Json).epoch, "the epoch of the file");
+
+    const before = await readJournalHead();
+    const result = await ok("create_frame", {
+      name: `${PREFIX}w3-target`,
+      parentId: need("rootId"),
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    const after = await readJournalHead();
+    check(
+      after.entryCount === before.entryCount + 1,
+      `the count went from ${before.entryCount} to ${after.entryCount}, expected one more`
+    );
+
+    const { entries } = await dumpJournal(`${JOURNAL_RUN_FOLDER}/w3-journal`);
+    const last = entries[entries.length - 1];
+    check(last !== undefined, "the dump holds no entry");
+    const expected = {
+      seq: after.entryCount,
+      tool: "create_frame",
+      fileKey,
+      epoch,
+      auditor: false,
+      response: { data: result },
+      prevHash: before.headHash,
+      hash: after.headHash,
+    };
+    for (const [field, value] of Object.entries(expected)) {
+      check(
+        canonicalJson(last[field]) === canonicalJson(value),
+        `the last entry has ${field} ${show(last[field])}, expected ${show(value)}`
+      );
+    }
+  });
+};
+
+/**
+ * W4, after the cleanup of the run: the dump matches its manifest, its chain
+ * holds, its head is the head of the leader, and the entries after the start
+ * head are the writes that the recorder kept, one for one. With
+ * `E2E_JOURNAL_EVIDENCE`, the dump and the kept writes go to that folder.
+ */
+const runJournalEnd = async (): Promise<void> => {
+  await step("W4 the journal after the cleanup holds each write of the run, in order", async () => {
+    const start = recorder.start;
+    check(start !== undefined, "W1 did not keep a start state");
+    const folder = `${JOURNAL_RUN_FOLDER}/w4-journal`;
+    const { manifest, bytes, entries } = await dumpJournal(folder);
+
+    const file = readRecords(manifest.files, "dump_journal.files")[0];
+    check(file.sha256 === sha256Hex(bytes), "the SHA-256 of the manifest is not that of the file");
+    check(
+      file.bytes === bytes.length,
+      `the manifest says ${show(file.bytes)} bytes, the file has ${bytes.length}`
+    );
+
+    let previous = GENESIS_HASH;
+    entries.forEach((entry, index) => {
+      check(entry.seq === index + 1, `entry ${index + 1} has the seq ${show(entry.seq)}`);
+      check(
+        entry.prevHash === previous,
+        `the prevHash of entry ${index + 1} is not the hash before`
+      );
+      const { hash, ...rest } = entry;
+      check(
+        hash === sha256Hex(Buffer.from(canonicalJson(rest), "utf8")),
+        `the hash of entry ${index + 1} is not the SHA-256 of the entry without hash`
+      );
+      previous = String(hash);
+    });
+    const now = await readJournalHead();
+    check(
+      previous === manifest.headHash && previous === now.headHash,
+      `the chain ends at ${previous}, the manifest says ${show(manifest.headHash)}, /ping says ${now.headHash}`
+    );
+
+    const startHead =
+      (start as JournalHead).entryCount === 0
+        ? GENESIS_HASH
+        : entries[(start as JournalHead).entryCount - 1]?.hash;
+    check(
+      startHead === (start as JournalHead).headHash,
+      `the entry ${(start as JournalHead).entryCount} of the dump is not the start head`
+    );
+    const after = entries.slice((start as JournalHead).entryCount);
+    check(
+      after.length === recorder.writes.length,
+      `the journal holds ${after.length} entries after the start head, the run kept ${recorder.writes.length} writes`
+    );
+    recorder.writes.forEach((kept, index) => {
+      const entry = after[index];
+      const response = readRecord(entry.response, `the response of entry ${String(entry.seq)}`);
+      const entryOk = "data" in response;
+      const at = `entry ${String(entry.seq)} (write ${index + 1}, ${kept.tool})`;
+      check(entry.tool === kept.tool, `${at} has the tool ${show(entry.tool)}`);
+      check(entry.fileKey === kept.fileKey, `${at} has the file key ${show(entry.fileKey)}`);
+      check(
+        entryOk === kept.ok,
+        `${at} is ${entryOk ? "ok" : "an error"}, the run saw the opposite`
+      );
+      if (kept.response !== undefined) {
+        check(
+          canonicalJson(entry.response) === canonicalJson(kept.response),
+          `${at} has the response ${show(entry.response)}, the run got ${show(kept.response)}`
+        );
+      }
+    });
+
+    if (JOURNAL_EVIDENCE !== undefined) {
+      const targets = evidenceTargets(JOURNAL_EVIDENCE);
+      await mkdir(dirname(targets.journal), { recursive: true });
+      const source = join(OUTPUT_DIR, readString(manifest.outputPath, "manifest.outputPath"));
+      await copyFile(join(source, "journal.json"), targets.journal, constants.COPYFILE_EXCL);
+      await copyFile(join(source, "manifest.json"), targets.manifest, constants.COPYFILE_EXCL);
+      await writeFile(
+        targets.expected,
+        canonicalJson({ afterHead: (start as JournalHead).headHash, writes: recorder.writes }),
+        { encoding: "utf8", flag: "wx" }
+      );
+      console.log(`      evidence: ${JOURNAL_EVIDENCE}`);
+    }
+  });
+};
+
+/**
+ * Prints the result line of the journal, once W1 ran. Each check of
+ * `JOURNAL_STEPS` must have passed; a check that did not run counts as
+ * failed, and so does each call whose change of the journal did not fit.
+ */
+const printJournalLine = async (): Promise<void> => {
+  const ran = outcomes.filter((outcome) => /^W\d+ /.test(outcome.name));
+  if (ran.length === 0) return;
+  const missing = JOURNAL_STEPS.filter(
+    (id) => !ran.some((outcome) => outcome.name.startsWith(`${id} `))
+  );
+  const failed =
+    ran.filter((outcome) => !outcome.ok).length + missing.length + recorder.violations.length;
+  const end = await readJournalHead().catch(() => undefined);
+  const counts = `start=${headLabel(recorder.start)} end=${headLabel(end)} writes=${recorder.writes.length}`;
+  console.log("");
+  console.log(failed === 0 ? `JOURNAL PASS ${counts}` : `JOURNAL FAIL ${counts} failed=${failed}`);
+};
+
 /** Runs every scenario group in order. Each step records its own outcome. */
 const runScenario = async (): Promise<void> => {
   await runVariableSteps();
@@ -3931,6 +4377,7 @@ const runScenario = async (): Promise<void> => {
   await runSectionSteps();
   await runNegativeSteps();
   await runDumpSteps();
+  await runJournalSteps();
   await runAuditorSteps();
   await runCaptureSteps();
   await runPaintSteps();
@@ -3960,6 +4407,12 @@ const summarise = (): number => {
  * @returns The process exit code.
  */
 const main = async (): Promise<number> => {
+  const evidence = evidenceRefusal();
+  if (evidence !== null) {
+    console.error(evidence);
+    return 1;
+  }
+
   // Without an explicit env, the MCP SDK gives the child only a short default
   // list of variables, and FIGMA_BRIDGE_PORT would not reach it.
   const env: Record<string, string> = {};
@@ -4001,9 +4454,16 @@ const main = async (): Promise<number> => {
   }
 
   try {
+    // The recorder starts before the first call that can write.
+    if (!(await runJournalStart())) {
+      console.error("The run stops before the first write: the write journal is not ok.");
+      await printJournalLine();
+      return 1;
+    }
     const refusal = await resolveFileKey();
     if (refusal !== null) {
       console.error(refusal);
+      await printJournalLine();
       return 1;
     }
     await mkdir(OUTPUT_DIR, { recursive: true });
@@ -4027,18 +4487,23 @@ const main = async (): Promise<number> => {
         const problems = await removeArtifacts();
         check(problems.length === 0, problems.join("; "));
       });
+      await runJournalEnd();
     }
   } catch (err) {
     console.error("");
     console.error(err instanceof Error ? err.message : String(err));
     if (serverLog.length > 0) console.error(`\nserver log:\n${serverLog.join("\n")}`);
+    await printJournalLine();
     printConformanceLine();
     return 1;
   } finally {
     await client.close().catch(() => undefined);
+    // Only the folder of group W, which the run made.
+    await rm(JOURNAL_RUN_PATH, { recursive: true, force: true });
   }
 
   const code = summarise();
+  await printJournalLine();
   printConformanceLine();
   return code;
 };
