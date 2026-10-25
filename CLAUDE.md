@@ -129,6 +129,7 @@ the manifest only. A failure removes each file of the call.
 | `plugin/src/main/extensions/typography.ts` | Text style handlers.                                                                                                   |
 | `plugin/src/main/extensions/components.ts` | Component and component set handlers.                                                                                  |
 | `plugin/src/main/extensions/sections.ts`   | Section handlers.                                                                                                      |
+| `plugin/src/main/extensions/paints.ts`     | Paint handlers: `clear_paints`.                                                                                        |
 | `plugin/src/main/extensions/dumps.ts`      | `dump_nodes_chunk`, the internal chunk command of a dump.                                                              |
 | `plugin/src/main/extensions/e2e.ts`        | `e2e_fixture`, the test helper that builds the conformance fixture parts no tool writes.                               |
 | `plugin/src/ui/App.tsx`                    | The plugin window. Holds the WebSocket.                                                                                |
@@ -153,6 +154,7 @@ the manifest only. A failure removes each file of the call.
 | `server/src/extensions/typography.ts`      | Text style tools.                                                                                                      |
 | `server/src/extensions/components.ts`      | Component and component set tools.                                                                                     |
 | `server/src/extensions/sections.ts`        | Section tools.                                                                                                         |
+| `server/src/extensions/paints.ts`          | Paint tools: `clear_paints`.                                                                                           |
 | `server/src/extensions/dumps.ts`           | `dump_nodes`: the chunk loop, `TreeBuilder`, the files, and the manifest.                                              |
 | `server/scripts/e2e-free-plan.ts`          | The end-to-end script. Drives every extension tool against a real file.                                                |
 | `server/scripts/perf-free-plan.ts`         | The measurement script. Holds each tool to 30 seconds and 50,000 characters.                                           |
