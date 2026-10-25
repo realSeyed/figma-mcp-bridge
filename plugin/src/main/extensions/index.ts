@@ -3,6 +3,7 @@ import { variablesHandlers } from "./variables";
 import { typographyHandlers } from "./typography";
 import { componentsHandlers } from "./components";
 import { sectionsHandlers } from "./sections";
+import { paintsHandlers } from "./paints";
 import { dumpsHandlers } from "./dumps";
 import { e2eHandlers } from "./e2e";
 
@@ -21,6 +22,7 @@ export const extensionHandlers = {
   ...typographyHandlers,
   ...componentsHandlers,
   ...sectionsHandlers,
+  ...paintsHandlers,
   ...dumpsHandlers,
   ...e2eHandlers,
 };
