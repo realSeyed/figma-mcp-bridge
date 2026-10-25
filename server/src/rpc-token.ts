@@ -43,12 +43,21 @@ let cached: string | undefined;
 export function tokenFilePath(): string {
   const set = process.env[TOKEN_FILE_VARIABLE];
   if (set !== undefined && set.trim() !== "") return set.trim();
+  return join(installStateFolder(), "rpc-token");
+}
+
+/**
+ * The state folder of the install: the folder of the default token file. It
+ * does not follow FIGMA_BRIDGE_TOKEN_FILE.
+ * @returns An absolute path.
+ */
+export function installStateFolder(): string {
   if (process.platform === "win32") {
     const appData = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
-    return join(appData, "figma-mcp-bridge", "rpc-token");
+    return join(appData, "figma-mcp-bridge");
   }
   const config = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(config, "figma-mcp-bridge", "rpc-token");
+  return join(config, "figma-mcp-bridge");
 }
 
 /**

@@ -37,6 +37,18 @@ export interface ConnectedFile {
   epoch: number;
 }
 
+/** The state of the write journal of the leader (BR-8). */
+export interface JournalState {
+  /** `broken` when the chain failed its check or an append failed. */
+  status: "ok" | "broken";
+  /** The entries in the file. */
+  entryCount: number;
+  /** The `hash` of the last entry, or the genesis hash. */
+  headHash: string;
+  /** Why the journal is broken: the line and the cause. Only with `broken`. */
+  reason?: string;
+}
+
 /** What the leader knows: its own build, its start time, and the connected files. */
 export interface LeaderIdentity {
   /** The commit of the leader build. */
