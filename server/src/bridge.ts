@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { selectFile } from "./identity.js";
+import type { JournalResponse, WriteJournal } from "./journal.js";
 import type { BridgeRequest, BridgeResponse, ConnectedFile } from "./types.js";
 
 interface PendingRequest {
@@ -28,7 +29,11 @@ export class Bridge {
   private counter = 0;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor() {
+  /**
+   * @param journal - The write journal of the leader. Each request that is
+   *   sent to a plugin connection and that it records adds one entry here.
+   */
+  constructor(private journal: WriteJournal) {
     this.wss = new WebSocketServer({ noServer: true });
     this.wss.on("error", (err) => {
       console.error("WebSocketServer error:", err);
@@ -146,10 +151,11 @@ export class Bridge {
    * - If fileKey is provided, use that specific connection.
    * - If only one file is connected and no fileKey given, use it (backward compat).
    * - If multiple files connected and no fileKey, throw with a helpful message.
+   * @returns The socket, and the file with its epoch now.
    */
-  private resolveConnection(fileKey?: string): WebSocket {
+  private resolveConnection(fileKey?: string): { ws: WebSocket; file: ConnectedFile } {
     const file = selectFile(this.listConnectedFiles(), fileKey);
-    return this.connections.get(file.fileKey)!.ws;
+    return { ws: this.connections.get(file.fileKey)!.ws, file };
   }
 
   listConnectedFiles(): ConnectedFile[] {
@@ -165,16 +171,35 @@ export class Bridge {
     return this.sendWithParams(requestType, nodeIds, undefined, fileKey);
   }
 
+  /**
+   * Sends one request to a plugin connection and waits for the answer. This is
+   * the one place that the own calls of the leader and the `/rpc` calls of a
+   * follower both pass, so the write journal records here: a request that the
+   * journal records adds one entry when the plugin answers or the wait ends.
+   * A request that reaches no connection adds none.
+   * @param auditor - Whether the request comes from the auditor role: the
+   *   `/rpc` mark, or the role of a leader process for its own calls.
+   */
   sendWithParams(
     requestType: string,
     nodeIds?: string[],
     params?: Record<string, unknown>,
-    fileKey?: string
+    fileKey?: string,
+    auditor = false
   ): Promise<BridgeResponse> {
     return new Promise((resolve, reject) => {
+      const recorded = this.journal.records(requestType);
+      // A broken journal refuses each write before it reaches the plugin.
+      const refusal = recorded ? this.journal.refusal(requestType) : null;
+      if (refusal !== null) {
+        reject(new Error(refusal));
+        return;
+      }
+
       let conn: WebSocket;
+      let file: ConnectedFile;
       try {
-        conn = this.resolveConnection(fileKey);
+        ({ ws: conn, file } = this.resolveConnection(fileKey));
       } catch (err) {
         reject(err);
         return;
@@ -197,18 +222,48 @@ export class Bridge {
         request.params = params;
       }
 
+      /** Appends the entry of a recorded request. Returns the error of a failed append. */
+      const record = (response: JournalResponse): Error | null => {
+        if (!recorded) return null;
+        try {
+          this.journal.append({
+            fileKey: file.fileKey,
+            epoch: file.epoch,
+            auditor,
+            tool: requestType,
+            nodeIds: request.nodeIds ?? null,
+            params: request.params ?? null,
+            response,
+          });
+          return null;
+        } catch (err) {
+          return err instanceof Error ? err : new Error(String(err));
+        }
+      };
+      const answered = (resp: BridgeResponse): void => {
+        const failure = record(
+          resp.error ? { error: resp.error } : { data: resp.data === undefined ? null : resp.data }
+        );
+        if (failure) reject(failure);
+        else resolve(resp);
+      };
+      const failed = (err: Error): void => {
+        reject(record({ error: err.message }) ?? err);
+      };
+
       const timeout = setTimeout(() => {
         this.pending.delete(requestId);
-        reject(new Error("Request timed out (3 minutes)"));
+        failed(new Error("Request timed out (3 minutes)"));
       }, 180_000);
 
-      this.pending.set(requestId, { resolve, reject, timeout, ws: conn });
+      this.pending.set(requestId, { resolve: answered, reject: failed, timeout, ws: conn });
 
       conn.send(JSON.stringify(request), (err) => {
-        if (err) {
+        // A close of the socket can settle the request first: record it once.
+        if (err && this.pending.has(requestId)) {
           clearTimeout(timeout);
           this.pending.delete(requestId);
-          reject(err);
+          failed(err);
         }
       });
     });

@@ -50,7 +50,7 @@ const MAX_IMAGE_REDIRECTS = 5;
 export function registerTools(server: McpServer, node: Node, port: number): void {
   server.tool(
     "list_files",
-    "List all currently connected Figma files and the identity of the instrument. Returns { bridgeCommit, leaderCommit, leaderStartedAt, files }; each file has fileKey, fileName, pluginBuild and epoch. The epoch grows at each plugin connection for that key, so a change shows a plugin reload. Use the fileKey to target a specific file in other tools.",
+    "List all currently connected Figma files and the identity of the instrument. Returns { bridgeCommit, leaderCommit, leaderStartedAt, files, journal }; each file has fileKey, fileName, pluginBuild and epoch. The epoch grows at each plugin connection for that key, so a change shows a plugin reload. journal is the write journal of the leader: { status, entryCount, headHash }, plus reason when the status is broken, or null from an older leader. Use the fileKey to target a specific file in other tools.",
     async (): Promise<ToolResult> => {
       try {
         const report = await node.identityReport();

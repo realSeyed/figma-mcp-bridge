@@ -87,9 +87,16 @@ function requestTypes(plugin: SimulatedPlugin): string[] {
 }
 
 /** Runs the server with a closed standard input, for a start that fails. */
-function runWithRole(tokenFile: string, port: number, role: string) {
+function runWithRole(tokenFile: string, journalFile: string, port: number, role: string) {
   return spawnSync("node", [SERVER_ENTRY], {
-    env: serverEnv({ port, env: { FIGMA_BRIDGE_TOKEN_FILE: tokenFile, FIGMA_BRIDGE_ROLE: role } }),
+    env: serverEnv({
+      port,
+      env: {
+        FIGMA_BRIDGE_TOKEN_FILE: tokenFile,
+        FIGMA_BRIDGE_JOURNAL_FILE: journalFile,
+        FIGMA_BRIDGE_ROLE: role,
+      },
+    }),
     input: "",
     encoding: "utf8",
     timeout: 15_000,
@@ -151,7 +158,7 @@ describe("the start check", () => {
       `FIGMA_BRIDGE_ROLE=${JSON.stringify(role)} stops the process at start`,
       async () => {
         const tokenFile = await h.tokenFile();
-        const result = runWithRole(tokenFile, await h.freePort(), role);
+        const result = runWithRole(tokenFile, await h.journalFile(), await h.freePort(), role);
         expect(result.status).not.toBe(0);
         expect(result.stderr).toContain("FIGMA_BRIDGE_ROLE");
         expect(result.stderr).toContain("auditor");

@@ -56,6 +56,8 @@ export interface LeaderIdentity {
   /** When the process became the leader, as an ISO 8601 UTC time. */
   leaderStartedAt: string;
   files: ConnectedFile[];
+  /** The write journal of the leader, or null from a leader of an older build. */
+  journal: JournalState | null;
 }
 
 /**

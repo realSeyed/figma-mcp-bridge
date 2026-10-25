@@ -10,8 +10,9 @@
  * Start order: the leader process first, then the simulated plugin, then the
  * followers.
  *
- * Each server process of one harness shares one install token file in a
- * temporary folder, so no test reads the real token file.
+ * Each server process of one harness shares one install token file and one
+ * write journal file in temporary folders, so no test reads the real token
+ * file or touches the real write journal.
  */
 
 import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
@@ -27,6 +28,7 @@ const PRODUCTION_PORT = 1995;
 export class Harness {
   private teardowns: Array<() => Promise<void>> = [];
   private tokenPath: string | undefined;
+  private journalPath: string | undefined;
 
   /** Runs each teardown in reverse order. Collects errors and throws the first one. */
   async cleanup(): Promise<void> {
@@ -110,15 +112,32 @@ export class Harness {
   }
 
   /**
+   * The write journal file of this harness, in a temporary folder. The first
+   * leader that records a write makes the file.
+   * @returns The absolute path.
+   */
+  async journalFile(): Promise<string> {
+    if (this.journalPath === undefined) {
+      this.journalPath = join(await this.tempDir("journal"), "write-journal.jsonl");
+    }
+    return this.journalPath;
+  }
+
+  /**
    * Starts `node dist/index.js` and waits until it has a role. The process
-   * gets the token file of this harness unless `options.env` names another.
+   * gets the token file and the journal file of this harness unless
+   * `options.env` names others.
    * @param options - Port, working directory, and environment changes.
    * @returns The running process.
    */
   async server(options: ServerOptions): Promise<ServerProcess> {
     const server = await startServer({
       ...options,
-      env: { FIGMA_BRIDGE_TOKEN_FILE: await this.tokenFile(), ...options.env },
+      env: {
+        FIGMA_BRIDGE_TOKEN_FILE: await this.tokenFile(),
+        FIGMA_BRIDGE_JOURNAL_FILE: await this.journalFile(),
+        ...options.env,
+      },
     });
     this.defer(() => server.close());
     return server;

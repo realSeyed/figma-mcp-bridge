@@ -3,6 +3,7 @@ import http from "node:http";
 import type { Duplex } from "node:stream";
 import { Bridge } from "./bridge.js";
 import { BRIDGE_COMMIT } from "./build-info.js";
+import { WriteJournal } from "./journal.js";
 import { AUDITOR_ROLE, AUDITOR_TOOLS, ROLE_HEADER, ROLE_VARIABLE, auditorMayCall } from "./role.js";
 import { rpcToken, tokenFilePath } from "./rpc-token.js";
 import { validateRpc } from "./schema.js";
@@ -50,6 +51,10 @@ const SERVED_BY_EACH_PROCESS: ReadonlyMap<string, string> = new Map([
  *
  * No answer carries an `Access-Control-Allow-*` header. A browser page must
  * send a preflight for a cross-origin JSON POST, and the preflight gets 405.
+ *
+ * The leader owns the write journal (journal.ts). The bridge records each
+ * write that reaches a plugin connection, from /rpc and from the own calls of
+ * this process alike; /ping and list_files report its state.
  */
 export class Leader {
   private bridge: Bridge;
@@ -58,9 +63,11 @@ export class Leader {
   private tokenDigest: Buffer | null = null;
   /** When this process became the leader: set when the port is bound. */
   private startedAt = new Date().toISOString();
+  /** The write journal. Loaded when the port is bound, so a follower never opens it. */
+  private journal = new WriteJournal();
 
   constructor(private port: number) {
-    this.bridge = new Bridge();
+    this.bridge = new Bridge(this.journal);
   }
 
   getBridge(): Bridge {
@@ -73,6 +80,7 @@ export class Leader {
       leaderCommit: BRIDGE_COMMIT,
       leaderStartedAt: this.startedAt,
       files: this.bridge.listConnectedFiles(),
+      journal: this.journal.state(),
     };
   }
 
@@ -92,9 +100,16 @@ export class Leader {
         if (req.url === "/ping" && req.method === "GET") {
           res.writeHead(200, { "Content-Type": "application/json" });
           // The leader answers, so its commit is the bridgeCommit of /ping.
-          const { bridgeCommit, leaderStartedAt, files } = this.identityReport();
+          const { bridgeCommit, leaderStartedAt, files, journal } = this.identityReport();
           res.end(
-            JSON.stringify({ status: "ok", version: VERSION, bridgeCommit, leaderStartedAt, files })
+            JSON.stringify({
+              status: "ok",
+              version: VERSION,
+              bridgeCommit,
+              leaderStartedAt,
+              files,
+              journal,
+            })
           );
           return;
         }
@@ -138,6 +153,9 @@ export class Leader {
       });
 
       server.listen(this.port, LEADER_HOST, () => {
+        // Synchronous, before this callback returns: no request runs before
+        // the load. A process that loses the port never reads the file.
+        this.journal.load();
         this.server = server;
         this.startedAt = new Date().toISOString();
         console.error(`Leader listening on ${LEADER_HOST}:${this.port}`);
@@ -241,7 +259,8 @@ export class Leader {
           rpcReq.tool,
           rpcReq.nodeIds,
           validatedParams,
-          fileKey
+          fileKey,
+          req.headers[ROLE_HEADER.toLowerCase()] === AUDITOR_ROLE
         );
 
         this.sendJSON(res, 200, resp.error ? { error: resp.error } : { data: resp.data });
@@ -260,7 +279,9 @@ export class Leader {
 
   stop(): void {
     this.tokenDigest = null;
+    // The bridge first: a write that still waits is recorded with its error.
     this.bridge.close();
+    this.journal.close();
     if (this.server) {
       this.server.close();
       this.server = null;

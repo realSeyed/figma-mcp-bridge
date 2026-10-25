@@ -70,9 +70,12 @@ function tryConnect(host: string, port: number): Promise<{ open: boolean; code?:
 }
 
 /** Runs the server with a closed standard input, for a start that fails. */
-function runServer(tokenFile: string, port: number) {
+function runServer(tokenFile: string, journalFile: string, port: number) {
   return spawnSync("node", [SERVER_ENTRY], {
-    env: serverEnv({ port, env: { FIGMA_BRIDGE_TOKEN_FILE: tokenFile } }),
+    env: serverEnv({
+      port,
+      env: { FIGMA_BRIDGE_TOKEN_FILE: tokenFile, FIGMA_BRIDGE_JOURNAL_FILE: journalFile },
+    }),
     input: "",
     encoding: "utf8",
     timeout: 15_000,
@@ -271,7 +274,7 @@ describe("the followers and the token file", () => {
       const content = "not-a-token-0123";
       await writeFile(tokenFile, content, { mode: 0o600 });
 
-      const run = runServer(tokenFile, await h.freePort());
+      const run = runServer(tokenFile, await h.journalFile(), await h.freePort());
       expect(run.status).not.toBe(0);
       expect(run.stderr).toContain(`The install token file ${tokenFile} holds no valid token`);
       expect(run.stderr).toContain("Remove the file");
@@ -289,7 +292,7 @@ describe("the followers and the token file", () => {
       await writeFile(tokenFile, content);
       await chmod(tokenFile, 0o644);
 
-      const run = runServer(tokenFile, await h.freePort());
+      const run = runServer(tokenFile, await h.journalFile(), await h.freePort());
       expect(run.status).not.toBe(0);
       expect(run.stderr).toContain(`The install token file ${tokenFile} can be read`);
       expect(run.stderr).toContain(`chmod 600 ${tokenFile}`);
