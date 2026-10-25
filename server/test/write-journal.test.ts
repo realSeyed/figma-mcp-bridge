@@ -50,6 +50,7 @@ const EXPECTED_READ_ONLY = [
   "get_design_context",
   "get_motion_styles",
   "get_node_motion",
+  "dump_journal_chunk",
 ];
 
 /** `EDIT_REQUEST_TYPES` of `plugin/src/main/code.ts`, written out. */

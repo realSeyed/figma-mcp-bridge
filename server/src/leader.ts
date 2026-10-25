@@ -3,7 +3,8 @@ import http from "node:http";
 import type { Duplex } from "node:stream";
 import { Bridge } from "./bridge.js";
 import { BRIDGE_COMMIT } from "./build-info.js";
-import { WriteJournal } from "./journal.js";
+import { JOURNAL_CHUNK_REQUEST, parseChunkParams, WriteJournal } from "./journal.js";
+import type { JournalChunk, JournalChunkParams } from "./journal.js";
 import { AUDITOR_ROLE, AUDITOR_TOOLS, ROLE_HEADER, ROLE_VARIABLE, auditorMayCall } from "./role.js";
 import { rpcToken, tokenFilePath } from "./rpc-token.js";
 import { validateRpc } from "./schema.js";
@@ -82,6 +83,17 @@ export class Leader {
       files: this.bridge.listConnectedFiles(),
       journal: this.journal.state(),
     };
+  }
+
+  /**
+   * One chunk of the journal, for an own call of this process. A follower gets
+   * the same answer over `/rpc`.
+   * @param params - The params of the `dump_journal_chunk` request.
+   * @returns The chunk.
+   * @throws If the params are not valid, or the journal cannot give the chunk.
+   */
+  journalChunk(params: unknown): JournalChunk {
+    return this.journal.chunk(parseChunkParams(params));
   }
 
   /** The report of the leader as the serving process: both commits are its own. */
@@ -230,6 +242,19 @@ export class Leader {
         // Handle list_files as a special RPC (not forwarded to plugin)
         if (rpcReq.tool === "list_files") {
           this.sendJSON(res, 200, { data: this.leaderIdentity() });
+          return;
+        }
+
+        // The leader serves the journal chunks itself, from the file.
+        if (rpcReq.tool === JOURNAL_CHUNK_REQUEST) {
+          let params: JournalChunkParams;
+          try {
+            params = parseChunkParams(rpcReq.params);
+          } catch (err) {
+            this.sendJSON(res, 400, { error: err instanceof Error ? err.message : String(err) });
+            return;
+          }
+          this.sendJSON(res, 200, { data: this.journal.chunk(params) });
           return;
         }
 

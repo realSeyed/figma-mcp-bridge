@@ -1,5 +1,6 @@
 import { Leader, leaderUrl } from "./leader.js";
 import { Follower } from "./follower.js";
+import { JOURNAL_CHUNK_REQUEST } from "./journal.js";
 import { AUDITOR_ROLE } from "./role.js";
 import type { ProcessRole } from "./role.js";
 import { Role } from "./types.js";
@@ -52,6 +53,13 @@ export class Node {
     fileKey?: string
   ): Promise<BridgeResponse> {
     if (this._role === Role.Leader && this.leader) {
+      // The leader reads its own journal: the chunk command never reaches the plugin.
+      if (requestType === JOURNAL_CHUNK_REQUEST) {
+        const leader = this.leader;
+        return new Promise((resolve) => {
+          resolve({ type: requestType, requestId: "", data: leader.journalChunk(params) });
+        });
+      }
       return this.leader
         .getBridge()
         .sendWithParams(requestType, nodeIds, params, fileKey, this.processRole === AUDITOR_ROLE);

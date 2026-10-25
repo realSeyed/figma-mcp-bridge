@@ -17,8 +17,11 @@
  *
  * At start the leader reads the file and checks each line. A failure makes the
  * journal broken: the leader reports it, refuses each write, and never
- * truncates, repairs or rewrites the file. The journal keeps the count and the
- * head in memory, not the entries.
+ * truncates, repairs or rewrites the file. The journal keeps the count, the
+ * head and the byte offset of each line in memory, not the entries.
+ *
+ * `dump_journal_chunk` is the internal command of `dump_journal`: the leader
+ * serves it itself with `chunk`, from the file, and never sends it to a plugin.
  *
  * The journal holds the params and the responses of each write: it is private
  * data of the owner.
@@ -27,7 +30,15 @@
  * `rpc-token.ts` and types.
  */
 
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  writeSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { canonicalBytes, canonicalJson, sha256Hex, utcTimestamp } from "./evidence.js";
 import { installStateFolder } from "./rpc-token.js";
@@ -40,6 +51,12 @@ export const JOURNAL_FILE_NAME = "write-journal.jsonl";
 
 /** The `prevHash` of the first entry, and the head of an empty journal. */
 export const GENESIS_HASH = "0".repeat(64);
+
+/**
+ * The internal command that fetches the entries for `dump_journal`. The leader
+ * serves it itself, from the journal file: it never goes to the plugin.
+ */
+export const JOURNAL_CHUNK_REQUEST = "dump_journal_chunk";
 
 /**
  * The requests that add no entry. The list is a record of its own, written
@@ -71,7 +88,66 @@ export const READ_ONLY_REQUESTS: ReadonlySet<string> = new Set([
   "get_design_context",
   "get_motion_styles",
   "get_node_motion",
+  // The dump of the journal. The leader serves the chunk command itself.
+  JOURNAL_CHUNK_REQUEST,
 ]);
+
+/** The most bytes of entry text in one chunk, unless the chunk would be empty. */
+export const MAX_CHUNK_BYTES = 4_000_000;
+
+/** The params of one `dump_journal_chunk` request. */
+export interface JournalChunkParams {
+  /** The entries after this `seq` come back. */
+  afterSeq: number;
+  /** The last `seq` of the dump, or null on the first request: the current count. */
+  throughSeq: number | null;
+  /** The most entries in the answer. */
+  maxEntries: number;
+}
+
+/** The answer of one `dump_journal_chunk` request. */
+export interface JournalChunk {
+  status: "ok";
+  /** The count of the journal when the leader read the chunk. */
+  entryCount: number;
+  /** The head of the journal when the leader read the chunk. */
+  headHash: string;
+  /** The entries with `afterSeq < seq <= throughSeq`, in `seq` order. */
+  entries: JournalEntry[];
+}
+
+/**
+ * Reads the params of a `dump_journal_chunk` request.
+ * @param params - The params of the request.
+ * @returns The params.
+ * @throws With the field, the cause and the correction.
+ */
+export function parseChunkParams(params: unknown): JournalChunkParams {
+  const value = isRecord(params) ? params : {};
+  const problems: string[] = [];
+  const { afterSeq, throughSeq, maxEntries } = value;
+  if (!Number.isSafeInteger(afterSeq) || (afterSeq as number) < 0) {
+    problems.push(`afterSeq is ${show(afterSeq)}, but it must be an integer of 0 or more`);
+  }
+  if (throughSeq !== null && (!Number.isSafeInteger(throughSeq) || (throughSeq as number) < 0)) {
+    problems.push(
+      `throughSeq is ${show(throughSeq)}, but it must be an integer of 0 or more, or null`
+    );
+  }
+  if (!Number.isSafeInteger(maxEntries) || (maxEntries as number) < 1) {
+    problems.push(`maxEntries is ${show(maxEntries)}, but it must be an integer of 1 or more`);
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `${JOURNAL_CHUNK_REQUEST}: ${problems.join("; ")}. Send { afterSeq, throughSeq, maxEntries } as the dump_journal tool does.`
+    );
+  }
+  return {
+    afterSeq: afterSeq as number,
+    throughSeq: throughSeq as number | null,
+    maxEntries: maxEntries as number,
+  };
+}
 
 /** What the plugin answered, or why the wait ended. */
 export type JournalResponse = { data: unknown } | { error: string };
@@ -141,6 +217,12 @@ export class WriteJournal {
   private headHash = GENESIS_HASH;
   private brokenReason: string | null = null;
   private fd: number | null = null;
+  /**
+   * The byte offset after each line: line `n` (the entry with `seq` n) spans
+   * `[lineEnds[n - 2] ?? 0, lineEnds[n - 1])`. One number for each entry, so a
+   * chunk reads its own lines and not the whole file.
+   */
+  private lineEnds: number[] = [];
 
   /** @param file - The journal file. The default is `journalFilePath()`. */
   constructor(readonly file: string = journalFilePath()) {}
@@ -154,6 +236,7 @@ export class WriteJournal {
     this.entryCount = 0;
     this.headHash = GENESIS_HASH;
     this.brokenReason = null;
+    this.lineEnds = [];
 
     let bytes: Buffer;
     try {
@@ -223,10 +306,12 @@ export class WriteJournal {
       prevHash: this.headHash,
     };
     let entry: JournalEntry = { ...unhashed, hash: GENESIS_HASH };
+    let lineBytes = 0;
 
     try {
       entry = { ...unhashed, hash: entryHash(unhashed) };
       const line = Buffer.from(`${canonicalJson(entry)}\n`, "utf8");
+      lineBytes = line.length;
       const fd = this.open();
       for (let written = 0; written < line.length;) {
         written += writeSync(fd, line, written, line.length - written);
@@ -245,7 +330,82 @@ export class WriteJournal {
 
     this.entryCount = entry.seq;
     this.headHash = entry.hash;
+    this.lineEnds.push(this.endOfFile() + lineBytes);
     return entry;
+  }
+
+  /**
+   * The entries of one `dump_journal_chunk` request, read from the file: those
+   * with `afterSeq < seq <= throughSeq`, at most `maxEntries`, and at most
+   * `MAX_CHUNK_BYTES` of entry text, but one entry at least when one remains.
+   * The count and the head of the answer are those of this moment.
+   * @param params - The params of the request.
+   * @returns The chunk.
+   * @throws If the journal is broken, the range is not in the journal, or the
+   *   file does not hold the lines that the load and the appends counted.
+   */
+  chunk(params: JournalChunkParams): JournalChunk {
+    if (this.brokenReason !== null) {
+      throw new Error(
+        `${JOURNAL_CHUNK_REQUEST}: the write journal ${this.file} is broken (${this.brokenReason}), ` +
+          `so it cannot be dumped. ${REPAIR}`
+      );
+    }
+    const throughSeq = params.throughSeq ?? this.entryCount;
+    if (throughSeq > this.entryCount || params.afterSeq > throughSeq) {
+      throw new Error(
+        `${JOURNAL_CHUNK_REQUEST}: the range afterSeq ${params.afterSeq} to throughSeq ${throughSeq} ` +
+          `is not in the journal, which holds ${this.entryCount} entries. A new leader may serve ` +
+          `the dump: call dump_journal again.`
+      );
+    }
+
+    const first = params.afterSeq;
+    const start = first === 0 ? 0 : this.lineEnds[first - 1];
+    let last = first;
+    while (last < throughSeq && last - first < params.maxEntries) {
+      if (last > first && this.lineEnds[last] - start > MAX_CHUNK_BYTES) break;
+      last++;
+    }
+    const end = last === 0 ? 0 : this.lineEnds[last - 1];
+
+    const entries: JournalEntry[] = [];
+    if (end > start) {
+      const bytes = Buffer.alloc(end - start);
+      const fd = openSync(this.file, "r");
+      try {
+        for (let read = 0; read < bytes.length;) {
+          const count = readSync(fd, bytes, read, bytes.length - read, start + read);
+          if (count === 0) break;
+          read += count;
+        }
+      } finally {
+        closeSync(fd);
+      }
+      const lines = bytes.toString("utf8").split("\n");
+      for (let index = 0; index < last - first; index++) {
+        const seq = first + index + 1;
+        let entry: unknown;
+        try {
+          entry = JSON.parse(lines[index]);
+        } catch {
+          entry = null;
+        }
+        if (!isRecord(entry) || entry.seq !== seq) {
+          throw new Error(
+            `${JOURNAL_CHUNK_REQUEST}: line ${seq} of the write journal ${this.file} is not the ` +
+              `entry that the leader counted, so the file changed outside the leader. ${REPAIR}`
+          );
+        }
+        entries.push(entry as unknown as JournalEntry);
+      }
+    }
+    return { status: "ok", entryCount: this.entryCount, headHash: this.headHash, entries };
+  }
+
+  /** The byte offset after the last line that the load and the appends counted. */
+  private endOfFile(): number {
+    return this.lineEnds.length === 0 ? 0 : this.lineEnds[this.lineEnds.length - 1];
   }
 
   /** Closes the file. A later append opens it again. */
@@ -335,6 +495,7 @@ export class WriteJournal {
       // head of the lines before the first bad one.
       this.entryCount = lineNumber;
       this.headHash = previousHash;
+      this.lineEnds.push(start);
     }
     return null;
   }
@@ -399,6 +560,10 @@ function checkFields(value: unknown): string | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function show(value: unknown): string {
+  return JSON.stringify(value) ?? String(value);
 }
 
 function errorCode(err: unknown): string | undefined {
