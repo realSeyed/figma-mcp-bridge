@@ -197,7 +197,7 @@ nothing. A dump adds no entry.
 | `plugin/test/`                             | `bun test` tests of the serializer, the dump form, and the chunk walk. Synthetic nodes.                                |
 | `tools/audit/`                             | The audit toolset in Python 3.11, standard library only. `README.md` holds its rules.                                  |
 | `tools/audit/auditlib/`                    | `dumps.py` (both formats, the visible projection), `manifest.py`, `outputs.py`, `config.py`, `paths.py`, `toolset.py`. |
-| `tools/audit/*.py`                         | `census.py`, `contrast.py`, `sr_precheck.py`, `completeness.py`, and `selfcheck.py`.                                   |
+| `tools/audit/*.py`                         | `census.py`, `contrast.py`, `sr_precheck.py`, `completeness.py`, `journal_check.py`, and `selfcheck.py`.               |
 | `tools/audit/assert.py`                    | The checks runner: a checks file against a dump, one PASS or FAIL for each check.                                      |
 | `tools/audit/diff_dumps.py`                | The dump diff: `bytes`, `nodes`, and `fields` (a baseline against `dump_nodes` output).                                |
 | `tools/audit/tile.py`                      | The tiler: a PNG capture into overlapping tiles of about 1,000 pixels, never scaled.                                   |
@@ -303,13 +303,21 @@ python tools/audit/render_report.py --assert <label>.assert.json --surfaces <sur
 python tools/audit/run_audit.py <package> --outputs C:/audit-output/rerun
 ```
 
+```bash
+python tools/audit/journal_check.py <journal dump folder> [--after <hash>] [--expected <expected-writes.json>] --outputs C:/audit-output/journal
+```
+
 The tests need no Figma and no fixtures. The self-check reads the known answers of the
 fixtures folder and exits with a code other than 0 at a mismatch or a missing input. Write
 its outputs outside the fixtures folder; the toolset refuses an outputs folder in it. Run
 the tests after each change in `tools/audit/`, and the self-check on the real fixtures when
 the owner has them. `render_report.py` exits with 1 when its verdict is FAIL; `run_audit.py`
 exits with 1 at a figure that differs from the recorded one and with 2 at a toolset commit
-other than the recorded one, unless `--allow-other-commit` is given.
+other than the recorded one, unless `--allow-other-commit` is given. `journal_check.py` prints
+`JOURNAL_CHECK PASS entries=<n> head=<hash>` or `JOURNAL_CHECK FAIL ... failed=<count>`, and
+exits with 0 when each check passes, with 1 when a check fails (an `--after` hash that is in
+no entry included), and with 2 when an input is wrong, also a journal file that does not
+match its manifest.
 
 `FIGMA_BRIDGE_DUMP_CHUNK_NODES` is a setting for tests only: the most records that one
 `dump_nodes_chunk` request returns, an integer of 1 or more. The default is 1,000. The test
