@@ -1946,12 +1946,18 @@ const commitUndo = (): void => {
 /**
  * Runs one server request. After an edit request, a failed one too, it
  * commits the undo history: each write is one undo step, also a partial one.
+ * An error that does not name the tool gets the tool name in front, as
+ * `runExtension` does for an extension: a core tool throws from wherever it
+ * found the problem, often a shared helper.
  * @param request - The request.
  * @returns The answer.
  */
 export const handleRequest = async (request: ServerRequest): Promise<PluginResponse> => {
   const response = await runRequest(request);
   if (isEditRequest(request.type)) commitUndo();
+  if (response.error !== undefined && !response.error.includes(request.type)) {
+    return { ...response, error: `${request.type}: ${response.error}` };
+  }
   return response;
 };
 

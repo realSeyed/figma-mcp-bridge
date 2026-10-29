@@ -1,6 +1,7 @@
 /**
- * `handleRequest` of `code.ts`: the undo commit after each edit request. A
- * small fake on `globalThis.figma` stands in for the Plugin API.
+ * `handleRequest` of `code.ts`: the undo commit after each edit request, and
+ * the tool name in the error of a core tool. A small fake on
+ * `globalThis.figma` stands in for the Plugin API.
  */
 
 import { beforeEach, describe, expect, test } from "bun:test";
@@ -69,5 +70,33 @@ describe("the undo history", () => {
       requestId: "edit",
       data: { results: [{ nodeId: "1:1", previousVisible: false, visible: true }] },
     });
+  });
+});
+
+describe("the error of a core tool", () => {
+  test("names the tool one time, as the error of an extension does", async () => {
+    resetFakeFigma().getNodeByIdAsync = async () => null;
+
+    const missing = await pluginMain.handleRequest({
+      type: "get_node",
+      requestId: "missing",
+      nodeIds: ["9:9"],
+    });
+    expect(missing.error).toBe("get_node: Node not found: 9:9");
+
+    const named = await pluginMain.handleRequest({
+      type: "set_node_visibility",
+      requestId: "named",
+      params: { items: [] },
+    });
+    expect(named.error).toBe("items is required for set_node_visibility");
+
+    const extension = await pluginMain.handleRequest({
+      type: "e2e_fixture",
+      requestId: "extension",
+      params: { op: "no_such_op" },
+    });
+    expect(extension.error).toStartWith("e2e_fixture: requires op as one of");
+    expect(extension.error!.split("e2e_fixture").length).toBe(2);
   });
 });
