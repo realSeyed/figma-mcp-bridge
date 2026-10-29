@@ -3,6 +3,8 @@ export interface BridgeRequest {
   requestId: string;
   nodeIds?: string[];
   params?: Record<string, unknown>;
+  /** How long the leader waits for the answer. The request queue of the plugin uses it too. */
+  timeoutMs?: number;
 }
 
 export interface BridgeResponse {
@@ -49,6 +51,16 @@ export interface JournalState {
   reason?: string;
 }
 
+/** How a session goes: for `/ping` and `list_files`. */
+export interface Health {
+  /** The last events of the leader, oldest first: the lines of its diagnostics log. */
+  events: Array<Record<string, unknown>>;
+  /** The requests that wait for a plugin answer now. */
+  pending: number;
+  /** What a person should look at. Empty when nothing is wrong. */
+  warnings: string[];
+}
+
 /** What the leader knows: its own build, its start time, and the connected files. */
 export interface LeaderIdentity {
   /** The commit of the leader build. */
@@ -58,6 +70,8 @@ export interface LeaderIdentity {
   files: ConnectedFile[];
   /** The write journal of the leader, or null from a leader of an older build. */
   journal: JournalState | null;
+  /** The health of the leader. A leader of an older build sends none. */
+  health?: Health;
 }
 
 /**
@@ -67,6 +81,8 @@ export interface LeaderIdentity {
  */
 export interface IdentityReport extends LeaderIdentity {
   bridgeCommit: string;
+  /** The health of the leader, with the warnings of the process that serves the call. */
+  health: Health;
 }
 
 /** The identity of one file, as a manifest records it. */

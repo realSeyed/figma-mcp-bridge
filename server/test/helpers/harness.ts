@@ -10,16 +10,22 @@
  * Start order: the leader process first, then the simulated plugin, then the
  * followers.
  *
- * Each server process of one harness shares one install token file and one
- * write journal file in temporary folders, so no test reads the real token
- * file or touches the real write journal.
+ * Each server process of one harness shares one install token file, one
+ * write journal file and one diagnostics log in temporary folders, so no test
+ * reads the real token file or touches the real write journal or log.
  */
 
 import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startServer, type ServerOptions, type ServerProcess } from "./server-process.js";
+import {
+  startServer,
+  startStandalone,
+  type ServerOptions,
+  type ServerProcess,
+  type StandaloneProcess,
+} from "./server-process.js";
 import { connectPlugin, type PluginOptions, type SimulatedPlugin } from "./plugin.js";
 
 /** The port of the production bridge. The harness never uses it. */
@@ -29,6 +35,7 @@ export class Harness {
   private teardowns: Array<() => Promise<void>> = [];
   private tokenPath: string | undefined;
   private journalPath: string | undefined;
+  private logPath: string | undefined;
 
   /** Runs each teardown in reverse order. Collects errors and throws the first one. */
   async cleanup(): Promise<void> {
@@ -124,23 +131,55 @@ export class Harness {
   }
 
   /**
+   * The diagnostics log of this harness, in a temporary folder. The first
+   * server process that logs an event makes the file.
+   * @returns The absolute path.
+   */
+  async logFile(): Promise<string> {
+    if (this.logPath === undefined) {
+      this.logPath = join(await this.tempDir("log"), "bridge.log");
+    }
+    return this.logPath;
+  }
+
+  /**
    * Starts `node dist/index.js` and waits until it has a role. The process
    * gets the token file and the journal file of this harness unless
-   * `options.env` names others.
+   * `options.env` names others. It waits for no plugin
+   * (`FIGMA_BRIDGE_CONNECT_GRACE_MS` is `0`) unless `options.env` sets a grace,
+   * so a call with no plugin fails at once, as each older test expects.
    * @param options - Port, working directory, and environment changes.
    * @returns The running process.
    */
   async server(options: ServerOptions): Promise<ServerProcess> {
-    const server = await startServer({
-      ...options,
-      env: {
-        FIGMA_BRIDGE_TOKEN_FILE: await this.tokenFile(),
-        FIGMA_BRIDGE_JOURNAL_FILE: await this.journalFile(),
-        ...options.env,
-      },
-    });
+    const server = await startServer({ ...options, env: await this.env(options.env) });
     this.defer(() => server.close());
     return server;
+  }
+
+  /**
+   * Starts `node dist/index.js --standalone` with the files of this harness,
+   * as `server` does, and waits until it listens. Stopped at cleanup.
+   * @param options - Port, working directory, and environment changes.
+   * @returns The running process.
+   */
+  async standalone(options: ServerOptions): Promise<StandaloneProcess> {
+    const leader = await startStandalone({ ...options, env: await this.env(options.env) });
+    this.defer(() => leader.close());
+    return leader;
+  }
+
+  /** The files of this harness and no grace, then the changes of the test. */
+  private async env(
+    changes: Record<string, string | undefined> = {}
+  ): Promise<Record<string, string | undefined>> {
+    return {
+      FIGMA_BRIDGE_TOKEN_FILE: await this.tokenFile(),
+      FIGMA_BRIDGE_JOURNAL_FILE: await this.journalFile(),
+      FIGMA_BRIDGE_LOG_FILE: await this.logFile(),
+      FIGMA_BRIDGE_CONNECT_GRACE_MS: "0",
+      ...changes,
+    };
   }
 
   /**

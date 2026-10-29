@@ -3,11 +3,15 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Node } from "./node.js";
+import { BRIDGE_COMMIT } from "./build-info.js";
+import { logEvent } from "./diagnostics.js";
 import { Election } from "./election.js";
+import { LEADER_HOST, leaderUrl } from "./leader.js";
 import { describeOutputRoot } from "./output-root.js";
 import { AUDITOR_TOOLS, missingTools, parseRole, restrictServer, ROLE_VARIABLE } from "./role.js";
 import type { ProcessRole } from "./role.js";
 import { rpcToken } from "./rpc-token.js";
+import { checkTimingSettings } from "./timeouts.js";
 import { registerTools } from "./tools.js";
 import { VERSION } from "./version.js";
 
@@ -41,14 +45,109 @@ function resolveRole(): ProcessRole {
 }
 const ROLE = resolveRole();
 
+// A bad timing value stops the process at start, not at the first tool call.
+try {
+  checkTimingSettings();
+} catch (err) {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+}
+
+// A standalone leader serves the plugin and the followers, and has no MCP
+// client: it lives until a signal, not as long as the first MCP client.
+const STANDALONE_VARIABLE = "FIGMA_BRIDGE_STANDALONE";
+function resolveStandalone(): boolean {
+  if (process.argv.slice(2).includes("--standalone")) return true;
+  const raw = process.env[STANDALONE_VARIABLE]?.trim();
+  if (raw === undefined || raw === "" || raw === "0") return false;
+  if (raw === "1") return true;
+  console.error(
+    `Invalid ${STANDALONE_VARIABLE} "${raw}": set it to 1 for a standalone leader, or unset it.`
+  );
+  process.exit(1);
+}
+const STANDALONE = resolveStandalone();
+
+/**
+ * Runs the standalone leader: it binds the port or exits with 1, and never
+ * follows. No MCP transport and no standard input handler: only a signal stops it.
+ */
+async function runStandalone(): Promise<void> {
+  rpcToken();
+  logEvent("start", {
+    version: VERSION,
+    bridgeCommit: BRIDGE_COMMIT,
+    port: PORT,
+    standalone: true,
+  });
+  const node = new Node(PORT, ROLE);
+  try {
+    await node.becomeLeader();
+  } catch (err) {
+    const holder = await readPing(PORT);
+    console.error(
+      holder !== null
+        ? `A bridge leader already listens on ${LEADER_HOST}:${PORT} (version ${holder.version ?? "unknown"}, leaderStartedAt ${holder.leaderStartedAt ?? "unknown"}, bridgeCommit ${holder.bridgeCommit ?? "unknown"}). Stop it first, or set another FIGMA_BRIDGE_PORT.`
+        : `The standalone leader could not listen on ${LEADER_HOST}:${PORT}: ${err instanceof Error ? err.message : String(err)}. Free the port, or set another FIGMA_BRIDGE_PORT.`
+    );
+    process.exit(1);
+  }
+  console.error(`Standalone leader listening on ${LEADER_HOST}:${PORT}`);
+
+  let shuttingDown = false;
+  const shutdown = (reason: string, code = 0): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.error(`Shutting down (${reason})...`);
+    logEvent("shutdown", { reason });
+    node.stop();
+    process.exit(code);
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGHUP", () => shutdown("SIGHUP"));
+  process.on("uncaughtException", (err) => {
+    console.error("Uncaught exception:", err);
+    shutdown("uncaughtException", 1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    console.error("Unhandled rejection:", reason);
+  });
+}
+
+/** What `/ping` of the leader on `port` reports, or null when nothing answers. */
+async function readPing(
+  port: number
+): Promise<{ version?: string; leaderStartedAt?: string; bridgeCommit?: string } | null> {
+  try {
+    const response = await fetch(`${leaderUrl(port)}/ping`, { signal: AbortSignal.timeout(2_000) });
+    return response.ok ? ((await response.json()) as Record<string, string>) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function main(): Promise<void> {
+  if (STANDALONE) {
+    await runStandalone();
+    return;
+  }
   console.error(describeOutputRoot());
   // Read the install token now: a bad token file stops the process at start,
   // not at the first tool call. The token itself is never logged.
   rpcToken();
+  logEvent("start", {
+    version: VERSION,
+    bridgeCommit: BRIDGE_COMMIT,
+    port: PORT,
+    standalone: false,
+    tools: ROLE ?? "full",
+  });
 
   const node = new Node(PORT, ROLE);
   const election = new Election(PORT, node);
+  // A call that lost its leader runs an election check at once, not at the next tick.
+  node.setRecovery(() => election.checkNow());
   await election.start();
 
   let transport: StdioServerTransport | null = null;
@@ -57,6 +156,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.error(`Shutting down (${reason})...`);
+    logEvent("shutdown", { reason });
 
     const force = setTimeout(() => {
       console.error("Shutdown timeout exceeded, forcing exit");

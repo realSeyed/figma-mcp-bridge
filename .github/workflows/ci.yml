@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+
+      # The version the checks run with locally, so a lockfile change of a
+      # newer Bun does not fail the frozen install.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Install the root dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install the server dependencies
+        working-directory: server
+        run: bun install --frozen-lockfile
+
+      - name: Install the plugin dependencies
+        working-directory: plugin
+        run: bun install --frozen-lockfile
+
+      - name: Build, type check, and check the format
+        run: bun run check
+
+      - name: Run the server and plugin tests
+        run: bun run test
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run the audit toolset tests
+        run: python -m unittest discover -s tools/audit/tests -t .

@@ -6,12 +6,23 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, fsyncSync, writeSync } from "node:fs";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { LOG_FILE_VARIABLE } from "../src/diagnostics.js";
 import { canonicalJson } from "../src/evidence.js";
-import { entryHash, GENESIS_HASH, READ_ONLY_REQUESTS, type JournalEntry } from "../src/journal.js";
+import {
+  digestLongStrings,
+  entryHash,
+  GENESIS_HASH,
+  MAX_JOURNAL_STRING,
+  READ_ONLY_REQUESTS,
+  WriteJournal,
+  type JournalEntry,
+  type JournalFs,
+  type JournalRecord,
+} from "../src/journal.js";
 import { AUDITOR_INTERNAL_COMMANDS, AUDITOR_TOOLS } from "../src/role.js";
 import type { IdentityReport, JournalState } from "../src/types.js";
 import { chunker, SYNTHETIC_TREE } from "./helpers/dump-tree.js";
@@ -583,10 +594,10 @@ describe("a broken chain", () => {
       valid: 1,
     },
     {
-      name: "a torn last line",
-      text: VALID.slice(0, -1),
-      reason: /^line 3: the line does not end with a newline \(a torn append\)/,
-      valid: 2,
+      name: "a bad line before a torn last line",
+      text: `${lines[0]}\n${lines[1].replace('"ok-2"', '"ok-9"')}\n${lines[2]}`,
+      reason: /^line 2: hash is not the SHA-256/,
+      valid: 1,
     },
   ];
 
@@ -640,6 +651,266 @@ describe("a broken chain", () => {
       TIMEOUT_MS
     );
   }
+});
+
+describe("a torn last line", () => {
+  test(
+    "moves aside: its bytes go to a side file, journal_recovered joins the chain, and a write succeeds",
+    async () => {
+      const { text: VALID, entries: ENTRIES } = syntheticJournal();
+      const dir = await h.tempDir("torn");
+      const file = join(dir, "write-journal.jsonl");
+      // The last line lost its newline, as an append that stopped halfway leaves it.
+      await writeFile(file, VALID.slice(0, -1), "utf8");
+      const tornBytes = Buffer.from(`${canonicalJson(ENTRIES[2])}`, "utf8");
+
+      const { port, leader, follower } = await bridge({
+        env: { FIGMA_BRIDGE_JOURNAL_FILE: file },
+      });
+
+      const state = (await ping(port)).journal;
+      expect(state.status).toBe("ok");
+      expect(state.entryCount).toBe(3);
+
+      const sideFiles = (await readdir(dir)).filter((name) =>
+        name.startsWith("write-journal.jsonl.torn-")
+      );
+      expect(sideFiles).toHaveLength(1);
+      const savedTo = join(dir, sideFiles[0]);
+      expect(await readFile(savedTo)).toEqual(tornBytes);
+
+      const entries = await journalEntries(file);
+      expect(entries.slice(0, 2)).toEqual(ENTRIES.slice(0, 2));
+      const recovered = entries[2];
+      expect(recovered).toMatchObject({
+        seq: 3,
+        fileKey: "",
+        epoch: 0,
+        auditor: false,
+        tool: "journal_recovered",
+        nodeIds: null,
+        params: {
+          tornBytes: tornBytes.length,
+          tornSha256: createHash("sha256").update(tornBytes).digest("hex"),
+          savedTo,
+        },
+        response: { data: null },
+        prevHash: ENTRIES[1].hash,
+      });
+      expect(recovered.hash).toBe(independentHash(recovered));
+      expect(state.headHash).toBe(recovered.hash);
+      expect(leader.stderr.filter((line) => line.includes("ended with a torn line"))).toHaveLength(
+        1
+      );
+      expect(leader.stderr.filter((line) => line.includes("is broken"))).toHaveLength(0);
+
+      await outcomeOk(follower, "set_node_properties", {
+        nodeId: NODE_ID,
+        x: 1,
+        fileKey: FILE_KEY,
+      });
+      const after = await journalEntries(file);
+      expect(after).toHaveLength(4);
+      expect(after[3]).toMatchObject({
+        seq: 4,
+        tool: "set_node_properties",
+        prevHash: recovered.hash,
+      });
+      expect((await ping(port)).journal).toEqual({
+        status: "ok",
+        entryCount: 4,
+        headHash: after[3].hash,
+      });
+    },
+    TIMEOUT_MS
+  );
+});
+
+describe("a long string", () => {
+  /** The digest of a long string, calculated here without the module under test. */
+  const digest = (text: string) => ({
+    omitted: true,
+    sha256: createHash("sha256").update(text, "utf8").digest("hex"),
+    bytes: Buffer.byteLength(text, "utf8"),
+  });
+
+  test(
+    "goes into the entry as its digest, in the params and in the response, and the plugin gets it whole",
+    async () => {
+      // Two bytes in UTF-8 each, so the byte count is not the length.
+      const long = "é".repeat(MAX_JOURNAL_STRING + 1);
+      const answer = "a".repeat(20_000);
+      const { port, plugin } = await bridge({
+        extra: { set_text_content: () => ({ echo: answer, short: "kept" }) },
+      });
+
+      const reply = await postRpc(port, await h.token(), {
+        tool: "set_text_content",
+        nodeIds: [NODE_ID],
+        params: { text: long },
+        fileKey: FILE_KEY,
+      });
+      expect(reply.body).toEqual({ data: { echo: answer, short: "kept" } });
+      const request = plugin.requests.find((r) => r.type === "set_text_content")!;
+      expect(request.params?.text).toBe(long);
+
+      const [entry] = await journalEntries(await h.journalFile());
+      expect(entry.params).toEqual({ ...request.params, text: digest(long) });
+      expect(entry.response).toEqual({ data: { echo: digest(answer), short: "kept" } });
+      expect(digest(long).bytes).toBe(2 * (MAX_JOURNAL_STRING + 1));
+      expect(entry.hash).toBe(independentHash(entry));
+    },
+    TIMEOUT_MS
+  );
+
+  test("the digest walks arrays and objects, and keeps a string of the limit", () => {
+    const limit = "x".repeat(MAX_JOURNAL_STRING);
+    const over = `${limit}y`;
+    const value = { list: [limit, over, 1, null, { inner: over }], flag: true };
+
+    expect(digestLongStrings(value)).toEqual({
+      list: [limit, digest(over), 1, null, { inner: digest(over) }],
+      flag: true,
+    });
+    expect(value.list[1]).toBe(over);
+  });
+});
+
+describe("the append retry", () => {
+  // A broken journal writes an event to the diagnostics log. In this test
+  // process that is a file of the harness, never the log of the install.
+  let installLog: string | undefined;
+  beforeEach(async () => {
+    installLog = process.env[LOG_FILE_VARIABLE];
+    process.env[LOG_FILE_VARIABLE] = join(await h.tempDir("log"), "bridge.log");
+  });
+  afterEach(() => {
+    if (installLog === undefined) delete process.env[LOG_FILE_VARIABLE];
+    else process.env[LOG_FILE_VARIABLE] = installLog;
+  });
+
+  const RECORD: JournalRecord = {
+    fileKey: FILE_KEY,
+    epoch: 1,
+    auditor: false,
+    tool: "set_node_properties",
+    nodeIds: null,
+    params: { nodeId: NODE_ID, x: 1 },
+    response: { data: null },
+  };
+
+  const failure = (code: string): Error => Object.assign(new Error(`synthetic ${code}`), { code });
+
+  /**
+   * File calls that fail with the given codes first, then pass to node:fs.
+   * @returns The calls, and the pauses that the journal asked for.
+   */
+  function failingFs(writeCodes: string[], fsyncCodes: string[] = []) {
+    const sleeps: number[] = [];
+    const fs: JournalFs = {
+      writeSync(fd, buffer, offset, length) {
+        const code = writeCodes.shift();
+        if (code !== undefined) throw failure(code);
+        return writeSync(fd, buffer, offset, length);
+      },
+      fsyncSync(fd) {
+        const code = fsyncCodes.shift();
+        if (code !== undefined) throw failure(code);
+        fsyncSync(fd);
+      },
+      sleep: (ms) => {
+        sleeps.push(ms);
+      },
+    };
+    return { fs, sleeps };
+  }
+
+  /** A journal on a new file in a temporary folder, loaded. */
+  async function journalWith(fs: JournalFs) {
+    const file = join(await h.tempDir("retry"), "write-journal.jsonl");
+    const journal = new WriteJournal(file, fs);
+    journal.load();
+    h.defer(async () => journal.close());
+    return { file, journal };
+  }
+
+  test("a write that fails with EAGAIN twice is tried again, 50 ms apart, and recorded once", async () => {
+    const { fs, sleeps } = failingFs(["EAGAIN", "EAGAIN"]);
+    const { file, journal } = await journalWith(fs);
+
+    const entry = journal.append(RECORD);
+
+    expect(sleeps).toEqual([50, 50]);
+    expect(journal.state()).toEqual({ status: "ok", entryCount: 1, headHash: entry.hash });
+    expect(await readFile(file, "utf8")).toBe(`${canonicalJson(entry)}\n`);
+  });
+
+  test("a short write, then an interrupted one, send only the bytes not yet written", async () => {
+    const asked: number[] = [];
+    const fs: JournalFs = {
+      writeSync(fd, buffer, offset, length) {
+        asked.push(length);
+        if (asked.length === 1) return writeSync(fd, buffer, offset, Math.floor(length / 2));
+        if (asked.length === 2) throw failure("EINTR");
+        return writeSync(fd, buffer, offset, length);
+      },
+      fsyncSync: (fd) => fsyncSync(fd),
+      sleep: () => undefined,
+    };
+    const { file, journal } = await journalWith(fs);
+
+    const entry = journal.append(RECORD);
+
+    const line = `${canonicalJson(entry)}\n`;
+    const total = Buffer.byteLength(line, "utf8");
+    const rest = total - Math.floor(total / 2);
+    expect(asked).toEqual([total, rest, rest]);
+    expect(await readFile(file, "utf8")).toBe(line);
+  });
+
+  test("an fsync that keeps failing with EBUSY makes the journal broken after 3 more tries", async () => {
+    const { fs, sleeps } = failingFs([], ["EBUSY", "EBUSY", "EBUSY", "EBUSY"]);
+    const { journal } = await journalWith(fs);
+
+    expect(() => journal.append(RECORD)).toThrow("could not record it");
+
+    expect(sleeps).toEqual([50, 50, 50]);
+    const state = journal.state();
+    expect(state.status).toBe("broken");
+    expect(state.reason).toBe("the append of entry 1 failed (EBUSY)");
+    const logged = (await readFile(process.env[LOG_FILE_VARIABLE]!, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(logged).toEqual([
+      expect.objectContaining({ event: "journal_broken", reason: state.reason }),
+    ]);
+  });
+
+  test("an error that does not pass is not tried again", async () => {
+    const { fs, sleeps } = failingFs(["ENOSPC"]);
+    const { journal } = await journalWith(fs);
+
+    expect(() => journal.append(RECORD)).toThrow("could not record it");
+
+    expect(sleeps).toEqual([]);
+    expect(journal.state().reason).toBe("the append of entry 1 failed (ENOSPC)");
+  });
+
+  test("EPERM is tried again on Windows only", async () => {
+    const { fs, sleeps } = failingFs(["EPERM"]);
+    const { journal } = await journalWith(fs);
+
+    if (process.platform === "win32") {
+      journal.append(RECORD);
+      expect(sleeps).toEqual([50]);
+      expect(journal.state().status).toBe("ok");
+    } else {
+      expect(() => journal.append(RECORD)).toThrow("could not record it");
+      expect(sleeps).toEqual([]);
+      expect(journal.state().status).toBe("broken");
+    }
+  });
 });
 
 describe("the read-only list", () => {

@@ -10,6 +10,8 @@ export interface PluginRequest {
   requestId: string;
   nodeIds?: string[];
   params?: Record<string, unknown>;
+  /** How long the leader waits for the answer. */
+  timeoutMs?: number;
 }
 
 /** Returns the `data` of the answer. A throw becomes an `error` answer. */
@@ -22,17 +24,27 @@ export interface PluginOptions {
   /** The `pluginBuild` query parameter. Omitted when not given, as an older plugin does. */
   pluginBuild?: string;
   handlers?: Record<string, PluginHandler>;
+  /**
+   * Opt-in: after each close of its socket, the plugin connects again to the
+   * same port this long after, as the plugin window does (1.5 s), until
+   * `close` is called. A refused attempt waits the same time again.
+   */
+  reconnectMs?: number;
 }
 
 export interface SimulatedPlugin {
-  /** Each request the plugin got, in order. */
+  /** Each request the plugin got, in order, over each of its sockets. */
   requests: PluginRequest[];
+  /** How many times a socket of the plugin opened. */
+  readonly connections: number;
   /**
    * Stops reading from the socket; sending still works. A close frame of the
    * leader then waits unread, so the socket stays open on this side, and an
    * answer sent now still reaches the leader. `close` reads again first.
    */
   pause(): void;
+  /** Closes the current socket from the plugin side. With `reconnectMs`, the plugin connects again. */
+  drop(): void;
   close(): Promise<void>;
 }
 
@@ -139,27 +151,48 @@ export async function connectPlugin(options: PluginOptions): Promise<SimulatedPl
     fileName: options.fileName ?? "harness",
   });
   if (options.pluginBuild !== undefined) query.set("pluginBuild", options.pluginBuild);
-  const socket = new WebSocket(`ws://127.0.0.1:${options.port}/ws?${query.toString()}`);
+  const url = `ws://127.0.0.1:${options.port}/ws?${query.toString()}`;
   const requests: PluginRequest[] = [];
   const handlers = options.handlers ?? {};
+  let connections = 0;
+  let closed = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  socket.on("message", async (raw) => {
-    const request = JSON.parse(raw.toString()) as PluginRequest;
-    requests.push(request);
-    const answer: Record<string, unknown> = { type: request.type, requestId: request.requestId };
-    const handler = handlers[request.type];
-    if (!handler) {
-      answer.error = `The simulated plugin has no handler for "${request.type}"`;
-    } else {
-      try {
-        answer.data = await handler(request);
-      } catch (err) {
-        answer.error = err instanceof Error ? err.message : String(err);
+  const open = (): WebSocket => {
+    const ws = new WebSocket(url);
+    ws.on("open", () => {
+      connections++;
+    });
+    ws.on("message", async (raw) => {
+      const request = JSON.parse(raw.toString()) as PluginRequest;
+      requests.push(request);
+      const answer: Record<string, unknown> = { type: request.type, requestId: request.requestId };
+      const handler = handlers[request.type];
+      if (!handler) {
+        answer.error = `The simulated plugin has no handler for "${request.type}"`;
+      } else {
+        try {
+          answer.data = await handler(request);
+        } catch (err) {
+          answer.error = err instanceof Error ? err.message : String(err);
+        }
       }
-    }
-    socket.send(JSON.stringify(answer));
-  });
+      // The socket the request came on: after a reconnect it is closed, and the answer is lost.
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(answer));
+    });
+    // A refused attempt: the close event follows.
+    ws.on("error", () => undefined);
+    ws.on("close", () => {
+      if (closed || options.reconnectMs === undefined || socket !== ws) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (!closed) socket = open();
+      }, options.reconnectMs);
+    });
+    return ws;
+  };
 
+  let socket = open();
   await new Promise<void>((resolve, reject) => {
     socket.once("open", () => resolve());
     socket.once("error", reject);
@@ -167,17 +200,25 @@ export async function connectPlugin(options: PluginOptions): Promise<SimulatedPl
 
   return {
     requests,
+    get connections() {
+      return connections;
+    },
     pause: () => socket.pause(),
-    close: () =>
-      new Promise<void>((resolve) => {
-        if (socket.readyState === WebSocket.CLOSED) return resolve();
-        socket.resume();
-        socket.once("close", () => resolve());
-        socket.close();
+    drop: () => socket.close(),
+    close: () => {
+      closed = true;
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      const current = socket;
+      return new Promise<void>((resolve) => {
+        if (current.readyState === WebSocket.CLOSED) return resolve();
+        current.resume();
+        current.once("close", () => resolve());
+        current.close();
         setTimeout(() => {
-          socket.terminate();
+          current.terminate();
           resolve();
         }, 2_000).unref();
-      }),
+      });
+    },
   };
 }

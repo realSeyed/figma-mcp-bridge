@@ -472,12 +472,13 @@ describe("a refused or failed dump", () => {
     async () => {
       const { text } = syntheticJournal();
       const file = join(await h.tempDir("broken"), "write-journal.jsonl");
-      await writeFile(file, text.slice(0, -1), "utf8");
+      // A changed response: a torn last line alone is moved aside, not broken.
+      await writeFile(file, text.replace('"ok-2"', '"ok-9"'), "utf8");
       const { port, follower, leader } = await bridge({
         leaderEnv: { FIGMA_BRIDGE_JOURNAL_FILE: file },
       });
       const reason = (await journalState(port)).reason!;
-      expect(reason).toContain("torn append");
+      expect(reason).toContain("line 2: hash is not the SHA-256");
 
       for (const server of [follower, leader]) {
         const outcome = await server.server.callTool("dump_journal");

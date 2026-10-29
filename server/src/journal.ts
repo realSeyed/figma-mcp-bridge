@@ -15,10 +15,22 @@
  * A request on `READ_ONLY_REQUESTS` adds no entry. Each other request that
  * reaches a plugin connection adds one, an unknown request type included.
  *
- * At start the leader reads the file and checks each line. A failure makes the
- * journal broken: the leader reports it, refuses each write, and never
- * truncates, repairs or rewrites the file. The journal keeps the count, the
- * head and the byte offset of each line in memory, not the entries.
+ * At start the leader reads the file and checks each line. One defect is
+ * recovered: a last line with no newline (a torn append) after valid lines.
+ * Its bytes move to `<journal>.torn-<UTC time>`, the file is cut back to the
+ * end of the last valid line, and a `journal_recovered` entry records the move
+ * in the chain. Each other failure makes the journal broken: the leader
+ * reports it, refuses each write, and never truncates, repairs or rewrites
+ * the file. An append whose write or `fsync` fails on a passing error
+ * (`EAGAIN`, `EBUSY`, `EINTR`, and `EPERM` on Windows) tries it again 3 times,
+ * 50 ms apart, before it makes the journal broken. The journal keeps the
+ * count, the head and the byte offset of each line in memory, not the entries.
+ *
+ * Before the hash, each string longer than `MAX_JOURNAL_STRING` in the params
+ * or in the data of the response becomes its digest: `{ "omitted": true,
+ * "sha256": <hex of its UTF-8>, "bytes": <UTF-8 length> }`. An image or an
+ * HTML import then adds a short line, not megabytes, and the entry still
+ * proves what was sent. The plugin gets the whole params.
  *
  * `dump_journal_chunk` is the internal command of `dump_journal`: the leader
  * serves it itself with `chunk`, from the file, and never sends it to a plugin.
@@ -26,8 +38,8 @@
  * The journal holds the params and the responses of each write: it is private
  * data of the owner.
  *
- * This module imports only Node built-in modules, `evidence.ts`,
- * `rpc-token.ts` and types.
+ * This module imports only Node built-in modules, `diagnostics.ts`,
+ * `evidence.ts`, `rpc-token.ts` and types.
  */
 
 import {
@@ -37,10 +49,18 @@ import {
   openSync,
   readFileSync,
   readSync,
+  truncateSync,
   writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { canonicalBytes, canonicalJson, sha256Hex, utcTimestamp } from "./evidence.js";
+import {
+  canonicalBytes,
+  canonicalJson,
+  folderTimestamp,
+  sha256Hex,
+  utcTimestamp,
+} from "./evidence.js";
+import { logEvent } from "./diagnostics.js";
 import { installStateFolder } from "./rpc-token.js";
 import type { JournalState } from "./types.js";
 
@@ -51,6 +71,33 @@ export const JOURNAL_FILE_NAME = "write-journal.jsonl";
 
 /** The `prevHash` of the first entry, and the head of an empty journal. */
 export const GENESIS_HASH = "0".repeat(64);
+
+/** The tool of the entry that records a torn last line moved aside. It is no request. */
+export const RECOVERED_TOOL = "journal_recovered";
+
+/** The longest string, in UTF-16 code units, that an entry holds as it is. */
+export const MAX_JOURNAL_STRING = 8192;
+
+/**
+ * A copy of a value in which each string longer than `MAX_JOURNAL_STRING`, at
+ * any depth, is its digest: `{ omitted: true, sha256, bytes }` of its UTF-8.
+ * @param value - Plain JSON data: the params or the data of a response.
+ * @returns The copy. The value itself is not changed.
+ */
+export function digestLongStrings(value: unknown): unknown {
+  if (typeof value === "string") {
+    if (value.length <= MAX_JOURNAL_STRING) return value;
+    const bytes = Buffer.from(value, "utf8");
+    return { omitted: true, sha256: sha256Hex(bytes), bytes: bytes.length };
+  }
+  if (Array.isArray(value)) return value.map(digestLongStrings);
+  if (isRecord(value)) {
+    const copy: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) copy[key] = digestLongStrings(item);
+    return copy;
+  }
+  return value;
+}
 
 /**
  * The internal command that fetches the entries for `dump_journal`. The leader
@@ -209,6 +256,43 @@ export function entryHash(entry: Omit<JournalEntry, "hash"> | JournalEntry): str
 }
 
 /**
+ * The file calls of an append: the narrow seam where a test makes a write or
+ * an `fsync` fail.
+ */
+export interface JournalFs {
+  writeSync(fd: number, buffer: Buffer, offset: number, length: number): number;
+  fsyncSync(fd: number): void;
+  /** Blocks for the pause between two tries: an append is synchronous. */
+  sleep(ms: number): void;
+}
+
+const NODE_FS: JournalFs = {
+  writeSync: (fd, buffer, offset, length) => writeSync(fd, buffer, offset, length),
+  fsyncSync: (fd) => fsyncSync(fd),
+  sleep: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
+};
+
+/** How many more times an append tries a write or an `fsync` that failed on a passing error. */
+export const APPEND_RETRIES = 3;
+/** The pause before each of those tries. */
+export const APPEND_RETRY_MS = 50;
+
+/**
+ * Whether a failed write or `fsync` can pass: the file is busy for a moment,
+ * the call was interrupted, or, on Windows, another program (an antivirus or
+ * an indexer) holds the file open.
+ */
+function passingError(err: unknown): boolean {
+  const code = errorCode(err);
+  return (
+    code === "EAGAIN" ||
+    code === "EBUSY" ||
+    code === "EINTR" ||
+    (code === "EPERM" && process.platform === "win32")
+  );
+}
+
+/**
  * The journal file of one leader. `load` reads and checks it; `append` adds
  * one entry and calls `fsync`. Only the leader makes one: a follower never
  * opens the file.
@@ -225,13 +309,20 @@ export class WriteJournal {
    */
   private lineEnds: number[] = [];
 
-  /** @param file - The journal file. The default is `journalFilePath()`. */
-  constructor(readonly file: string = journalFilePath()) {}
+  /**
+   * @param file - The journal file. The default is `journalFilePath()`.
+   * @param fs - The file calls of an append. A test gives its own.
+   */
+  constructor(
+    readonly file: string = journalFilePath(),
+    private fs: JournalFs = NODE_FS
+  ) {}
 
   /**
    * Reads the file and checks each line. A missing file is an empty journal.
+   * A torn last line after valid lines is moved aside (`recoverTornTail`).
    * Each other failure makes the journal broken and is logged one time. It
-   * never throws, and it never changes the file.
+   * never throws, and it changes the file only to move a torn line aside.
    */
   load(): void {
     this.entryCount = 0;
@@ -248,8 +339,60 @@ export class WriteJournal {
       return;
     }
 
-    const failure = this.checkLines(bytes);
-    if (failure !== null) this.markBroken(failure);
+    const check = this.checkLines(bytes);
+    if (check.status === "broken") this.markBroken(check.reason);
+    if (check.status === "torn") this.recoverTornTail(bytes, check.validBytes, check.reason);
+  }
+
+  /**
+   * Moves a torn last line aside. An append that stopped halfway leaves it,
+   * and each line before it is valid. Its bytes go to a new file
+   * `<journal>.torn-<UTC time>` (flag `wx`, mode 0o600, with `fsync`), the
+   * journal is cut back to the end of the last valid line, and the entry
+   * `journal_recovered` records the move. A failure of any step makes the
+   * journal broken, as each other defect does.
+   * @param bytes - The whole file.
+   * @param validBytes - The length of the valid lines.
+   * @param defect - The failure of the check, for the log.
+   */
+  private recoverTornTail(bytes: Buffer, validBytes: number, defect: string): void {
+    const torn = bytes.subarray(validBytes);
+    const savedTo = `${this.file}.torn-${folderTimestamp()}`;
+    try {
+      const fd = openSync(savedTo, "wx", 0o600);
+      try {
+        for (let written = 0; written < torn.length;) {
+          written += writeSync(fd, torn, written, torn.length - written);
+        }
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      truncateSync(this.file, validBytes);
+    } catch (err) {
+      this.markBroken(`${defect}, and moving it aside failed (${describe(err)})`);
+      return;
+    }
+
+    try {
+      this.append({
+        tool: RECOVERED_TOOL,
+        fileKey: "",
+        epoch: 0,
+        auditor: false,
+        nodeIds: null,
+        params: { tornBytes: torn.length, tornSha256: sha256Hex(torn), savedTo },
+        response: { data: null },
+      });
+    } catch {
+      // The failed append made the journal broken and logged it.
+      return;
+    }
+    console.error(
+      `The write journal ${this.file} ended with a torn line (${defect}): its ${torn.length} bytes ` +
+        `moved to ${savedTo}, and entry ${this.entryCount} (${RECOVERED_TOOL}) records it.`
+    );
+    logEvent("journal_recovered", { tornBytes: torn.length, savedTo, seq: this.entryCount });
   }
 
   /** The state for `/ping` and `list_files`. */
@@ -284,7 +427,9 @@ export class WriteJournal {
 
   /**
    * Adds one entry and calls `fsync`. Makes the folder (mode 0o700) and the
-   * file (mode 0o600) at the first append.
+   * file (mode 0o600) at the first append. A write or an `fsync` that fails on
+   * a passing error is tried again `APPEND_RETRIES` times, `APPEND_RETRY_MS`
+   * apart; a write then sends only the bytes not yet written.
    * @param record - What the leader sent and what came back.
    * @returns The entry as written.
    * @throws If the journal is broken, or the append fails. A failed append
@@ -302,8 +447,14 @@ export class WriteJournal {
       auditor: record.auditor,
       tool: record.tool,
       nodeIds: record.nodeIds,
-      params: record.params,
-      response: record.response,
+      params:
+        record.params === null
+          ? null
+          : (digestLongStrings(record.params) as Record<string, unknown>),
+      response:
+        "data" in record.response
+          ? { data: digestLongStrings(record.response.data) }
+          : record.response,
       prevHash: this.headHash,
     };
     let entry: JournalEntry = { ...unhashed, hash: GENESIS_HASH };
@@ -315,9 +466,9 @@ export class WriteJournal {
       lineBytes = line.length;
       const fd = this.open();
       for (let written = 0; written < line.length;) {
-        written += writeSync(fd, line, written, line.length - written);
+        written += this.retrying(() => this.fs.writeSync(fd, line, written, line.length - written));
       }
-      fsyncSync(fd);
+      this.retrying(() => this.fs.fsyncSync(fd));
     } catch (err) {
       const cause = `the append of entry ${entry.seq} failed (${describe(err)})`;
       this.markBroken(cause);
@@ -404,6 +555,18 @@ export class WriteJournal {
     return { status: "ok", entryCount: this.entryCount, headHash: this.headHash, entries };
   }
 
+  /** Runs one file call, and tries it again on a passing error. */
+  private retrying<T>(call: () => T): T {
+    for (let retry = 0; ; retry++) {
+      try {
+        return call();
+      } catch (err) {
+        if (retry >= APPEND_RETRIES || !passingError(err)) throw err;
+        this.fs.sleep(APPEND_RETRY_MS);
+      }
+    }
+  }
+
   /** The byte offset after the last line that the load and the appends counted. */
   private endOfFile(): number {
     return this.lineEnds.length === 0 ? 0 : this.lineEnds[this.lineEnds.length - 1];
@@ -431,32 +594,40 @@ export class WriteJournal {
   private markBroken(reason: string): void {
     if (this.brokenReason !== null) return;
     this.brokenReason = reason;
+    logEvent("journal_broken", { reason });
     console.error(`The write journal ${this.file} is broken: ${reason}. ${REPAIR}`);
   }
 
   /**
    * Checks each line, and sets the count and the head of the valid lines
    * before the first failure.
-   * @returns The first failure as `line <n>: <cause>`, or null.
+   * @returns `ok`; `torn` when the only failure is a last line with no
+   *   newline, with the length of the valid lines before it; else `broken`
+   *   with the first failure as `line <n>: <cause>`.
    */
-  private checkLines(bytes: Buffer): string | null {
+  private checkLines(bytes: Buffer): LineCheck {
     const decoder = new TextDecoder("utf-8", { fatal: true });
     let previousHash = GENESIS_HASH;
     let lineNumber = 0;
     let start = 0;
+    const broken = (reason: string): LineCheck => ({ status: "broken", reason });
 
     while (start < bytes.length) {
       lineNumber++;
       const end = bytes.indexOf(0x0a, start);
       if (end === -1) {
-        return `line ${lineNumber}: the line does not end with a newline (a torn append)`;
+        return {
+          status: "torn",
+          reason: `line ${lineNumber}: the line does not end with a newline (a torn append)`,
+          validBytes: start,
+        };
       }
 
       let text: string;
       try {
         text = decoder.decode(bytes.subarray(start, end));
       } catch {
-        return `line ${lineNumber}: the line is not valid UTF-8`;
+        return broken(`line ${lineNumber}: the line is not valid UTF-8`);
       }
       start = end + 1;
 
@@ -464,7 +635,7 @@ export class WriteJournal {
       try {
         parsed = JSON.parse(text);
       } catch {
-        return `line ${lineNumber}: the line is not JSON`;
+        return broken(`line ${lineNumber}: the line is not JSON`);
       }
       let canonical: string;
       try {
@@ -473,23 +644,25 @@ export class WriteJournal {
         canonical = "";
       }
       if (canonical !== text) {
-        return `line ${lineNumber}: the line is not the canonical JSON of its entry`;
+        return broken(`line ${lineNumber}: the line is not the canonical JSON of its entry`);
       }
 
       const fieldFailure = checkFields(parsed);
-      if (fieldFailure !== null) return `line ${lineNumber}: ${fieldFailure}`;
+      if (fieldFailure !== null) return broken(`line ${lineNumber}: ${fieldFailure}`);
 
       const entry = parsed as JournalEntry;
       if (entry.seq !== lineNumber) {
-        return `line ${lineNumber}: seq is ${entry.seq}, not the line number ${lineNumber}`;
+        return broken(`line ${lineNumber}: seq is ${entry.seq}, not the line number ${lineNumber}`);
       }
       if (entry.prevHash !== previousHash) {
-        return lineNumber === 1
-          ? `line 1: prevHash is not the genesis hash`
-          : `line ${lineNumber}: prevHash is not the hash of line ${lineNumber - 1}`;
+        return broken(
+          lineNumber === 1
+            ? `line 1: prevHash is not the genesis hash`
+            : `line ${lineNumber}: prevHash is not the hash of line ${lineNumber - 1}`
+        );
       }
       if (entryHash(entry) !== entry.hash) {
-        return `line ${lineNumber}: hash is not the SHA-256 of the entry without hash`;
+        return broken(`line ${lineNumber}: hash is not the SHA-256 of the entry without hash`);
       }
       previousHash = entry.hash;
       // The valid lines so far: a broken journal reports the count and the
@@ -498,9 +671,15 @@ export class WriteJournal {
       this.headHash = previousHash;
       this.lineEnds.push(start);
     }
-    return null;
+    return { status: "ok" };
   }
 }
+
+/** The result of the check of the lines of a journal file. */
+type LineCheck =
+  | { status: "ok" }
+  | { status: "torn"; reason: string; validBytes: number }
+  | { status: "broken"; reason: string };
 
 /** The correction of a broken journal. */
 const REPAIR =

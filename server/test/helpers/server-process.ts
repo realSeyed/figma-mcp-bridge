@@ -5,6 +5,7 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,6 +20,10 @@ const STRIPPED_VARIABLES = [
   "FIGMA_BRIDGE_DUMP_CHUNK_NODES",
   "FIGMA_BRIDGE_JOURNAL_CHUNK_ENTRIES",
   "FIGMA_BRIDGE_ROLE",
+  "FIGMA_BRIDGE_REQUEST_TIMEOUT_MS",
+  "FIGMA_BRIDGE_CONNECT_GRACE_MS",
+  "FIGMA_BRIDGE_STANDALONE",
+  "FIGMA_BRIDGE_LOG_FILE",
 ];
 
 /** How long a process has to log its role. */
@@ -34,11 +39,14 @@ export interface ServerOptions {
    * Changes to the environment of this test process. A value of `undefined`
    * removes the variable. `FIGMA_BRIDGE_OUTPUT_ROOT`,
    * `FIGMA_BRIDGE_TOKEN_FILE`, `FIGMA_BRIDGE_JOURNAL_FILE`,
-   * `FIGMA_BRIDGE_DUMP_CHUNK_NODES`, `FIGMA_BRIDGE_JOURNAL_CHUNK_ENTRIES`, and
-   * `FIGMA_BRIDGE_ROLE` are removed unless
+   * `FIGMA_BRIDGE_DUMP_CHUNK_NODES`, `FIGMA_BRIDGE_JOURNAL_CHUNK_ENTRIES`,
+   * `FIGMA_BRIDGE_ROLE`, `FIGMA_BRIDGE_REQUEST_TIMEOUT_MS`,
+   * `FIGMA_BRIDGE_CONNECT_GRACE_MS`, `FIGMA_BRIDGE_STANDALONE`, and
+   * `FIGMA_BRIDGE_LOG_FILE` are removed unless
    * they are given here, so a variable of the developer does not leak into a test.
-   * `FIGMA_BRIDGE_TOKEN_FILE` and `FIGMA_BRIDGE_JOURNAL_FILE` are required: no
-   * test reads the real token file or the real write journal.
+   * `FIGMA_BRIDGE_TOKEN_FILE`, `FIGMA_BRIDGE_JOURNAL_FILE` and
+   * `FIGMA_BRIDGE_LOG_FILE` are required: no test reads the real token file or
+   * the real write journal, or writes the real diagnostics log.
    */
   env?: Record<string, string | undefined>;
 }
@@ -68,6 +76,11 @@ export interface ServerProcess {
   callTool(name: string, args?: Record<string, unknown>): Promise<ToolOutcome>;
   /** Calls one tool and returns its content blocks as they are, images too. */
   callToolRaw(name: string, args?: Record<string, unknown>): Promise<RawToolResult>;
+  /**
+   * Sends a signal to the server process itself, not through the MCP client.
+   * `SIGKILL` stops it at once, as a crash does; on Windows each signal does.
+   */
+  kill(signal: NodeJS.Signals): void;
   close(): Promise<void>;
 }
 
@@ -108,6 +121,12 @@ export async function startServer(options: ServerOptions): Promise<ServerProcess
       role,
       stderr,
       close,
+      kill(signal) {
+        // The transport keeps its child process in a private field and shows
+        // only its pid, so the signal goes through process.kill.
+        const pid = transport.pid;
+        if (pid !== null) process.kill(pid, signal);
+      },
       async listTools() {
         const names: string[] = [];
         let cursor: string | undefined;
@@ -154,6 +173,56 @@ export async function startServer(options: ServerOptions): Promise<ServerProcess
   }
 }
 
+/** A standalone leader: `node dist/index.js --standalone`, with no MCP client. */
+export interface StandaloneProcess {
+  /** Each line the process wrote to standard error. */
+  stderr: string[];
+  /** The exit code, when the process ends. */
+  exited: Promise<number | null>;
+  /** Stops the process with SIGTERM and waits for its end. */
+  close(): Promise<void>;
+}
+
+/**
+ * Starts a standalone leader with no standard input, and waits until it logs
+ * that it listens.
+ * @param options - Port, working directory, and environment changes.
+ * @returns The running process.
+ */
+export async function startStandalone(options: ServerOptions): Promise<StandaloneProcess> {
+  const child = spawn("node", [options.entry ?? SERVER_ENTRY, "--standalone"], {
+    cwd: options.cwd,
+    env: serverEnv(options),
+    // No standard input at all: a standalone leader must not stop at its end.
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  const stderr: string[] = [];
+  child.stderr.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split(/\r?\n/)) {
+      if (line.trim() !== "") stderr.push(line.trim());
+    }
+  });
+  const exited = new Promise<number | null>((done) => child.once("exit", (code) => done(code)));
+
+  const listening = `Standalone leader listening on 127.0.0.1:${options.port}`;
+  const deadline = Date.now() + ROLE_TIMEOUT_MS;
+  while (!stderr.some((line) => line.includes(listening))) {
+    if (child.exitCode !== null || Date.now() > deadline) {
+      child.kill();
+      throw new Error(`The standalone leader did not start:\n${stderr.join("\n")}`);
+    }
+    await new Promise((done) => setTimeout(done, 25));
+  }
+  return {
+    stderr,
+    exited,
+    async close() {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      await exited;
+    },
+  };
+}
+
 /**
  * The environment of a server process: this process, less the stripped
  * variables, plus the port and the changes in `options.env`.
@@ -179,6 +248,11 @@ export function serverEnv(options: Pick<ServerOptions, "port" | "env">): Record<
   if (!env.FIGMA_BRIDGE_JOURNAL_FILE) {
     throw new Error(
       "A test server needs FIGMA_BRIDGE_JOURNAL_FILE: no test reads or writes the real write journal."
+    );
+  }
+  if (!env.FIGMA_BRIDGE_LOG_FILE) {
+    throw new Error(
+      "A test server needs FIGMA_BRIDGE_LOG_FILE: no test writes the real diagnostics log."
     );
   }
   return env;
