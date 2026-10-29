@@ -8,10 +8,14 @@ import { Role } from "./types.js";
  * On start it attempts to become leader (by binding the port).
  * If the port is taken and a healthy leader is found, it becomes a follower.
  * A periodic ticker monitors the leader and triggers takeover if it dies.
+ * A call that lost its leader runs one check at once with `checkNow`.
  */
 export class Election {
   private interval: ReturnType<typeof setInterval> | null = null;
   private leaderUrl: string;
+  /** The check that runs now. Each caller in that time waits for the same one. */
+  private running: Promise<void> | null = null;
+  private stopped = false;
 
   constructor(
     private port: number,
@@ -24,20 +28,36 @@ export class Election {
     // Determine initial role
     await this.determineRole();
 
-    // Continuous monitoring with random jitter (3-5 s)
-    const jitter = 3_000 + Math.random() * 2_000;
-    this.interval = setInterval(() => {
-      this.checkAndUpdateRole().catch((err) => {
-        console.error("Election check error:", err);
-      });
-    }, jitter);
+    // Continuous monitoring with random jitter (1-2 s)
+    const jitter = 1_000 + Math.random() * 1_000;
+    this.interval = setInterval(() => void this.checkNow(), jitter);
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.interval) {
       clearInterval(this.interval);
       this.interval = null;
     }
+  }
+
+  /**
+   * Runs one check now: a process with no role determines it, and a follower
+   * whose leader does not answer takes over. A call while a check runs gets
+   * the promise of that check. It never rejects.
+   */
+  checkNow(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (this.running === null) {
+      this.running = this.checkAndUpdateRole()
+        .catch((err) => {
+          console.error("Election check error:", err);
+        })
+        .finally(() => {
+          this.running = null;
+        });
+    }
+    return this.running;
   }
 
   private async checkAndUpdateRole(): Promise<void> {

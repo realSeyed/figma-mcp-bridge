@@ -71,6 +71,11 @@ export interface ServerProcess {
   callTool(name: string, args?: Record<string, unknown>): Promise<ToolOutcome>;
   /** Calls one tool and returns its content blocks as they are, images too. */
   callToolRaw(name: string, args?: Record<string, unknown>): Promise<RawToolResult>;
+  /**
+   * Sends a signal to the server process itself, not through the MCP client.
+   * `SIGKILL` stops it at once, as a crash does; on Windows each signal does.
+   */
+  kill(signal: NodeJS.Signals): void;
   close(): Promise<void>;
 }
 
@@ -111,6 +116,12 @@ export async function startServer(options: ServerOptions): Promise<ServerProcess
       role,
       stderr,
       close,
+      kill(signal) {
+        // The transport keeps its child process in a private field and shows
+        // only its pid, so the signal goes through process.kill.
+        const pid = transport.pid;
+        if (pid !== null) process.kill(pid, signal);
+      },
       async listTools() {
         const names: string[] = [];
         let cursor: string | undefined;

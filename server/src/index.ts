@@ -58,6 +58,8 @@ async function main(): Promise<void> {
 
   const node = new Node(PORT, ROLE);
   const election = new Election(PORT, node);
+  // A call that lost its leader runs an election check at once, not at the next tick.
+  node.setRecovery(() => election.checkNow());
   await election.start();
 
   let transport: StdioServerTransport | null = null;

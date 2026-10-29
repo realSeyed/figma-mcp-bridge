@@ -12,6 +12,26 @@ import type {
 } from "./types.js";
 
 /**
+ * A request to the leader that got no answer because the connection failed.
+ * `refused`: the leader refused the connection, so it never got the request.
+ * `broken`: the connection broke after the request started, so the leader may
+ * have sent it to the plugin. An HTTP status is not a connection failure.
+ */
+export class LeaderConnectionError extends Error {
+  constructor(
+    readonly tool: string,
+    readonly kind: "refused" | "broken",
+    cause: unknown
+  ) {
+    super(
+      `${tool}: the connection to the bridge leader ${kind === "refused" ? "was refused" : "broke"} (${describeCause(cause)}).`,
+      { cause }
+    );
+    this.name = "LeaderConnectionError";
+  }
+}
+
+/**
  * Follower proxies MCP tool calls to the leader via HTTP /rpc. Each request
  * carries the install token in `Authorization: Bearer <token>`. A process with
  * the auditor role also sends `X-Figma-Bridge-Role: auditor`.
@@ -99,16 +119,20 @@ export class Follower {
    * @param rpcReq - The request.
    * @param timeoutMs - How long to wait for the whole answer.
    * @returns The body of a 200 answer.
-   * @throws The error of the body for another status, or a time-out error.
+   * @throws The error of the body for another status, a time-out error, or a
+   *   `LeaderConnectionError` when the connection failed.
    */
   private async post(rpcReq: RPCRequest, timeoutMs: number): Promise<RPCResponse> {
+    // Outside the try: a bad token file is not a connection failure.
+    const headers = rpcHeaders(this.processRole);
+    const payload = JSON.stringify(rpcReq);
     let response: Response;
     let text: string;
     try {
       response = await fetch(`${this.leaderUrl}/rpc`, {
         method: "POST",
-        headers: rpcHeaders(this.processRole),
-        body: JSON.stringify(rpcReq),
+        headers,
+        body: payload,
         signal: AbortSignal.timeout(timeoutMs),
       });
       text = await response.text();
@@ -120,7 +144,7 @@ export class Follower {
             `Check with get_node before you retry; if it repeats, ask the user to restart the bridge.`
         );
       }
-      throw err;
+      throw new LeaderConnectionError(rpcReq.tool, notConnected(err) ? "refused" : "broken", err);
     }
 
     let body: RPCResponse | null = null;
@@ -140,6 +164,34 @@ export class Follower {
 
 /** How long a follower waits for the identity report of the leader. */
 const IDENTITY_TIMEOUT_MS = 5_000;
+
+/** The codes of a connection that never opened: the request did not leave this process. */
+const NOT_CONNECTED_CODES = new Set(["ECONNREFUSED", "UND_ERR_CONNECT_TIMEOUT"]);
+
+/**
+ * Whether a failed fetch never opened its connection. fetch wraps the cause:
+ * an error with a code, or an AggregateError when it tried more than one address.
+ */
+function notConnected(err: unknown): boolean {
+  const cause = (err as { cause?: unknown } | null)?.cause as
+    { code?: unknown; errors?: unknown } | undefined;
+  if (typeof cause?.code === "string" && NOT_CONNECTED_CODES.has(cause.code)) return true;
+  return (
+    Array.isArray(cause?.errors) &&
+    cause.errors.length > 0 &&
+    cause.errors.every((one: { code?: unknown } | null) =>
+      NOT_CONNECTED_CODES.has(String(one?.code))
+    )
+  );
+}
+
+/** The code or the message of the cause of a failed fetch. */
+function describeCause(err: unknown): string {
+  const cause = (err as { cause?: unknown } | null)?.cause ?? err;
+  const code = (cause as { code?: unknown } | null)?.code;
+  if (typeof code === "string") return code;
+  return cause instanceof Error ? cause.message : String(cause);
+}
 
 function rpcHeaders(role: ProcessRole): Record<string, string> {
   const headers: Record<string, string> = {

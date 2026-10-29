@@ -238,3 +238,90 @@ describe("the grace for a plugin that connects again", () => {
     TIMEOUT_MS
   );
 });
+
+describe("a lost leader", () => {
+  const GRACE = { FIGMA_BRIDGE_CONNECT_GRACE_MS: "10000" };
+  const METADATA = { fileName: "stability", currentPage: "synthetic" };
+
+  test(
+    "SIGKILL of the leader: the follower takes over, and its reads succeed again within 10 s",
+    async () => {
+      const port = await h.freePort();
+      const leader = await start(port, GRACE);
+      expect(leader.role).toBe("LEADER");
+      await h.plugin({
+        port,
+        fileKey: FILE_KEY,
+        reconnectMs: 1_500,
+        handlers: { get_metadata: () => METADATA },
+      });
+      const follower = await start(port, GRACE);
+      expect(follower.role).toBe("FOLLOWER");
+
+      let killedAt = 0;
+      const kill = setTimeout(() => {
+        leader.kill("SIGKILL");
+        killedAt = Date.now();
+      }, 1_000);
+      const failures: string[] = [];
+      let recoveredAt = 0;
+      try {
+        while (recoveredAt === 0) {
+          const outcome = await follower.callTool("get_metadata", { fileKey: FILE_KEY });
+          if (!outcome.ok) failures.push(outcome.error);
+          else if (killedAt > 0) recoveredAt = Date.now();
+          if (killedAt > 0 && Date.now() - killedAt > 20_000) break;
+          await sleep(250);
+        }
+      } finally {
+        clearTimeout(kill);
+      }
+
+      expect(recoveredAt).toBeGreaterThan(0);
+      expect(recoveredAt - killedAt).toBeLessThan(10_000);
+      for (const failure of failures) {
+        expect(failure).not.toContain("fetch failed");
+        expect(failure).toMatch(/retry|check|ask the user/i);
+      }
+      expect(follower.stderr.join("\n")).toContain("Became LEADER");
+    },
+    TIMEOUT_MS
+  );
+
+  test(
+    "a write in flight at the kill fails as ambiguous, and a read in flight is sent again",
+    async () => {
+      const port = await h.freePort();
+      const leader = await start(port, GRACE);
+      expect(leader.role).toBe("LEADER");
+      let reads = 0;
+      const plugin = await h.plugin({
+        port,
+        fileKey: FILE_KEY,
+        reconnectMs: 1_500,
+        handlers: {
+          create_frame: never,
+          // The first read never answers, so it is in flight at the kill.
+          get_metadata: () => (++reads === 1 ? new Promise(() => undefined) : METADATA),
+        },
+      });
+      const follower = await start(port, GRACE);
+      expect(follower.role).toBe("FOLLOWER");
+
+      const write = follower.callTool("create_frame", { name: "stability", fileKey: FILE_KEY });
+      const read = follower.callTool("get_metadata", { fileKey: FILE_KEY });
+      await waitFor("both requests at the plugin", () =>
+        plugin.requests.length === 2 ? true : undefined
+      );
+      leader.kill("SIGKILL");
+
+      expect(errorOf(await write)).toBe(
+        "create_frame: the bridge leader process exited while the request was in flight, so the change may or may not be in the Figma file. The bridge has recovered; check the file with get_node before you retry."
+      );
+      expect(await read).toEqual({ ok: true, data: METADATA });
+      expect(reads).toBe(2);
+      expect(plugin.requests.filter((r) => r.type === "create_frame")).toHaveLength(1);
+    },
+    TIMEOUT_MS
+  );
+});
