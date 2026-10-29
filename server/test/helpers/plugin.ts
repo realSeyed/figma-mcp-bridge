@@ -10,6 +10,8 @@ export interface PluginRequest {
   requestId: string;
   nodeIds?: string[];
   params?: Record<string, unknown>;
+  /** How long the leader waits for the answer. */
+  timeoutMs?: number;
 }
 
 /** Returns the `data` of the answer. A throw becomes an `error` answer. */

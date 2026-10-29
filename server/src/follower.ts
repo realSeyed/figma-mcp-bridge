@@ -2,6 +2,7 @@ import { BRIDGE_COMMIT } from "./build-info.js";
 import { AUDITOR_ROLE, ROLE_HEADER } from "./role.js";
 import type { ProcessRole } from "./role.js";
 import { rpcToken } from "./rpc-token.js";
+import { followerTimeoutMs, seconds } from "./timeouts.js";
 import type {
   BridgeResponse,
   IdentityReport,
@@ -36,21 +37,7 @@ export class Follower {
     if (params && Object.keys(params).length > 0) rpcReq.params = params;
     if (fileKey) rpcReq.fileKey = fileKey;
 
-    const response = await fetch(`${this.leaderUrl}/rpc`, {
-      method: "POST",
-      headers: rpcHeaders(this.processRole),
-      body: JSON.stringify(rpcReq),
-      signal: AbortSignal.timeout(210_000),
-    });
-
-    if (!response.ok) {
-      // The leader answers validation failures with a 400 whose body names the
-      // offending field — surface it instead of a bare status code (#35).
-      const body = (await response.json().catch(() => null)) as RPCResponse | null;
-      throw new Error(body?.error ?? `Leader returned status ${response.status}`);
-    }
-
-    const rpcResp = (await response.json()) as RPCResponse;
+    const rpcResp = await this.post(rpcReq, followerTimeoutMs(requestType));
 
     if (rpcResp.error) {
       throw new Error(rpcResp.error);
@@ -68,19 +55,7 @@ export class Follower {
    * leader reports about its own build, its start time, and the connected files.
    */
   async identityReport(): Promise<IdentityReport> {
-    const response = await fetch(`${this.leaderUrl}/rpc`, {
-      method: "POST",
-      headers: rpcHeaders(this.processRole),
-      body: JSON.stringify({ tool: "list_files" } as RPCRequest),
-      signal: AbortSignal.timeout(5_000),
-    });
-
-    if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as RPCResponse | null;
-      throw new Error(body?.error ?? `Leader returned status ${response.status}`);
-    }
-
-    const rpcResp = (await response.json()) as RPCResponse;
+    const rpcResp = await this.post({ tool: "list_files" }, IDENTITY_TIMEOUT_MS);
     if (rpcResp.error) {
       throw new Error(rpcResp.error);
     }
@@ -118,7 +93,53 @@ export class Follower {
       return false;
     }
   }
+
+  /**
+   * Sends one request to `/rpc` and reads the answer.
+   * @param rpcReq - The request.
+   * @param timeoutMs - How long to wait for the whole answer.
+   * @returns The body of a 200 answer.
+   * @throws The error of the body for another status, or a time-out error.
+   */
+  private async post(rpcReq: RPCRequest, timeoutMs: number): Promise<RPCResponse> {
+    let response: Response;
+    let text: string;
+    try {
+      response = await fetch(`${this.leaderUrl}/rpc`, {
+        method: "POST",
+        headers: rpcHeaders(this.processRole),
+        body: JSON.stringify(rpcReq),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      text = await response.text();
+    } catch (err) {
+      if ((err as { name?: unknown } | null)?.name === "TimeoutError") {
+        throw new Error(
+          `${rpcReq.tool} timed out: no answer from the bridge leader within ${seconds(timeoutMs)} s. ` +
+            `The leader may be busy, and a write may still complete in Figma. ` +
+            `Check with get_node before you retry; if it repeats, ask the user to restart the bridge.`
+        );
+      }
+      throw err;
+    }
+
+    let body: RPCResponse | null = null;
+    try {
+      body = JSON.parse(text) as RPCResponse;
+    } catch {
+      // Not JSON: the status speaks for itself.
+    }
+    if (!response.ok || body === null) {
+      // The leader answers validation failures with a 400 whose body names the
+      // offending field — surface it instead of a bare status code (#35).
+      throw new Error(body?.error ?? `Leader returned status ${response.status}`);
+    }
+    return body;
+  }
 }
+
+/** How long a follower waits for the identity report of the leader. */
+const IDENTITY_TIMEOUT_MS = 5_000;
 
 function rpcHeaders(role: ProcessRole): Record<string, string> {
   const headers: Record<string, string> = {

@@ -3,6 +3,8 @@ export interface BridgeRequest {
   requestId: string;
   nodeIds?: string[];
   params?: Record<string, unknown>;
+  /** How long the leader waits for the answer. The request queue of the plugin uses it too. */
+  timeoutMs?: number;
 }
 
 export interface BridgeResponse {

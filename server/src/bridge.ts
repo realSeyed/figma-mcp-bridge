@@ -2,10 +2,17 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { selectFile } from "./identity.js";
+import { READ_ONLY_REQUESTS } from "./journal.js";
 import type { JournalResponse, WriteJournal } from "./journal.js";
+import { requestTimeoutMs, seconds } from "./timeouts.js";
 import type { BridgeRequest, BridgeResponse, ConnectedFile } from "./types.js";
 
+/** How often the leader pings each plugin. A plugin that misses one ping is closed. */
+const PING_INTERVAL_MS = 10_000;
+
 interface PendingRequest {
+  /** The request type, for the messages. */
+  type: string;
   resolve: (resp: BridgeResponse) => void;
   reject: (err: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
@@ -50,7 +57,7 @@ export class Bridge {
         entry.isAlive = false;
         entry.ws.ping();
       }
-    }, 30_000);
+    }, PING_INTERVAL_MS);
   }
 
   handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -132,16 +139,24 @@ export class Bridge {
       if (current?.ws === ws) {
         this.connections.delete(fileKey);
       }
-      this.rejectPendingForSocket(ws, `Plugin connection error (${fileName}): ${err.message}`);
+      this.rejectPendingForSocket(
+        ws,
+        `Plugin disconnected: ${fileName} (${fileKey}) after a connection error (${err.message})`
+      );
     });
   }
 
+  /**
+   * Fails each request that waits on the socket.
+   * @param reason - What happened to the socket. The message adds the tool,
+   *   and for a write that the change may already be in the file.
+   */
   private rejectPendingForSocket(ws: WebSocket, reason: string): void {
     for (const [id, p] of this.pending) {
       if (p.ws === ws) {
         clearTimeout(p.timeout);
         this.pending.delete(id);
-        p.reject(new Error(reason));
+        p.reject(new Error(`${reason} while ${p.type} was running.${writeNote(p.type)}`));
       }
     }
   }
@@ -211,9 +226,11 @@ export class Bridge {
       }
 
       const requestId = this.nextId();
+      const timeoutMs = requestTimeoutMs(requestType);
       const request: BridgeRequest = {
         type: requestType,
         requestId,
+        timeoutMs,
       };
       if (nodeIds && nodeIds.length > 0) {
         request.nodeIds = nodeIds;
@@ -253,17 +270,33 @@ export class Bridge {
 
       const timeout = setTimeout(() => {
         this.pending.delete(requestId);
-        failed(new Error("Request timed out (3 minutes)"));
-      }, 180_000);
+        failed(
+          new Error(
+            `${requestType} timed out: no answer from the Figma plugin within ${seconds(timeoutMs)} s. ` +
+              `The plugin may be busy or frozen, and a write may still complete in Figma. ` +
+              `Check with get_node before you retry; if it repeats, ask the user to re-run the plugin.`
+          )
+        );
+      }, timeoutMs);
 
-      this.pending.set(requestId, { resolve: answered, reject: failed, timeout, ws: conn });
+      this.pending.set(requestId, {
+        type: requestType,
+        resolve: answered,
+        reject: failed,
+        timeout,
+        ws: conn,
+      });
 
       conn.send(JSON.stringify(request), (err) => {
         // A close of the socket can settle the request first: record it once.
         if (err && this.pending.has(requestId)) {
           clearTimeout(timeout);
           this.pending.delete(requestId);
-          failed(err);
+          failed(
+            new Error(
+              `Plugin disconnected: ${file.fileName} (${file.fileKey}) before ${requestType} could be sent (${err.message}). The request did not reach the plugin; retry it.`
+            )
+          );
         }
       });
     });
@@ -285,9 +318,9 @@ export class Bridge {
     }
 
     // Reject all pending requests
-    for (const [id, { reject, timeout }] of this.pending) {
+    for (const [, { type, reject, timeout }] of this.pending) {
       clearTimeout(timeout);
-      reject(new Error("Bridge closed"));
+      reject(new Error(`The bridge leader stopped while ${type} was running.${writeNote(type)}`));
     }
     this.pending.clear();
 
@@ -297,4 +330,15 @@ export class Bridge {
     this.connections.clear();
     this.wss.close();
   }
+}
+
+/**
+ * The end of a message for a request that stopped after it reached the plugin.
+ * @param type - The request type.
+ * @returns For a write, that the change may already be in the file; else "".
+ */
+function writeNote(type: string): string {
+  return READ_ONLY_REQUESTS.has(type)
+    ? ""
+    : " The change may or may not be in the file; check before you retry.";
 }
