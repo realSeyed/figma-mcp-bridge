@@ -35,6 +35,8 @@ const createReadDetailSchema = () =>
       "full (default) reports every style field, for one component. outline reports id, name, type, bounds, and the first 80 characters of a text, about a tenth of the size: use it to map a page."
     );
 
+/** The most nodes one get_screenshot call exports. save_screenshots sends one at a time. */
+const MAX_SCREENSHOT_NODES = 4;
 const textAlignHorizontal = z.enum(["LEFT", "CENTER", "RIGHT", "JUSTIFIED"]);
 const textAlignVertical = z.enum(["TOP", "CENTER", "BOTTOM"]);
 const textAutoResize = z.enum(["NONE", "WIDTH_AND_HEIGHT", "HEIGHT", "TRUNCATE"]);
@@ -643,14 +645,31 @@ export const toolInputSchemas = {
   get_screenshot: z.object({
     nodeIds: z
       .array(createFigmaNodeIdSchema())
+      .max(MAX_SCREENSHOT_NODES)
       .optional()
       .describe(
-        "Optional list of node IDs to export. Accepts top-level IDs like '4029:12345' and instance-child IDs like 'I12740:17806;12740:17793'. Never use hyphens. If empty, exports the current selection."
+        "Optional list of 1 to 4 node IDs to export. Accepts top-level IDs like '4029:12345' and instance-child IDs like 'I12740:17806;12740:17793'. Never use hyphens. If empty, exports the current selection."
       ),
     format: createExportFormatSchema()
       .optional()
-      .describe("Export format: PNG (default) or SVG or JPG or PDF"),
-    scale: z.number().optional().describe("Export scale for raster formats (default 2)"),
+      .describe(
+        "Export format: PNG (default) or JPG come back as images; SVG comes back as markup text when it is short; PDF only through save_screenshots"
+      ),
+    scale: z
+      .number()
+      .optional()
+      .describe(
+        "The highest export scale for PNG and JPG (default 2). The export uses a lower one when the long edge would pass maxEdge."
+      ),
+    maxEdge: z
+      .number()
+      .int()
+      .min(64)
+      .max(1568)
+      .optional()
+      .describe(
+        "The most pixels on the long edge of a PNG or JPG, 64 to 1568 (default 1024). The scale drops to fit, so a desktop frame comes back whole and viewable."
+      ),
     clip: z
       .boolean()
       .optional()

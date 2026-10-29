@@ -1714,21 +1714,34 @@ const runReadSteps = async (): Promise<void> => {
     await writeFile(pngFile, bytes);
     console.log(`      wrote ${pngFile} (${bytes.byteLength} bytes)`);
 
-    // An SVG stays JSON text with base64.
-    const shot = await okRecord("get_screenshot", {
+    // An SVG comes back as a metadata block and its markup as text, never base64.
+    const shot = await callRaw("get_screenshot", {
       nodeIds: [need("rootId")],
       format: "SVG",
     });
-    const exports = readRecords(shot.exports, "get_screenshot.exports");
-    check(exports.length === 1, `get_screenshot returned ${exports.length} exports, expected 1`);
-    const single = exports[0];
-    check(single.nodeId === need("rootId"), `the export is of ${show(single.nodeId)}`);
-    check(single.format === "SVG", `the export is a ${show(single.format)}, expected SVG`);
-    const svg = Buffer.from(readString(single.base64, "the export's base64"), "base64");
-    check(svg.byteLength > 0, "the SVG export decoded to 0 bytes");
+    check(!shot.isError, `get_screenshot (SVG) failed: ${show(shot.content)}`);
+    const svgTypes = shot.content.map((block) => block.type).join(",");
+    check(svgTypes === "text,text", `get_screenshot (SVG) returned the blocks ${svgTypes}`);
+    const svgMeta = readRecord(JSON.parse(shot.content[0].text ?? ""), "the SVG metadata block");
+    check(svgMeta.nodeId === need("rootId"), `the export is of ${show(svgMeta.nodeId)}`);
+    check(svgMeta.format === "SVG", `the export is a ${show(svgMeta.format)}, expected SVG`);
+    const markup = shot.content[1].text ?? "";
+    check(
+      markup.trimStart().startsWith("<svg"),
+      `the SVG text starts ${show(markup.slice(0, 40))}`
+    );
+    check(svgMeta.chars === markup.length, `the metadata says ${show(svgMeta.chars)} characters`);
     const svgFile = join(OUTPUT_DIR, "mcp-e2e-root.svg");
-    await writeFile(svgFile, svg);
-    console.log(`      wrote ${svgFile} (${svg.byteLength} bytes)`);
+    await writeFile(svgFile, markup);
+    console.log(`      wrote ${svgFile} (${markup.length} characters)`);
+
+    // A PDF is refused with a pointer to save_screenshots.
+    const pdf = await callRaw("get_screenshot", { nodeIds: [need("rootId")], format: "PDF" });
+    check(pdf.isError === true, "get_screenshot (PDF) did not fail");
+    check(
+      (pdf.content[0]?.text ?? "").includes("save_screenshots"),
+      `the PDF error does not point to save_screenshots: ${show(pdf.content)}`
+    );
   });
 
   await step("G2 save_screenshots writes under the output root", async () => {

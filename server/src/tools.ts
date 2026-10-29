@@ -34,7 +34,11 @@ import {
 import { parseToolInput, renderResponse } from "./tool-helpers.js";
 import type { ToolResult } from "./tool-helpers.js";
 import { registerExtensionTools } from "./extensions/index.js";
-import { executeSaveScreenshots, screenshotToolResult } from "./captures.js";
+import {
+  DEFAULT_SCREENSHOT_MAX_EDGE,
+  executeSaveScreenshots,
+  screenshotToolResult,
+} from "./captures.js";
 import { canonicalJson } from "./evidence.js";
 
 const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
@@ -164,10 +168,10 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "get_screenshot",
-    "Export a screenshot of the selected nodes or specific nodes by ID. A PNG or JPG whose long edge is 1568 pixels or less and whose size is 3750000 bytes or less comes back as an image block plus a text block with its metadata (nodeId, nodeName, format, pixelWidth, pixelHeight, bytes). Any other export (SVG, PDF, a larger raster image) comes back as JSON text with base64-encoded data. For a large capture, or for evidence, use save_screenshots. When multiple files are connected, specify fileKey.",
+    "Export a screenshot of the selected nodes or of 1 to 4 nodes by ID. A PNG or JPG is exported at the scale that keeps its long edge within maxEdge (default 1024 pixels), and comes back as an image block plus a text block with its metadata (nodeId, nodeName, format, scale, pixelWidth, pixelHeight, bytes). An SVG comes back as its markup text when it is 35000 characters or less. A PDF, a longer SVG, or a raster export still over 1568 pixels or 3750000 bytes is a tool error: never base64 text. For a large capture, a PDF, or evidence, use save_screenshots, which writes the file to disk. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_screenshot.shape,
-    async ({ nodeIds, format, scale, clip, fileKey }): Promise<ToolResult> => {
-      const params: Record<string, unknown> = {};
+    async ({ nodeIds, format, scale, maxEdge, clip, fileKey }): Promise<ToolResult> => {
+      const params: Record<string, unknown> = { maxEdge: maxEdge ?? DEFAULT_SCREENSHOT_MAX_EDGE };
       if (format) params.format = format;
       if (scale !== undefined && scale > 0) params.scale = scale;
       if (clip !== undefined) params.clip = clip;

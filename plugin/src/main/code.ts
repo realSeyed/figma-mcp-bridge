@@ -77,6 +77,11 @@ type ServerRequestParams = Record<string, unknown> & {
    * rendered/tight bounds including overflow/effects.
    */
   clip?: boolean;
+  /**
+   * The most pixels on the long edge of a PNG or JPG export. `scale` is then an
+   * upper bound. get_screenshot always sends it; save_screenshots never does.
+   */
+  maxEdge?: number;
   depth?: number;
   styleId?: string;
   animationStyleId?: string;
@@ -339,6 +344,60 @@ const ungroupSection = async (section: SectionNode): Promise<SceneNode[]> => {
   return orphans;
 };
 
+/**
+ * The scale that keeps the long edge of an export within `maxEdge` pixels.
+ *
+ * The box is the one Figma exports: the logical bounds with `clip`, else the
+ * render bounds, which take in shadows and overflow. The asked scale is an
+ * upper bound, so a small node keeps it.
+ * @param node - The node to export.
+ * @param scale - The asked scale.
+ * @param maxEdge - The most pixels on the long edge.
+ * @param clip - Whether the export uses the logical bounds.
+ * @returns The scale, 0.01 at least.
+ */
+const fittedScale = (node: SceneNode, scale: number, maxEdge: number, clip: boolean): number => {
+  const renderBounds = "absoluteRenderBounds" in node ? node.absoluteRenderBounds : null;
+  const box =
+    (clip ? node.absoluteBoundingBox : (renderBounds ?? node.absoluteBoundingBox)) ?? node;
+  const longEdge = Math.max(box.width, box.height);
+  if (!(longEdge > 0)) return scale;
+  return Math.max(0.01, Math.min(scale, maxEdge / longEdge));
+};
+
+/**
+ * Exports one node as a PNG or a JPG whose long edge fits `maxEdge`.
+ * @param node - The node to export.
+ * @param format - PNG or JPG.
+ * @param scale - The asked scale, an upper bound.
+ * @param maxEdge - The most pixels on the long edge.
+ * @param clip - Whether the export uses the logical bounds.
+ * @returns The export, with the scale it used.
+ */
+const exportFitted = async (
+  node: SceneNode,
+  format: "PNG" | "JPG",
+  scale: number,
+  maxEdge: number,
+  clip: boolean
+) => {
+  const used = fittedScale(node, scale, maxEdge, clip);
+  const bytes = await node.exportAsync({
+    format,
+    constraint: { type: "SCALE", value: used },
+    ...(clip ? { contentsOnly: true, useAbsoluteBounds: true } : {}),
+  });
+  return {
+    nodeId: node.id,
+    nodeName: node.name,
+    format,
+    base64: figma.base64Encode(bytes),
+    width: node.width,
+    height: node.height,
+    scale: used,
+  };
+};
+
 const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
   try {
     // Extension tools are dispatched through their own map, so adding one does
@@ -567,6 +626,18 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
 
         if (targetNodes.length === 0) {
           throw new Error("No nodes to export. Select nodes or provide nodeIds.");
+        }
+
+        // A fitted export (get_screenshot sends maxEdge) runs one node at a time
+        // at the scale that keeps its long edge within maxEdge. Without maxEdge
+        // (the call of save_screenshots) the exports run as they always have.
+        const maxEdge = request.params?.maxEdge;
+        if (typeof maxEdge === "number" && (format === "PNG" || format === "JPG")) {
+          const exports = [];
+          for (const node of targetNodes) {
+            exports.push(await exportFitted(node, format, scale, maxEdge, clip));
+          }
+          return { type: request.type, requestId: request.requestId, data: { exports } };
         }
 
         const exports = await Promise.all(

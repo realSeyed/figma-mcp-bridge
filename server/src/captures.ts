@@ -42,6 +42,15 @@ export const IMAGE_BLOCK_MAX_EDGE = 1_568;
 /** The most bytes, before base64, that `get_screenshot` returns as an image block. */
 export const IMAGE_BLOCK_MAX_BYTES = 3_750_000;
 
+/** The long edge that `get_screenshot` fits a PNG or a JPG to when the call gives no `maxEdge`. */
+export const DEFAULT_SCREENSHOT_MAX_EDGE = 1_024;
+
+/**
+ * The most SVG characters that one `get_screenshot` call returns as text: the
+ * read budget of the plugin, under the cut of the clients that cut a result.
+ */
+export const SVG_TEXT_MAX_CHARS = 35_000;
+
 export interface SaveScreenshotItemInput {
   nodeId: string;
   outputPath: string;
@@ -450,46 +459,106 @@ function buildManifest(
   };
 }
 
+/** What one export of a `get_screenshot` answer becomes: its blocks, or the error that refuses it. */
+type ExportBlocks = { blocks: ToolContent[]; svgChars: number } | { error: string };
+
 /**
- * The blocks of one export when it fits an image block.
- * @param value - One element of `exports`.
- * @returns An image block and a text block with the metadata, or null.
+ * The error of an export that a tool result may not carry.
+ * @param nodeId - The node of the export.
+ * @param what - The size of the export, in words.
+ * @returns The message.
  */
-function imageBlocks(value: unknown): ToolContent[] | null {
-  if (typeof value !== "object" || value === null) return null;
-  const exported = value as Record<string, unknown>;
-  const { nodeId, nodeName, format, base64 } = exported;
-  if (typeof nodeId !== "string" || typeof nodeName !== "string" || typeof base64 !== "string") {
-    return null;
+const tooLarge = (nodeId: string, what: string): string =>
+  `get_screenshot: the export of ${nodeId} is ${what}, over what a tool result may carry. Pass a smaller maxEdge, fewer nodeIds, or use save_screenshots to write it to disk.`;
+
+/**
+ * The blocks of one export. A PNG or a JPG becomes an image block and a text
+ * block with its metadata; an SVG becomes its markup as text while the markup
+ * of the call fits `SVG_TEXT_MAX_CHARS`. Anything else is refused: a tool
+ * result never carries base64 text.
+ * @param value - One element of `exports`.
+ * @param svgChars - The SVG characters that the call already returns.
+ * @returns The blocks, or the error.
+ */
+function exportBlocks(value: unknown, svgChars: number): ExportBlocks {
+  if (typeof value !== "object" || value === null) {
+    return { error: "get_screenshot: the plugin returned a malformed export." };
   }
-  if (format !== "PNG" && format !== "JPG") return null;
+  const exported = value as Record<string, unknown>;
+  const { nodeId, nodeName, format, base64, scale } = exported;
+  if (typeof nodeId !== "string" || typeof nodeName !== "string" || typeof base64 !== "string") {
+    return { error: "get_screenshot: the plugin returned a malformed export." };
+  }
+  if (format === "PDF") {
+    return {
+      error: `get_screenshot: the export of ${nodeId} is a PDF, which a tool result does not carry. Use save_screenshots to write it to disk, or pass format PNG.`,
+    };
+  }
+  if (format === "SVG") {
+    const markup = Buffer.from(base64, "base64").toString("utf8");
+    if (svgChars + markup.length > SVG_TEXT_MAX_CHARS) {
+      return {
+        error: `get_screenshot: the SVG of ${nodeId} is ${markup.length} characters, and a call returns ${SVG_TEXT_MAX_CHARS} characters of SVG at most. Use save_screenshots to write it to disk, or pass format PNG.`,
+      };
+    }
+    return {
+      blocks: [
+        { type: "text", text: JSON.stringify({ nodeId, nodeName, format, chars: markup.length }) },
+        { type: "text", text: markup },
+      ],
+      svgChars: markup.length,
+    };
+  }
+  if (format !== "PNG" && format !== "JPG") {
+    return {
+      error: `get_screenshot: the export of ${nodeId} has the unknown format ${String(format)}.`,
+    };
+  }
   // Four base64 characters hold at most 3 bytes: skip the decode for a capture that is far too big.
-  if (base64.length > Math.ceil(IMAGE_BLOCK_MAX_BYTES / 3) * 4) return null;
+  if (base64.length > Math.ceil(IMAGE_BLOCK_MAX_BYTES / 3) * 4 + 4) {
+    return { error: tooLarge(nodeId, `about ${Math.floor((base64.length * 3) / 4)} bytes`) };
+  }
   const bytes = Buffer.from(base64, "base64");
-  if (bytes.byteLength > IMAGE_BLOCK_MAX_BYTES) return null;
   const size = readImageSize(bytes, format);
-  if (size === null || Math.max(size.width, size.height) > IMAGE_BLOCK_MAX_EDGE) return null;
-  return [
-    { type: "image", data: base64, mimeType: format === "PNG" ? "image/png" : "image/jpeg" },
-    {
-      type: "text",
-      text: JSON.stringify({
-        nodeId,
-        nodeName,
-        format,
-        pixelWidth: size.width,
-        pixelHeight: size.height,
-        bytes: bytes.byteLength,
-      }),
-    },
-  ];
+  if (size === null) {
+    return {
+      error: `get_screenshot: the ${format} export of ${nodeId} has no readable header, so its pixel size is unknown. Use save_screenshots to write it to disk.`,
+    };
+  }
+  if (
+    Math.max(size.width, size.height) > IMAGE_BLOCK_MAX_EDGE ||
+    bytes.byteLength > IMAGE_BLOCK_MAX_BYTES
+  ) {
+    return {
+      error: tooLarge(nodeId, `${size.width}×${size.height} px / ${bytes.byteLength} bytes`),
+    };
+  }
+  return {
+    blocks: [
+      { type: "image", data: base64, mimeType: format === "PNG" ? "image/png" : "image/jpeg" },
+      {
+        type: "text",
+        text: JSON.stringify({
+          nodeId,
+          nodeName,
+          format,
+          ...(typeof scale === "number" ? { scale } : {}),
+          pixelWidth: size.width,
+          pixelHeight: size.height,
+          bytes: bytes.byteLength,
+        }),
+      },
+    ],
+    svgChars: 0,
+  };
 }
 
 /**
- * The tool result of `get_screenshot`. When every export is a PNG or a JPG
- * that fits the limits, each one becomes an image block and a text block with
- * its metadata, and no base64 text. Any other answer (an SVG, a PDF, a larger
- * raster export) is the JSON text of the answer.
+ * The tool result of `get_screenshot`. Each PNG or JPG becomes an image block
+ * and a text block with its metadata, and each short SVG its markup as text.
+ * An export that a tool result may not carry (a PDF, a long SVG, a raster
+ * export over the limits) makes the call a tool error that says what to do
+ * instead. The result never holds base64 text.
  * @param response - The plugin response.
  * @returns The tool result.
  */
@@ -498,17 +567,26 @@ export function screenshotToolResult(response: BridgeResponse): ToolResult {
     return { content: [{ type: "text", text: response.error }], isError: true };
   }
   const exports = (response.data as { exports?: unknown } | null | undefined)?.exports;
-  if (Array.isArray(exports) && exports.length > 0) {
-    const content: ToolContent[] = [];
-    for (const entry of exports) {
-      const blocks = imageBlocks(entry);
-      if (blocks === null) {
-        content.length = 0;
-        break;
-      }
-      content.push(...blocks);
-    }
-    if (content.length > 0) return { content };
+  if (!Array.isArray(exports) || exports.length === 0) {
+    return {
+      content: [{ type: "text", text: "get_screenshot: the plugin returned no export." }],
+      isError: true,
+    };
   }
-  return { content: [{ type: "text", text: JSON.stringify(response.data) }] };
+  const content: ToolContent[] = [];
+  const errors: string[] = [];
+  let svgChars = 0;
+  for (const entry of exports) {
+    const result = exportBlocks(entry, svgChars);
+    if ("error" in result) {
+      errors.push(result.error);
+      continue;
+    }
+    svgChars += result.svgChars;
+    content.push(...result.blocks);
+  }
+  if (errors.length > 0) {
+    return { content: [{ type: "text", text: errors.join("\n") }], isError: true };
+  }
+  return { content };
 }

@@ -252,6 +252,8 @@ describe("the capture manifest", () => {
       const params = screenshotRequests(plugin)[0].params ?? {};
       expect(params.format).toBe("PNG");
       expect("scale" in params).toBe(false);
+      // save_screenshots keeps the full-scale export: it never fits to an edge.
+      expect("maxEdge" in params).toBe(false);
       expect(existsSync(join(root, "a.png"))).toBe(true);
     },
     TIMEOUT_MS
@@ -476,78 +478,54 @@ describe("get_screenshot without the auditor role", () => {
     return leader.callToolRaw("get_screenshot", { nodeIds: ["1:1"], fileKey: FILE_KEY });
   }
 
-  /** The content of an answer that is JSON text: one text block with base64 in it. */
-  function jsonExports(result: RawToolResult): Array<{ base64: string; format: string }> {
-    expect(result.isError).toBe(false);
+  /** The text of an answer that is a tool error: one text block, no base64. */
+  function errorText(result: RawToolResult): string {
+    expect(result.isError).toBe(true);
     expect(result.content.map((block) => block.type)).toEqual(["text"]);
-    return (JSON.parse(result.content[0].text ?? "") as { exports: [] }).exports;
+    return result.content[0].text ?? "";
   }
 
   test(
-    "a small PNG is an image block and a text block without base64",
+    "an SVG is its markup as text; a long SVG and a PDF are errors that point to save_screenshots",
     async () => {
-      const png = Buffer.from(PNG_1X1_BASE64, "base64");
-      const result = await shoot({ format: "PNG", bytes: png, nodeName: "Frame" });
-
-      expect(result.isError).toBe(false);
-      expect(result.content.map((block) => block.type)).toEqual(["image", "text"]);
-      expect(result.content[0].mimeType).toBe("image/png");
-      expect(result.content[0].data).toBe(PNG_1X1_BASE64);
-      const meta = result.content[1].text ?? "";
-      expect(meta).not.toContain(PNG_1X1_BASE64);
-      expect(JSON.parse(meta)).toEqual({
+      const svg = await shoot({ format: "SVG", bytes: SVG });
+      expect(svg.isError).toBe(false);
+      expect(svg.content.map((block) => block.type)).toEqual(["text", "text"]);
+      expect(JSON.parse(svg.content[0].text ?? "")).toEqual({
         nodeId: "1:1",
-        nodeName: "Frame",
-        format: "PNG",
-        pixelWidth: 1,
-        pixelHeight: 1,
-        bytes: png.byteLength,
+        nodeName: "node 1:1",
+        format: "SVG",
+        chars: SVG.toString("utf8").length,
       });
-    },
-    TIMEOUT_MS
-  );
+      expect(svg.content[1].text).toBe(SVG.toString("utf8"));
 
-  test(
-    "a small JPG is an image block with the JPEG type",
-    async () => {
-      const result = await shoot({ format: "JPG", bytes: jpgWithSize(300, 200) });
-      expect(result.content.map((block) => block.type)).toEqual(["image", "text"]);
-      expect(result.content[0].mimeType).toBe("image/jpeg");
-      expect(JSON.parse(result.content[1].text ?? "")).toMatchObject({
-        format: "JPG",
-        pixelWidth: 300,
-        pixelHeight: 200,
-      });
-    },
-    TIMEOUT_MS
-  );
-
-  test(
-    "an SVG and a PDF are JSON text, as before",
-    async () => {
-      const svg = jsonExports(await shoot({ format: "SVG", bytes: SVG }));
-      expect(svg[0].format).toBe("SVG");
-      expect(Buffer.from(svg[0].base64, "base64")).toEqual(SVG);
+      const long = Buffer.from(
+        `<svg xmlns="http://www.w3.org/2000/svg">${"x".repeat(35_000)}</svg>`
+      );
+      const longError = errorText(await shoot({ format: "SVG", bytes: long }));
+      expect(longError).toContain("get_screenshot: the SVG of 1:1 is");
+      expect(longError).toContain("save_screenshots");
+      expect(longError).not.toContain(long.toString("base64").slice(0, 40));
 
       const pdf = Buffer.from("%PDF-1.4 synthetic");
-      const exported = jsonExports(await shoot({ format: "PDF", bytes: pdf }));
-      expect(Buffer.from(exported[0].base64, "base64")).toEqual(pdf);
+      const pdfError = errorText(await shoot({ format: "PDF", bytes: pdf }));
+      expect(pdfError).toContain("is a PDF");
+      expect(pdfError).toContain("save_screenshots");
+      expect(pdfError).not.toContain(pdf.toString("base64"));
     },
     TIMEOUT_MS
   );
 
   test(
-    "a raster export with a long edge above 1568 pixels is JSON text; one at 1568 is an image block",
+    "a raster export with a long edge above 1568 pixels is an error with guidance; one at 1568 is an image block",
     async () => {
-      const wide = jsonExports(
-        await shoot({ format: "PNG", bytes: pngWithSize(LONG_EDGE + 1, 10) })
+      const wide = errorText(await shoot({ format: "PNG", bytes: pngWithSize(LONG_EDGE + 1, 10) }));
+      expect(wide).toBe(
+        `get_screenshot: the export of 1:1 is ${LONG_EDGE + 1}×10 px / 33 bytes, over what a tool result may carry. Pass a smaller maxEdge, fewer nodeIds, or use save_screenshots to write it to disk.`
       );
-      expect(wide[0].format).toBe("PNG");
 
-      const tall = jsonExports(
-        await shoot({ format: "PNG", bytes: pngWithSize(10, LONG_EDGE + 1) })
-      );
-      expect(tall[0].format).toBe("PNG");
+      const tall = errorText(await shoot({ format: "PNG", bytes: pngWithSize(10, LONG_EDGE + 1) }));
+      expect(tall).toContain(`10×${LONG_EDGE + 1} px`);
 
       const edge = await shoot({ format: "PNG", bytes: pngWithSize(LONG_EDGE, LONG_EDGE) });
       expect(edge.content.map((block) => block.type)).toEqual(["image", "text"]);
@@ -556,12 +534,13 @@ describe("get_screenshot without the auditor role", () => {
   );
 
   test(
-    "a raster export above 3750000 bytes is JSON text; one at 3750000 bytes is an image block",
+    "a raster export above 3750000 bytes is an error with guidance; one at 3750000 bytes is an image block",
     async () => {
-      const over = jsonExports(
+      const over = errorText(
         await shoot({ format: "PNG", bytes: pngWithSize(10, 10, BYTE_LIMIT - 33 + 1) })
       );
-      expect(Buffer.from(over[0].base64, "base64").byteLength).toBe(BYTE_LIMIT + 1);
+      expect(over).toContain(`10×10 px / ${BYTE_LIMIT + 1} bytes`);
+      expect(over).toContain("save_screenshots");
 
       const exact = await shoot({ format: "PNG", bytes: pngWithSize(10, 10, BYTE_LIMIT - 33) });
       expect(exact.content.map((block) => block.type)).toEqual(["image", "text"]);
@@ -571,10 +550,67 @@ describe("get_screenshot without the auditor role", () => {
   );
 
   test(
-    "a raster export with no readable header is JSON text",
+    "a raster export with no readable header is an error",
     async () => {
-      const exported = jsonExports(await shoot({ format: "PNG", bytes: Buffer.from("not a png") }));
-      expect(exported[0].format).toBe("PNG");
+      const error = errorText(await shoot({ format: "PNG", bytes: Buffer.from("not a png") }));
+      expect(error).toContain("has no readable header");
+      expect(error).not.toContain(Buffer.from("not a png").toString("base64"));
+    },
+    TIMEOUT_MS
+  );
+
+  test(
+    "the call sends maxEdge, 1024 by default, and the metadata carries the scale of the export",
+    async () => {
+      const png = Buffer.from(PNG_1X1_BASE64, "base64");
+      const { leader, plugin } = await leaderWithPlugin((request) => ({
+        exports: (request.nodeIds ?? []).map((nodeId) => ({
+          nodeId,
+          nodeName: "Frame",
+          format: "PNG",
+          base64: png.toString("base64"),
+          width: 1,
+          height: 1,
+          scale: 0.5,
+        })),
+      }));
+
+      const fitted = await leader.callToolRaw("get_screenshot", {
+        nodeIds: ["1:1", "1:2"],
+        fileKey: FILE_KEY,
+      });
+      expect(fitted.content.map((block) => block.type)).toEqual(["image", "text", "image", "text"]);
+      expect(JSON.parse(fitted.content[1].text ?? "")).toMatchObject({ scale: 0.5 });
+
+      await leader.callToolRaw("get_screenshot", {
+        nodeIds: ["1:1"],
+        maxEdge: 512,
+        scale: 3,
+        fileKey: FILE_KEY,
+      });
+      const sent = screenshotRequests(plugin).map((request) => request.params);
+      expect(sent[0]).toMatchObject({ maxEdge: 1024 });
+      expect(sent[1]).toMatchObject({ maxEdge: 512, scale: 3 });
+    },
+    TIMEOUT_MS
+  );
+
+  test(
+    "more than 4 nodeIds and a maxEdge outside 64 to 1568 are refused before the plugin",
+    async () => {
+      const { leader, plugin } = await leaderWithPlugin();
+      const many = await leader.callToolRaw("get_screenshot", {
+        nodeIds: ["1:1", "1:2", "1:3", "1:4", "1:5"],
+        fileKey: FILE_KEY,
+      });
+      expect(many.isError).toBe(true);
+      const big = await leader.callToolRaw("get_screenshot", {
+        nodeIds: ["1:1"],
+        maxEdge: 4000,
+        fileKey: FILE_KEY,
+      });
+      expect(big.isError).toBe(true);
+      expect(screenshotRequests(plugin)).toEqual([]);
     },
     TIMEOUT_MS
   );
