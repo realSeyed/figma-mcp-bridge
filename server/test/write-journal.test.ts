@@ -6,12 +6,20 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, fsyncSync, writeSync } from "node:fs";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson } from "../src/evidence.js";
-import { entryHash, GENESIS_HASH, READ_ONLY_REQUESTS, type JournalEntry } from "../src/journal.js";
+import {
+  entryHash,
+  GENESIS_HASH,
+  READ_ONLY_REQUESTS,
+  WriteJournal,
+  type JournalEntry,
+  type JournalFs,
+  type JournalRecord,
+} from "../src/journal.js";
 import { AUDITOR_INTERNAL_COMMANDS, AUDITOR_TOOLS } from "../src/role.js";
 import type { IdentityReport, JournalState } from "../src/types.js";
 import { chunker, SYNTHETIC_TREE } from "./helpers/dump-tree.js";
@@ -713,6 +721,124 @@ describe("a torn last line", () => {
     },
     TIMEOUT_MS
   );
+});
+
+describe("the append retry", () => {
+  const RECORD: JournalRecord = {
+    fileKey: FILE_KEY,
+    epoch: 1,
+    auditor: false,
+    tool: "set_node_properties",
+    nodeIds: null,
+    params: { nodeId: NODE_ID, x: 1 },
+    response: { data: null },
+  };
+
+  const failure = (code: string): Error => Object.assign(new Error(`synthetic ${code}`), { code });
+
+  /**
+   * File calls that fail with the given codes first, then pass to node:fs.
+   * @returns The calls, and the pauses that the journal asked for.
+   */
+  function failingFs(writeCodes: string[], fsyncCodes: string[] = []) {
+    const sleeps: number[] = [];
+    const fs: JournalFs = {
+      writeSync(fd, buffer, offset, length) {
+        const code = writeCodes.shift();
+        if (code !== undefined) throw failure(code);
+        return writeSync(fd, buffer, offset, length);
+      },
+      fsyncSync(fd) {
+        const code = fsyncCodes.shift();
+        if (code !== undefined) throw failure(code);
+        fsyncSync(fd);
+      },
+      sleep: (ms) => {
+        sleeps.push(ms);
+      },
+    };
+    return { fs, sleeps };
+  }
+
+  /** A journal on a new file in a temporary folder, loaded. */
+  async function journalWith(fs: JournalFs) {
+    const file = join(await h.tempDir("retry"), "write-journal.jsonl");
+    const journal = new WriteJournal(file, fs);
+    journal.load();
+    h.defer(async () => journal.close());
+    return { file, journal };
+  }
+
+  test("a write that fails with EAGAIN twice is tried again, 50 ms apart, and recorded once", async () => {
+    const { fs, sleeps } = failingFs(["EAGAIN", "EAGAIN"]);
+    const { file, journal } = await journalWith(fs);
+
+    const entry = journal.append(RECORD);
+
+    expect(sleeps).toEqual([50, 50]);
+    expect(journal.state()).toEqual({ status: "ok", entryCount: 1, headHash: entry.hash });
+    expect(await readFile(file, "utf8")).toBe(`${canonicalJson(entry)}\n`);
+  });
+
+  test("a short write, then an interrupted one, send only the bytes not yet written", async () => {
+    const asked: number[] = [];
+    const fs: JournalFs = {
+      writeSync(fd, buffer, offset, length) {
+        asked.push(length);
+        if (asked.length === 1) return writeSync(fd, buffer, offset, Math.floor(length / 2));
+        if (asked.length === 2) throw failure("EINTR");
+        return writeSync(fd, buffer, offset, length);
+      },
+      fsyncSync: (fd) => fsyncSync(fd),
+      sleep: () => undefined,
+    };
+    const { file, journal } = await journalWith(fs);
+
+    const entry = journal.append(RECORD);
+
+    const line = `${canonicalJson(entry)}\n`;
+    const total = Buffer.byteLength(line, "utf8");
+    const rest = total - Math.floor(total / 2);
+    expect(asked).toEqual([total, rest, rest]);
+    expect(await readFile(file, "utf8")).toBe(line);
+  });
+
+  test("an fsync that keeps failing with EBUSY makes the journal broken after 3 more tries", async () => {
+    const { fs, sleeps } = failingFs([], ["EBUSY", "EBUSY", "EBUSY", "EBUSY"]);
+    const { journal } = await journalWith(fs);
+
+    expect(() => journal.append(RECORD)).toThrow("could not record it");
+
+    expect(sleeps).toEqual([50, 50, 50]);
+    const state = journal.state();
+    expect(state.status).toBe("broken");
+    expect(state.reason).toBe("the append of entry 1 failed (EBUSY)");
+  });
+
+  test("an error that does not pass is not tried again", async () => {
+    const { fs, sleeps } = failingFs(["ENOSPC"]);
+    const { journal } = await journalWith(fs);
+
+    expect(() => journal.append(RECORD)).toThrow("could not record it");
+
+    expect(sleeps).toEqual([]);
+    expect(journal.state().reason).toBe("the append of entry 1 failed (ENOSPC)");
+  });
+
+  test("EPERM is tried again on Windows only", async () => {
+    const { fs, sleeps } = failingFs(["EPERM"]);
+    const { journal } = await journalWith(fs);
+
+    if (process.platform === "win32") {
+      journal.append(RECORD);
+      expect(sleeps).toEqual([50]);
+      expect(journal.state().status).toBe("ok");
+    } else {
+      expect(() => journal.append(RECORD)).toThrow("could not record it");
+      expect(sleeps).toEqual([]);
+      expect(journal.state().status).toBe("broken");
+    }
+  });
 });
 
 describe("the read-only list", () => {

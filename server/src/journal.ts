@@ -21,8 +21,10 @@
  * end of the last valid line, and a `journal_recovered` entry records the move
  * in the chain. Each other failure makes the journal broken: the leader
  * reports it, refuses each write, and never truncates, repairs or rewrites
- * the file. The journal keeps the count, the head and the byte offset of each
- * line in memory, not the entries.
+ * the file. An append whose write or `fsync` fails on a passing error
+ * (`EAGAIN`, `EBUSY`, `EINTR`, and `EPERM` on Windows) tries it again 3 times,
+ * 50 ms apart, before it makes the journal broken. The journal keeps the
+ * count, the head and the byte offset of each line in memory, not the entries.
  *
  * `dump_journal_chunk` is the internal command of `dump_journal`: the leader
  * serves it itself with `chunk`, from the file, and never sends it to a plugin.
@@ -223,6 +225,43 @@ export function entryHash(entry: Omit<JournalEntry, "hash"> | JournalEntry): str
 }
 
 /**
+ * The file calls of an append: the narrow seam where a test makes a write or
+ * an `fsync` fail.
+ */
+export interface JournalFs {
+  writeSync(fd: number, buffer: Buffer, offset: number, length: number): number;
+  fsyncSync(fd: number): void;
+  /** Blocks for the pause between two tries: an append is synchronous. */
+  sleep(ms: number): void;
+}
+
+const NODE_FS: JournalFs = {
+  writeSync: (fd, buffer, offset, length) => writeSync(fd, buffer, offset, length),
+  fsyncSync: (fd) => fsyncSync(fd),
+  sleep: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
+};
+
+/** How many more times an append tries a write or an `fsync` that failed on a passing error. */
+export const APPEND_RETRIES = 3;
+/** The pause before each of those tries. */
+export const APPEND_RETRY_MS = 50;
+
+/**
+ * Whether a failed write or `fsync` can pass: the file is busy for a moment,
+ * the call was interrupted, or, on Windows, another program (an antivirus or
+ * an indexer) holds the file open.
+ */
+function passingError(err: unknown): boolean {
+  const code = errorCode(err);
+  return (
+    code === "EAGAIN" ||
+    code === "EBUSY" ||
+    code === "EINTR" ||
+    (code === "EPERM" && process.platform === "win32")
+  );
+}
+
+/**
  * The journal file of one leader. `load` reads and checks it; `append` adds
  * one entry and calls `fsync`. Only the leader makes one: a follower never
  * opens the file.
@@ -239,8 +278,14 @@ export class WriteJournal {
    */
   private lineEnds: number[] = [];
 
-  /** @param file - The journal file. The default is `journalFilePath()`. */
-  constructor(readonly file: string = journalFilePath()) {}
+  /**
+   * @param file - The journal file. The default is `journalFilePath()`.
+   * @param fs - The file calls of an append. A test gives its own.
+   */
+  constructor(
+    readonly file: string = journalFilePath(),
+    private fs: JournalFs = NODE_FS
+  ) {}
 
   /**
    * Reads the file and checks each line. A missing file is an empty journal.
@@ -350,7 +395,9 @@ export class WriteJournal {
 
   /**
    * Adds one entry and calls `fsync`. Makes the folder (mode 0o700) and the
-   * file (mode 0o600) at the first append.
+   * file (mode 0o600) at the first append. A write or an `fsync` that fails on
+   * a passing error is tried again `APPEND_RETRIES` times, `APPEND_RETRY_MS`
+   * apart; a write then sends only the bytes not yet written.
    * @param record - What the leader sent and what came back.
    * @returns The entry as written.
    * @throws If the journal is broken, or the append fails. A failed append
@@ -381,9 +428,9 @@ export class WriteJournal {
       lineBytes = line.length;
       const fd = this.open();
       for (let written = 0; written < line.length;) {
-        written += writeSync(fd, line, written, line.length - written);
+        written += this.retrying(() => this.fs.writeSync(fd, line, written, line.length - written));
       }
-      fsyncSync(fd);
+      this.retrying(() => this.fs.fsyncSync(fd));
     } catch (err) {
       const cause = `the append of entry ${entry.seq} failed (${describe(err)})`;
       this.markBroken(cause);
@@ -468,6 +515,18 @@ export class WriteJournal {
       }
     }
     return { status: "ok", entryCount: this.entryCount, headHash: this.headHash, entries };
+  }
+
+  /** Runs one file call, and tries it again on a passing error. */
+  private retrying<T>(call: () => T): T {
+    for (let retry = 0; ; retry++) {
+      try {
+        return call();
+      } catch (err) {
+        if (retry >= APPEND_RETRIES || !passingError(err)) throw err;
+        this.fs.sleep(APPEND_RETRY_MS);
+      }
+    }
   }
 
   /** The byte offset after the last line that the load and the appends counted. */
