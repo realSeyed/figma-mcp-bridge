@@ -5,6 +5,7 @@ import { componentsHandlers } from "./components";
 import { sectionsHandlers } from "./sections";
 import { paintsHandlers } from "./paints";
 import { dumpsHandlers } from "./dumps";
+import { discoveryHandlers } from "./discovery";
 import { e2eHandlers } from "./e2e";
 
 export type { ExtensionHandler, ExtensionHandlerMap, ExtensionRequest } from "./types";
@@ -24,6 +25,7 @@ export const extensionHandlers = {
   ...sectionsHandlers,
   ...paintsHandlers,
   ...dumpsHandlers,
+  ...discoveryHandlers,
   ...e2eHandlers,
 };
 

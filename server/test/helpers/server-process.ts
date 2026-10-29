@@ -24,6 +24,7 @@ const STRIPPED_VARIABLES = [
   "FIGMA_BRIDGE_CONNECT_GRACE_MS",
   "FIGMA_BRIDGE_STANDALONE",
   "FIGMA_BRIDGE_LOG_FILE",
+  "FIGMA_BRIDGE_MAX_RESULT_CHARS",
 ];
 
 /** How long a process has to log its role. */
@@ -41,8 +42,8 @@ export interface ServerOptions {
    * `FIGMA_BRIDGE_TOKEN_FILE`, `FIGMA_BRIDGE_JOURNAL_FILE`,
    * `FIGMA_BRIDGE_DUMP_CHUNK_NODES`, `FIGMA_BRIDGE_JOURNAL_CHUNK_ENTRIES`,
    * `FIGMA_BRIDGE_ROLE`, `FIGMA_BRIDGE_REQUEST_TIMEOUT_MS`,
-   * `FIGMA_BRIDGE_CONNECT_GRACE_MS`, `FIGMA_BRIDGE_STANDALONE`, and
-   * `FIGMA_BRIDGE_LOG_FILE` are removed unless
+   * `FIGMA_BRIDGE_CONNECT_GRACE_MS`, `FIGMA_BRIDGE_STANDALONE`,
+   * `FIGMA_BRIDGE_LOG_FILE`, and `FIGMA_BRIDGE_MAX_RESULT_CHARS` are removed unless
    * they are given here, so a variable of the developer does not leak into a test.
    * `FIGMA_BRIDGE_TOKEN_FILE`, `FIGMA_BRIDGE_JOURNAL_FILE` and
    * `FIGMA_BRIDGE_LOG_FILE` are required: no test reads the real token file or

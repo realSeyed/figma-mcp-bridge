@@ -135,6 +135,9 @@ export const READ_ONLY_REQUESTS: ReadonlySet<string> = new Set([
   "get_design_context",
   "get_motion_styles",
   "get_node_motion",
+  // The discovery reads, which the auditor role does not register either.
+  "find_nodes",
+  "get_design_system",
   // The dump of the journal. The leader serves the chunk command itself.
   "dump_journal",
   JOURNAL_CHUNK_REQUEST,

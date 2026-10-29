@@ -130,8 +130,27 @@ call reads the identity before the first capture and after the last, fails if th
 build, or the leader start changed, and removes each file of the call. The manifest file goes
 beside the first item as `save_screenshots-<UTC time>.manifest.json`. A target that exists refuses
 the call before the first capture. An item that fails alone does not fail the call.
-`get_screenshot` returns a PNG or JPG of 1,568 pixels or less on the long edge and 3,750,000 bytes
-or less as an image block and a text block with its metadata; any other export is JSON text.
+`get_screenshot` takes 4 nodes at most and always sends `maxEdge` (default 1,024): the plugin then
+exports PNG and JPG one node at a time, at `min(scale, maxEdge / long edge)`, and returns the scale.
+`save_screenshots` sends no `maxEdge` and keeps the old export. A PNG or JPG of 1,568 pixels or less
+on the long edge and 3,750,000 bytes or less is an image block and a text block with its metadata;
+an SVG is its markup as text while the markup of the call is 35,000 characters or less. A PDF, a
+longer SVG, or a larger raster export is a tool error that points to `save_screenshots`. A result
+never holds base64 text.
+
+The read budget is `MAX_NODE_RESULT_CHARS` (35,000) in `plugin/src/main/serializer.ts`.
+`plugin/src/main/reads.ts` walks a tree one time, in the `full` or the `outline` detail, stops a
+branch at `depth` and the walk at the budget, and marks a cut read `truncated` with a `note`.
+`get_document`, `get_selection` (one budget for the array), `get_design_context`, and `get_node`
+with `depth` or `detail` use it; `get_node` without either keeps `serializeNodeWithinBudget`, byte
+for byte. `find_nodes` and `get_design_system` (`extensions/discovery.ts`) stay in the same budget.
+`renderResponse` (`server/src/tool-helpers.ts`) is the backstop: above
+`FIGMA_BRIDGE_MAX_RESULT_CHARS` (38,000) characters of JSON text, a read (a `tool` on
+`READ_ONLY_REQUESTS`) is a tool error that says how to narrow the call, and any other result is a
+success with `{ ok: true, resultOmitted: true, chars, note }`, since the write already happened.
+Each read tool passes `tool`. These rules changed the output of earlier builds: no base64 text,
+a 35,000-character cut of each page read (`get_node` was 50,000; the others were not cut), and
+the backstop.
 
 `dump_nodes_chunk` (`plugin/src/main/extensions/dumps.ts`, `edit: false`) is an internal
 plugin command: the server sends it, and no MCP tool has its name. Its params are `rootId`,
@@ -212,6 +231,7 @@ nothing. A dump adds no entry.
 | `plugin/src/main/request-queue.ts`         | The request queue of the plugin: one request at a time, the deadlines, the drop of a closed socket.                    |
 | `plugin/src/main/serializer.ts`            | The node output of the read tools, and the base of the dump form.                                                      |
 | `plugin/src/main/dump.ts`                  | The dump form of a node: the read form, the hidden content, and the added fields.                                      |
+| `plugin/src/main/reads.ts`                 | The budgeted reads: one walk with `depth` and `detail`, the cut, the note.                                             |
 | `plugin/src/main/shared.ts`                | Shared helpers: node lookup, colors, fonts, position, variable values.                                                 |
 | `plugin/src/main/extensions/types.ts`      | The `ExtensionHandler` type.                                                                                           |
 | `plugin/src/main/extensions/index.ts`      | Merges the area maps. Exports `ExtensionRequestType`.                                                                  |
@@ -222,6 +242,7 @@ nothing. A dump adds no entry.
 | `plugin/src/main/extensions/sections.ts`   | Section handlers.                                                                                                      |
 | `plugin/src/main/extensions/paints.ts`     | Paint handlers: `clear_paints`.                                                                                        |
 | `plugin/src/main/extensions/dumps.ts`      | `dump_nodes_chunk`, the internal chunk command of a dump.                                                              |
+| `plugin/src/main/extensions/discovery.ts`  | `find_nodes` and `get_design_system`.                                                                                  |
 | `plugin/src/main/extensions/e2e.ts`        | `e2e_fixture`, the test helper that builds the conformance fixture parts no tool writes.                               |
 | `plugin/src/ui/App.tsx`                    | The plugin window. Holds the WebSocket.                                                                                |
 | `server/src/index.ts`                      | Start. Reads `FIGMA_BRIDGE_PORT`. The default is 1995.                                                                 |
@@ -251,12 +272,14 @@ nothing. A dump adds no entry.
 | `server/src/extensions/paints.ts`          | Paint tools: `clear_paints`.                                                                                           |
 | `server/src/extensions/dumps.ts`           | `dump_nodes`: the chunk loop, `TreeBuilder`, the files, and the manifest.                                              |
 | `server/src/extensions/journal.ts`         | `dump_journal`: the chunk loop, the chain check, the files, and the manifest.                                          |
+| `server/src/extensions/discovery.ts`       | `find_nodes` and `get_design_system`: the schemas and the registration.                                                |
 | `server/scripts/e2e-free-plan.ts`          | The end-to-end script. Drives every extension tool against a real file.                                                |
-| `server/scripts/perf-free-plan.ts`         | The measurement script. Holds each tool to 30 seconds and 50,000 characters.                                           |
+| `server/scripts/perf-free-plan.ts`         | The measurement script. Holds each tool to 30 seconds and 38,000 characters.                                           |
 | `server/scripts/conformance.ts`            | The dump-conformance test: ID placeholders, the golden file text, the visible projection.                              |
 | `server/scripts/golden/`                   | The golden dump of the conformance fixture. Synthetic data from the test file only.                                    |
 | `server/test/`                             | `bun test` tests. Real server processes against a simulated plugin. Helpers in `helpers/`.                             |
 | `plugin/test/`                             | `bun test` tests of the serializer, the dump form, the chunk walk, the queue, `handleRequest`. Synthetic nodes.        |
+| `plugin/test/helpers/fake-figma.ts`        | A fake file: pages, selection, lookup, search, `exportAsync`, variables, styles. Generic, for reads and writes.        |
 | `.github/workflows/ci.yml`                 | CI for each pull request and each push to `main`: check, tests, toolset tests, on Ubuntu and Windows.                  |
 | `tools/audit/`                             | The audit toolset in Python 3.11, standard library only. `README.md` holds its rules.                                  |
 | `tools/audit/auditlib/`                    | `dumps.py` (both formats, the visible projection), `manifest.py`, `outputs.py`, `config.py`, `paths.py`, `toolset.py`. |
@@ -394,10 +417,10 @@ the README.
 entries that one `dump_journal_chunk` request asks for, an integer of 1 or more. The default
 is 500. The harness removes it too. Do not document it in the README.
 
-`FIGMA_BRIDGE_REQUEST_TIMEOUT_MS`, `FIGMA_BRIDGE_CONNECT_GRACE_MS`, `FIGMA_BRIDGE_STANDALONE`
-and `FIGMA_BRIDGE_LOG_FILE` are settings of the owner, and the README documents them. The
-harness removes each of them from a test process unless the test gives it, sets the grace to
-`0`, and sets the log file to a temporary file of the harness. `serverEnv` refuses a process
+`FIGMA_BRIDGE_REQUEST_TIMEOUT_MS`, `FIGMA_BRIDGE_CONNECT_GRACE_MS`, `FIGMA_BRIDGE_STANDALONE`,
+`FIGMA_BRIDGE_LOG_FILE` and `FIGMA_BRIDGE_MAX_RESULT_CHARS` are settings of the owner, and the
+README documents them. The harness removes each of them from a test process unless the test
+gives it, sets the grace to `0`, and sets the log file to a temporary file of the harness. `serverEnv` refuses a process
 without a token file, a journal file, or a log file. A test that runs a module that logs in
 the test process itself sets `FIGMA_BRIDGE_LOG_FILE` first.
 

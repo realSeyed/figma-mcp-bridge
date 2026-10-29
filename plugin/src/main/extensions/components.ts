@@ -280,7 +280,7 @@ const displayNameOf = (name: string): string => {
  * @param set - The component set.
  * @returns Each variant property and the values it takes.
  */
-const variantOptionsOf = (set: ComponentSetNode): Record<string, string[]> => {
+export const variantOptionsOf = (set: ComponentSetNode): Record<string, string[]> => {
   const options: Record<string, string[]> = {};
   try {
     for (const [property, definition] of Object.entries(set.componentPropertyDefinitions)) {
@@ -885,7 +885,7 @@ const listComponents = async (req: ExtensionRequest): Promise<unknown> => {
  * @param owner - The component or the component set the properties live on.
  * @returns One entry per property, in the order Figma reports them.
  */
-const describeProperties = (owner: ComponentNode | ComponentSetNode): unknown[] =>
+export const describeProperties = (owner: ComponentNode | ComponentSetNode) =>
   Object.entries(owner.componentPropertyDefinitions).map(([name, definition]) => ({
     name,
     displayName: displayNameOf(name),

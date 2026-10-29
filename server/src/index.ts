@@ -12,6 +12,7 @@ import { AUDITOR_TOOLS, missingTools, parseRole, restrictServer, ROLE_VARIABLE }
 import type { ProcessRole } from "./role.js";
 import { rpcToken } from "./rpc-token.js";
 import { checkTimingSettings } from "./timeouts.js";
+import { maxResultChars } from "./tool-helpers.js";
 import { registerTools } from "./tools.js";
 import { VERSION } from "./version.js";
 
@@ -45,9 +46,10 @@ function resolveRole(): ProcessRole {
 }
 const ROLE = resolveRole();
 
-// A bad timing value stops the process at start, not at the first tool call.
+// A bad timing or result-size value stops the process at start, not at the first tool call.
 try {
   checkTimingSettings();
+  maxResultChars();
 } catch (err) {
   console.error(err instanceof Error ? err.message : String(err));
   process.exit(1);

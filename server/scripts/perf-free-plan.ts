@@ -5,8 +5,9 @@
  *
  *   - 30 seconds, well under the 3 minutes `server/src/bridge.ts` allows
  *     before it gives up on a request.
- *   - 50,000 characters of result with the default input, so one call cannot
- *     fill an agent's context on its own.
+ *   - 38,000 characters of result with the default input, so one call cannot
+ *     fill an agent's context on its own, and stays under the 40,000 at which
+ *     Gemini CLI cuts a result (`FIGMA_BRIDGE_MAX_RESULT_CHARS`, its default).
  *
  * Run it from `server/` with `bun run perf`, with the Figma plugin connected.
  * Like the e2e script it starts its own `node dist/index.js`, which joins the
@@ -60,7 +61,7 @@ const BATCH = 200;
 
 /** The budget one call has to meet. */
 const MAX_MS = 30_000;
-const MAX_CHARS = 50_000;
+const MAX_CHARS = 38_000;
 
 /** Longer than the budget, so a call that blows it is measured, not cut off. */
 const CALL_TIMEOUT_MS = 180_000;
@@ -354,7 +355,7 @@ const SET_VARIANTS = 50;
  * Standalone components the synthetic load adds beside the set.
  *
  * As many as `list_components` shows by default, so with the set beside them
- * the file holds more than one default call returns — the case the 50,000
+ * the file holds more than one default call returns — the case the 38,000
  * character budget is really about.
  */
 const LOOSE_COMPONENTS = 100;
@@ -574,16 +575,15 @@ const measureReads = async (targets?: ReadTargets): Promise<void> => {
 
   let frame = targets?.frame;
   if (frame === undefined) {
-    // `get_document` is a core tool this fork did not add, so it is measured
-    // for context rather than against the budget — it is also how the heaviest
-    // frame of a real read file is found.
+    // `get_document` is cut at the read budget now, so it is measured against
+    // it — it is also how the heaviest frame of a real read file is found.
     const document = await measure(
       "get_document",
       "the open page",
       "get_document",
       {},
       readKey,
-      false
+      true
     );
     if (document === undefined) return;
     const found = heaviestFrame(asRecord(document, "get_document result"));

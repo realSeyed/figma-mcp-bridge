@@ -1,5 +1,9 @@
-import { serializeBoundVariableMap, serializeNode, serializeNodeWithinBudget } from "./serializer";
-import type { SerializableNode } from "./serializer";
+import {
+  MAX_NODE_RESULT_CHARS,
+  serializeBoundVariableMap,
+  serializeNodeWithinBudget,
+} from "./serializer";
+import { cutNote, readNode, readNodes, readOptionsOf, readWithinBudget } from "./reads";
 import { addLayersToFrame } from "../html-figma/figma";
 import { RequestQueue } from "./request-queue";
 import { getExtensionHandler } from "./extensions";
@@ -73,6 +77,11 @@ type ServerRequestParams = Record<string, unknown> & {
    * rendered/tight bounds including overflow/effects.
    */
   clip?: boolean;
+  /**
+   * The most pixels on the long edge of a PNG or JPG export. `scale` is then an
+   * upper bound. get_screenshot always sends it; save_screenshots never does.
+   */
+  maxEdge?: number;
   depth?: number;
   styleId?: string;
   animationStyleId?: string;
@@ -335,6 +344,60 @@ const ungroupSection = async (section: SectionNode): Promise<SceneNode[]> => {
   return orphans;
 };
 
+/**
+ * The scale that keeps the long edge of an export within `maxEdge` pixels.
+ *
+ * The box is the one Figma exports: the logical bounds with `clip`, else the
+ * render bounds, which take in shadows and overflow. The asked scale is an
+ * upper bound, so a small node keeps it.
+ * @param node - The node to export.
+ * @param scale - The asked scale.
+ * @param maxEdge - The most pixels on the long edge.
+ * @param clip - Whether the export uses the logical bounds.
+ * @returns The scale, 0.01 at least.
+ */
+const fittedScale = (node: SceneNode, scale: number, maxEdge: number, clip: boolean): number => {
+  const renderBounds = "absoluteRenderBounds" in node ? node.absoluteRenderBounds : null;
+  const box =
+    (clip ? node.absoluteBoundingBox : (renderBounds ?? node.absoluteBoundingBox)) ?? node;
+  const longEdge = Math.max(box.width, box.height);
+  if (!(longEdge > 0)) return scale;
+  return Math.max(0.01, Math.min(scale, maxEdge / longEdge));
+};
+
+/**
+ * Exports one node as a PNG or a JPG whose long edge fits `maxEdge`.
+ * @param node - The node to export.
+ * @param format - PNG or JPG.
+ * @param scale - The asked scale, an upper bound.
+ * @param maxEdge - The most pixels on the long edge.
+ * @param clip - Whether the export uses the logical bounds.
+ * @returns The export, with the scale it used.
+ */
+const exportFitted = async (
+  node: SceneNode,
+  format: "PNG" | "JPG",
+  scale: number,
+  maxEdge: number,
+  clip: boolean
+) => {
+  const used = fittedScale(node, scale, maxEdge, clip);
+  const bytes = await node.exportAsync({
+    format,
+    constraint: { type: "SCALE", value: used },
+    ...(clip ? { contentsOnly: true, useAbsoluteBounds: true } : {}),
+  });
+  return {
+    nodeId: node.id,
+    nodeName: node.name,
+    format,
+    base64: figma.base64Encode(bytes),
+    width: node.width,
+    height: node.height,
+    scale: used,
+  };
+};
+
 const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
   try {
     // Extension tools are dispatched through their own map, so adding one does
@@ -352,17 +415,30 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
       requireEditorMode(request.type);
     }
     switch (request.type) {
-      case "get_document":
+      case "get_document": {
+        const pageId = request.params?.pageId;
+        let page: PageNode = figma.currentPage;
+        if (typeof pageId === "string") {
+          const found = figma.root.children.find((candidate) => candidate.id === pageId);
+          if (!found) {
+            throw new Error(
+              `get_document found no page with the ID ${pageId} for pageId. Call get_metadata to list the pages of this file.`
+            );
+          }
+          await found.loadAsync();
+          page = found;
+        }
         return {
           type: request.type,
           requestId: request.requestId,
-          data: serializeNode(figma.currentPage),
+          data: readNode(page, readOptionsOf(request.params)),
         };
+      }
       case "get_selection":
         return {
           type: request.type,
           requestId: request.requestId,
-          data: figma.currentPage.selection.map((node) => serializeNode(node)),
+          data: readNodes(figma.currentPage.selection, readOptionsOf(request.params)),
         };
       case "get_node": {
         const nodeId = request.nodeIds && request.nodeIds[0];
@@ -392,7 +468,11 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
         return {
           type: request.type,
           requestId: request.requestId,
-          data: serializeNodeWithinBudget(node as SceneNode),
+          // Without depth and detail the read keeps its own path, byte for byte.
+          data:
+            request.params?.depth === undefined && request.params?.detail === undefined
+              ? serializeNodeWithinBudget(node as SceneNode)
+              : readNode(node as SceneNode, readOptionsOf(request.params)),
         };
       }
       case "get_styles": {
@@ -457,59 +537,27 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
       }
       case "get_design_context": {
         const depth = typeof request.params?.depth === "number" ? request.params.depth : 2;
-        const serializeWithDepth = async (
-          node: SerializableNode,
-          currentDepth: number
-        ): Promise<ReturnType<typeof serializeNode>> => {
-          const serialized = serializeNode(node);
-          if (currentDepth >= depth && serialized.children) {
-            // Truncate children at depth limit, but show count
-            return {
-              ...serialized,
-              children: undefined,
-              childCount:
-                (node as ChildrenMixin & SceneNode).children?.filter((c) => c.visible !== false)
-                  .length ?? 0,
-            } as ReturnType<typeof serializeNode> & { childCount: number };
-          }
-          if (serialized.children) {
-            const childNodes = await Promise.all(
-              serialized.children.map((child) => figma.getNodeByIdAsync(child.id))
-            );
-            const serializedChildren = await Promise.all(
-              childNodes
-                .filter(
-                  (n): n is SceneNode =>
-                    n !== null && n.type !== "DOCUMENT" && "visible" in n && n.visible !== false
-                )
-                .map((n) => serializeWithDepth(n, currentDepth + 1))
-            );
-            return {
-              ...serialized,
-              children: serializedChildren,
-            };
-          }
-          return serialized;
-        };
-
         const selection = figma.currentPage.selection;
-        const contextNodes =
-          selection.length > 0
-            ? await Promise.all(selection.map((node) => serializeWithDepth(node, 0)))
-            : [await serializeWithDepth(figma.currentPage, 0)];
-
+        const roots = selection.length > 0 ? selection : [figma.currentPage];
+        const base = {
+          fileName: figma.root.name,
+          currentPage: {
+            id: figma.currentPage.id,
+            name: figma.currentPage.name,
+          },
+          selectionCount: selection.length,
+        };
+        // One walk, stopped at depth and at the budget. A node at the depth
+        // limit reports childCount in place of its children.
+        const data = readWithinBudget(roots, { depth }, ({ nodes, cut }) =>
+          cut.some(Boolean)
+            ? { ...base, context: nodes, truncated: true, note: cutNote(MAX_NODE_RESULT_CHARS) }
+            : { ...base, context: nodes }
+        );
         return {
           type: request.type,
           requestId: request.requestId,
-          data: {
-            fileName: figma.root.name,
-            currentPage: {
-              id: figma.currentPage.id,
-              name: figma.currentPage.name,
-            },
-            selectionCount: selection.length,
-            context: contextNodes,
-          },
+          data,
         };
       }
       case "get_variable_defs": {
@@ -518,32 +566,53 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
           figma.variables.getLocalVariablesAsync(),
         ]);
         const varMap = new Map(allVariables.map((v) => [v.id, v]));
-        const variableData = collections.map((collection) => {
+        // Both filters cut the answer down for a large design system: a
+        // collection, and a part of the variable name, without regard to case.
+        const collectionId = request.params?.collectionId;
+        const query =
+          typeof request.params?.query === "string"
+            ? request.params.query.trim().toLowerCase()
+            : "";
+        const chosen =
+          typeof collectionId === "string"
+            ? collections.filter((collection) => collection.id === collectionId)
+            : collections;
+        if (typeof collectionId === "string" && chosen.length === 0) {
+          throw new Error(
+            `get_variable_defs found no local collection with the ID ${collectionId} for collectionId. Call get_variable_defs without collectionId, or get_design_system, to list the collections.`
+          );
+        }
+        const variableData = chosen.flatMap((collection) => {
           const variables = collection.variableIds
             .map((id) => varMap.get(id))
-            .filter((v): v is Variable => v !== undefined && v !== null);
-          return {
-            id: collection.id,
-            name: collection.name,
-            defaultModeId: collection.defaultModeId,
-            modes: collection.modes.map((mode) => ({
-              modeId: mode.modeId,
-              name: mode.name,
-            })),
-            variables: variables.map((variable) => ({
-              id: variable.id,
-              name: variable.name,
-              resolvedType: variable.resolvedType,
-              description: variable.description,
-              scopes: variable.scopes,
-              valuesByMode: Object.fromEntries(
-                Object.entries(variable.valuesByMode).map(([modeId, value]) => [
-                  modeId,
-                  serializeVariableValue(value),
-                ])
-              ),
-            })),
-          };
+            .filter((v): v is Variable => v !== undefined && v !== null)
+            .filter((v) => query === "" || v.name.toLowerCase().includes(query));
+          // A query leaves out a collection that holds no match.
+          if (query !== "" && variables.length === 0) return [];
+          return [
+            {
+              id: collection.id,
+              name: collection.name,
+              defaultModeId: collection.defaultModeId,
+              modes: collection.modes.map((mode) => ({
+                modeId: mode.modeId,
+                name: mode.name,
+              })),
+              variables: variables.map((variable) => ({
+                id: variable.id,
+                name: variable.name,
+                resolvedType: variable.resolvedType,
+                description: variable.description,
+                scopes: variable.scopes,
+                valuesByMode: Object.fromEntries(
+                  Object.entries(variable.valuesByMode).map(([modeId, value]) => [
+                    modeId,
+                    serializeVariableValue(value),
+                  ])
+                ),
+              })),
+            },
+          ];
         });
         return {
           type: request.type,
@@ -578,6 +647,18 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
 
         if (targetNodes.length === 0) {
           throw new Error("No nodes to export. Select nodes or provide nodeIds.");
+        }
+
+        // A fitted export (get_screenshot sends maxEdge) runs one node at a time
+        // at the scale that keeps its long edge within maxEdge. Without maxEdge
+        // (the call of save_screenshots) the exports run as they always have.
+        const maxEdge = request.params?.maxEdge;
+        if (typeof maxEdge === "number" && (format === "PNG" || format === "JPG")) {
+          const exports = [];
+          for (const node of targetNodes) {
+            exports.push(await exportFitted(node, format, scale, maxEdge, clip));
+          }
+          return { type: request.type, requestId: request.requestId, data: { exports } };
         }
 
         const exports = await Promise.all(

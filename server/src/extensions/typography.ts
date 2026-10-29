@@ -222,7 +222,9 @@ export function register(server: McpServer, node: Node): void {
       const parsed = parseToolInput(schemas.list_fonts, args);
       if (!parsed.success) return parsed.error;
       const { fileKey, ...params } = parsed.data;
-      return renderResponse(() => node.sendWithParams("list_fonts", undefined, params, fileKey));
+      return renderResponse(() => node.sendWithParams("list_fonts", undefined, params, fileKey), {
+        tool: "list_fonts",
+      });
     }
   );
 

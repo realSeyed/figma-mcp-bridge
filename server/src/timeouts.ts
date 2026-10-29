@@ -31,6 +31,9 @@ export const REQUEST_TIMEOUTS_MS: ReadonlyMap<string, number> = new Map([
   ["import_html_layers", 300_000],
   // Its own row, so a change of the default leaves the dumps as they are.
   ["dump_nodes_chunk", 60_000],
+  // A search of every page loads each page first.
+  ["find_nodes", 60_000],
+  ["get_design_system", 120_000],
 ]);
 
 /** What a follower adds to the time of the leader, for the HTTP round trip. */

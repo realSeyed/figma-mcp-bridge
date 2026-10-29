@@ -91,6 +91,14 @@ type SerializedStyles = {
   clipsContent?: boolean;
   rotation?: number;
   constraints?: { horizontal: string; vertical: string };
+  /** How the node sizes on each axis, in or as an auto-layout frame, when one axis is not FIXED. */
+  layoutSizing?: { horizontal: string; vertical: string };
+  /** Only ABSOLUTE, inside an auto-layout parent: the child is out of the flow. */
+  layoutPositioning?: "ABSOLUTE";
+  minWidth?: number;
+  maxWidth?: number;
+  minHeight?: number;
+  maxHeight?: number;
 };
 
 /**
@@ -308,7 +316,7 @@ export const serializeLetterSpacing = (letterSpacing: LetterSpacing | symbol) =>
   return { value: letterSpacing.value, unit: letterSpacing.unit };
 };
 
-const getBounds = (node: SerializableNode): SerializedBounds | undefined => {
+export const getBounds = (node: SerializableNode): SerializedBounds | undefined => {
   if ("x" in node && "y" in node && "width" in node && "height" in node) {
     return {
       x: node.x,
@@ -465,6 +473,37 @@ const serializeStyles = (
     const left = node.paddingLeft as number;
     if (top > 0 || right > 0 || bottom > 0 || left > 0) {
       styles.padding = { top, right, bottom, left };
+    }
+  }
+
+  // How a child of an auto-layout frame sizes, and the frame itself. Left out
+  // when both axes are FIXED, which is what every other node reports too, and
+  // outside auto layout, where the field says nothing.
+  const parent = "parent" in node ? node.parent : null;
+  const inAutoLayout =
+    parent !== null &&
+    parent !== undefined &&
+    "layoutMode" in parent &&
+    parent.layoutMode !== "NONE";
+  const isAutoLayout = "layoutMode" in node && node.layoutMode !== "NONE";
+  if (
+    (isAutoLayout || inAutoLayout) &&
+    "layoutSizingHorizontal" in node &&
+    "layoutSizingVertical" in node
+  ) {
+    const horizontal = node.layoutSizingHorizontal as string;
+    const vertical = node.layoutSizingVertical as string;
+    if (horizontal !== "FIXED" || vertical !== "FIXED") {
+      styles.layoutSizing = { horizontal, vertical };
+    }
+  }
+  if (inAutoLayout && "layoutPositioning" in node && node.layoutPositioning === "ABSOLUTE") {
+    styles.layoutPositioning = "ABSOLUTE";
+  }
+  for (const field of ["minWidth", "maxWidth", "minHeight", "maxHeight"] as const) {
+    if (field in node) {
+      const value = (node as unknown as Record<string, unknown>)[field];
+      if (typeof value === "number") styles[field] = value;
     }
   }
 
@@ -628,8 +667,12 @@ export const serializeNode = (node: SerializableNode): SerializedNode => {
   return { ...base, children: visible.map((child) => serializeNode(child)) };
 };
 
-/** The most characters one node read hands back before it starts cutting. */
-export const MAX_NODE_RESULT_CHARS = 50_000;
+/**
+ * The most characters one node read hands back before it starts cutting. It
+ * stays under the 40,000 characters at which Gemini CLI drops the middle of a
+ * tool result, so a cut is always one this budget made and marked.
+ */
+export const MAX_NODE_RESULT_CHARS = 35_000;
 
 /**
  * Serializes a node, cutting the subtree short when it will not fit.

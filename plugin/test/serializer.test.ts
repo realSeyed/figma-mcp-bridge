@@ -12,7 +12,7 @@
 import { describe, expect, test } from "bun:test";
 import { serializeNode, serializeNodeWithinBudget } from "../src/main/serializer";
 import type { SerializableNode } from "../src/main/serializer";
-import { findFake, guardPage } from "./helpers/nodes";
+import { autoLayoutCard, findFake, guardPage } from "./helpers/nodes";
 
 const asNode = (fake: unknown): SerializableNode => fake as SerializableNode;
 const guardNode = (id: string): SerializableNode => asNode(findFake(guardPage(), id));
@@ -218,6 +218,66 @@ describe("serializeNodeWithinBudget", () => {
       childCount: 7,
       truncated: true,
       note: budgetNote(800),
+    });
+  });
+});
+
+describe("the layout sizing of auto layout", () => {
+  const layoutNode = (id: string): SerializableNode => asNode(findFake(autoLayoutCard(), id));
+  const AUTO_LAYOUT = {
+    direction: "VERTICAL",
+    gap: 0,
+    primaryAxisAlign: "MIN",
+    counterAxisAlign: "MIN",
+    primaryAxisSizing: "AUTO",
+    counterAxisSizing: "AUTO",
+    wrap: "NO_WRAP",
+    counterAxisSpacing: 0,
+  };
+  const BOUNDS = { x: 0, y: 0, width: 100, height: 100 };
+
+  test("an auto-layout frame reports how it sizes, and its min and max sizes", () => {
+    expectJson(serializeNode(layoutNode("30:1")), {
+      id: "30:1",
+      name: "Responsive card",
+      type: "FRAME",
+      bounds: BOUNDS,
+      styles: {
+        autoLayout: AUTO_LAYOUT,
+        layoutSizing: { horizontal: "HUG", vertical: "HUG" },
+        minWidth: 200,
+        maxWidth: 480,
+      },
+      children: [
+        {
+          id: "30:2",
+          name: "Fill",
+          type: "RECTANGLE",
+          bounds: BOUNDS,
+          styles: { layoutSizing: { horizontal: "FILL", vertical: "HUG" } },
+        },
+        { id: "30:3", name: "Fixed", type: "RECTANGLE", bounds: BOUNDS, styles: {} },
+        {
+          id: "30:4",
+          name: "Badge",
+          type: "RECTANGLE",
+          bounds: BOUNDS,
+          styles: { layoutPositioning: "ABSOLUTE" },
+        },
+      ],
+    });
+  });
+
+  test("outside auto layout, the sizing fields are left out", () => {
+    expectJson(serializeNode(layoutNode("30:5")), {
+      id: "30:5",
+      name: "Plain frame",
+      type: "FRAME",
+      bounds: BOUNDS,
+      styles: {},
+      children: [
+        { id: "30:6", name: "Plain child", type: "RECTANGLE", bounds: BOUNDS, styles: {} },
+      ],
     });
   });
 });
