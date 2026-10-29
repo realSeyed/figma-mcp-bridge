@@ -103,7 +103,9 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     "Get all local styles in the document. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_styles.shape,
     async ({ fileKey }): Promise<ToolResult> => {
-      return renderResponse(() => node.send("get_styles", undefined, fileKey));
+      return renderResponse(() => node.send("get_styles", undefined, fileKey), {
+        tool: "get_styles",
+      });
     }
   );
 
@@ -112,7 +114,9 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     "Get metadata about the current Figma document including file name, pages, and current page info. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_metadata.shape,
     async ({ fileKey }): Promise<ToolResult> => {
-      return renderResponse(() => node.send("get_metadata", undefined, fileKey));
+      return renderResponse(() => node.send("get_metadata", undefined, fileKey), {
+        tool: "get_metadata",
+      });
     }
   );
 
@@ -454,7 +458,9 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     "List all available animation presets in Figma (Motion API beta). When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_motion_styles.shape,
     async ({ fileKey }): Promise<ToolResult> => {
-      return renderResponse(() => node.send("get_motion_styles", undefined, fileKey));
+      return renderResponse(() => node.send("get_motion_styles", undefined, fileKey), {
+        tool: "get_motion_styles",
+      });
     }
   );
 
@@ -463,7 +469,9 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     "Read a node's current animationStyles, animations, manualKeyframeTracks, and timelines (Motion API beta). When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_node_motion.shape,
     async ({ nodeId, fileKey }): Promise<ToolResult> => {
-      return renderResponse(() => node.send("get_node_motion", [nodeId], fileKey));
+      return renderResponse(() => node.send("get_node_motion", [nodeId], fileKey), {
+        tool: "get_node_motion",
+      });
     }
   );
 

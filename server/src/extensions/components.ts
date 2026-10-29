@@ -315,8 +315,9 @@ export function register(server: McpServer, node: Node): void {
       const parsed = parseToolInput(schemas.list_components, args);
       if (!parsed.success) return parsed.error;
       const { fileKey, ...params } = parsed.data;
-      return renderResponse(() =>
-        node.sendWithParams("list_components", undefined, params, fileKey)
+      return renderResponse(
+        () => node.sendWithParams("list_components", undefined, params, fileKey),
+        { tool: "list_components" }
       );
     }
   );
@@ -329,7 +330,9 @@ export function register(server: McpServer, node: Node): void {
       const parsed = parseToolInput(schemas.get_component, args);
       if (!parsed.success) return parsed.error;
       const { fileKey, nodeId } = parsed.data;
-      return renderResponse(() => node.sendWithParams("get_component", [nodeId], {}, fileKey));
+      return renderResponse(() => node.sendWithParams("get_component", [nodeId], {}, fileKey), {
+        tool: "get_component",
+      });
     }
   );
 
@@ -341,7 +344,9 @@ export function register(server: McpServer, node: Node): void {
       const parsed = parseToolInput(schemas.get_instance, args);
       if (!parsed.success) return parsed.error;
       const { fileKey, nodeId } = parsed.data;
-      return renderResponse(() => node.sendWithParams("get_instance", [nodeId], {}, fileKey));
+      return renderResponse(() => node.sendWithParams("get_instance", [nodeId], {}, fileKey), {
+        tool: "get_instance",
+      });
     }
   );
 

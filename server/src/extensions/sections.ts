@@ -188,7 +188,10 @@ export function register(server: McpServer, node: Node): void {
       const parsed = parseToolInput(schemas.list_sections, args);
       if (!parsed.success) return parsed.error;
       const { fileKey, ...params } = parsed.data;
-      return renderResponse(() => node.sendWithParams("list_sections", undefined, params, fileKey));
+      return renderResponse(
+        () => node.sendWithParams("list_sections", undefined, params, fileKey),
+        { tool: "list_sections" }
+      );
     }
   );
 
@@ -200,7 +203,9 @@ export function register(server: McpServer, node: Node): void {
       const parsed = parseToolInput(schemas.get_section, args);
       if (!parsed.success) return parsed.error;
       const { fileKey, nodeId } = parsed.data;
-      return renderResponse(() => node.sendWithParams("get_section", [nodeId], {}, fileKey));
+      return renderResponse(() => node.sendWithParams("get_section", [nodeId], {}, fileKey), {
+        tool: "get_section",
+      });
     }
   );
   server.tool(
