@@ -13,6 +13,13 @@
  */
 
 export const REQUEST_TIMEOUT_VARIABLE = "FIGMA_BRIDGE_REQUEST_TIMEOUT_MS";
+export const CONNECT_GRACE_VARIABLE = "FIGMA_BRIDGE_CONNECT_GRACE_MS";
+
+/**
+ * How long a request waits for a plugin to connect, after a leader start or a
+ * disconnect: the plugin window connects again 1.5 s after a close.
+ */
+export const DEFAULT_CONNECT_GRACE_MS = 10_000;
 
 /** The time of a request type that has no row in the table. */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
@@ -39,12 +46,23 @@ export function requestTimeoutMs(type: string): number {
 }
 
 /**
- * How long a follower waits for the leader to answer one `/rpc` request.
+ * How long a follower waits for the leader to answer one `/rpc` request: the
+ * leader can first wait the grace for the plugin, then the time of the request.
  * @param type - The request type.
  * @returns Milliseconds.
  */
 export function followerTimeoutMs(type: string): number {
-  return requestTimeoutMs(type) + FOLLOWER_MARGIN_MS;
+  return requestTimeoutMs(type) + connectGraceMs() + FOLLOWER_MARGIN_MS;
+}
+
+/**
+ * The grace of a missing plugin, from `FIGMA_BRIDGE_CONNECT_GRACE_MS` when it
+ * is set. 0 turns the wait off.
+ * @returns Milliseconds.
+ * @throws If the variable is set, but not to an integer of 0 or more.
+ */
+export function connectGraceMs(): number {
+  return readMilliseconds(CONNECT_GRACE_VARIABLE, DEFAULT_CONNECT_GRACE_MS, 0);
 }
 
 /**
@@ -63,6 +81,7 @@ export function defaultRequestTimeoutMs(): number {
  */
 export function checkTimingSettings(): void {
   defaultRequestTimeoutMs();
+  connectGraceMs();
 }
 
 /**

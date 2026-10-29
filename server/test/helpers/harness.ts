@@ -126,7 +126,9 @@ export class Harness {
   /**
    * Starts `node dist/index.js` and waits until it has a role. The process
    * gets the token file and the journal file of this harness unless
-   * `options.env` names others.
+   * `options.env` names others. It waits for no plugin
+   * (`FIGMA_BRIDGE_CONNECT_GRACE_MS` is `0`) unless `options.env` sets a grace,
+   * so a call with no plugin fails at once, as each older test expects.
    * @param options - Port, working directory, and environment changes.
    * @returns The running process.
    */
@@ -136,6 +138,7 @@ export class Harness {
       env: {
         FIGMA_BRIDGE_TOKEN_FILE: await this.tokenFile(),
         FIGMA_BRIDGE_JOURNAL_FILE: await this.journalFile(),
+        FIGMA_BRIDGE_CONNECT_GRACE_MS: "0",
         ...options.env,
       },
     });

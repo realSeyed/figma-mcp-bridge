@@ -33,14 +33,41 @@ async function start(port: number, env: Record<string, string | undefined> = {})
 }
 
 /** Polls until the check returns a value that is not undefined. */
-async function waitFor<T>(what: string, check: () => T | undefined, timeoutMs = 10_000) {
+async function waitFor<T>(
+  what: string,
+  check: () => Promise<T | undefined> | T | undefined,
+  timeoutMs = 10_000
+) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const value = check();
+    const value = await check();
     if (value !== undefined) return value;
     if (Date.now() > deadline) throw new Error(`timed out while waiting for ${what}`);
-    await new Promise((done) => setTimeout(done, 25));
+    await sleep(25);
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((done) => setTimeout(done, ms));
+}
+
+interface Ping {
+  leaderStartedAt: string;
+  files: Array<{ fileKey: string }>;
+}
+
+async function ping(port: number): Promise<Ping> {
+  const response = await fetch(`http://127.0.0.1:${port}/ping`, {
+    signal: AbortSignal.timeout(10_000),
+  });
+  expect(response.status).toBe(200);
+  return (await response.json()) as Ping;
+}
+
+/** The error text of a failed call, or a failure of the test for a call that succeeded. */
+function errorOf(outcome: { ok: true; data: unknown } | { ok: false; error: string }): string {
+  if (outcome.ok) throw new Error(`expected a failure, got ${JSON.stringify(outcome.data)}`);
+  return outcome.error;
 }
 
 describe("the time of a request", () => {
@@ -127,6 +154,86 @@ describe("the time of a request", () => {
       expect((await read).body.error).toBe(
         `Plugin disconnected: stability (${FILE_KEY}) while get_node was running.`
       );
+    },
+    TIMEOUT_MS
+  );
+});
+
+describe("the grace for a plugin that connects again", () => {
+  test(
+    "a write issued while the plugin reconnects waits for it and succeeds",
+    async () => {
+      const port = await h.freePort();
+      const env = { FIGMA_BRIDGE_CONNECT_GRACE_MS: "10000" };
+      const leader = await start(port, env);
+      expect(leader.role).toBe("LEADER");
+      const plugin = await h.plugin({
+        port,
+        fileKey: FILE_KEY,
+        reconnectMs: 1_000,
+        handlers: { set_node_properties: (request) => ({ updated: request.nodeIds?.[0] }) },
+      });
+      const follower = await start(port, env);
+      expect(follower.role).toBe("FOLLOWER");
+
+      plugin.drop();
+      await waitFor("the leader to see the disconnect", async () =>
+        (await ping(port)).files.length === 0 ? true : undefined
+      );
+      const began = Date.now();
+      const outcome = await follower.callTool("set_node_properties", {
+        nodeId: NODE_ID,
+        x: 1,
+        fileKey: FILE_KEY,
+      });
+      const elapsed = Date.now() - began;
+
+      expect(outcome).toEqual({ ok: true, data: { updated: NODE_ID } });
+      expect(plugin.connections).toBe(2);
+      expect(elapsed).toBeGreaterThan(300);
+      expect(elapsed).toBeLessThan(9_000);
+    },
+    TIMEOUT_MS
+  );
+
+  test(
+    "after the grace a call fails with the reason, and a key that never connected fails at once",
+    async () => {
+      const port = await h.freePort();
+      const env = { FIGMA_BRIDGE_CONNECT_GRACE_MS: "1500" };
+      const leader = await start(port, env);
+      expect(leader.role).toBe("LEADER");
+      const plugin = await h.plugin({ port, fileKey: FILE_KEY, fileName: "stability" });
+      const follower = await start(port, env);
+
+      // The grace after the start of the leader is over; only a disconnect opens it again.
+      const startedAt = Date.parse((await ping(port)).leaderStartedAt);
+      await sleep(Math.max(0, startedAt + 1_700 - Date.now()));
+      let began = Date.now();
+      const unknown = await follower.callTool("set_node_properties", {
+        nodeId: NODE_ID,
+        x: 1,
+        fileKey: "never-connected",
+      });
+      expect(Date.now() - began).toBeLessThan(1_000);
+      expect(errorOf(unknown)).toContain('No plugin connected for fileKey "never-connected"');
+
+      await plugin.close();
+      await waitFor("the leader to see the disconnect", async () =>
+        (await ping(port)).files.length === 0 ? true : undefined
+      );
+      began = Date.now();
+      const gone = await follower.callTool("set_node_properties", {
+        nodeId: NODE_ID,
+        x: 1,
+        fileKey: FILE_KEY,
+      });
+      const elapsed = Date.now() - began;
+      expect(errorOf(gone)).toMatch(
+        /^No plugin connected for "stability" \(it disconnected [\d.]+ s ago: the plugin closed the connection, code \d+\)\. Ask the user to run Plugins › Development › Figma MCP Bridge \(Fork\) in that file \(running another plugin closes this one\), then retry\.$/
+      );
+      expect(elapsed).toBeGreaterThan(800);
+      expect(elapsed).toBeLessThan(5_000);
     },
     TIMEOUT_MS
   );
