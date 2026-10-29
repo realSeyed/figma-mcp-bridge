@@ -1,6 +1,7 @@
 import { serializeBoundVariableMap, serializeNode, serializeNodeWithinBudget } from "./serializer";
 import type { SerializableNode } from "./serializer";
 import { addLayersToFrame } from "../html-figma/figma";
+import { RequestQueue } from "./request-queue";
 import { getExtensionHandler } from "./extensions";
 import type { ExtensionHandler, ExtensionRequestType } from "./extensions";
 import {
@@ -82,14 +83,16 @@ type ServerRequestParams = Record<string, unknown> & {
   duration?: number;
 };
 
-type ServerRequest = {
+export type ServerRequest = {
   type: RequestType;
   requestId: string;
   nodeIds?: string[];
   params?: ServerRequestParams;
+  /** How long the server waits for the answer. The request queue stops waiting then too. */
+  timeoutMs?: number;
 };
 
-type PluginResponse = {
+export type PluginResponse = {
   type: RequestType;
   requestId: string;
   data?: unknown;
@@ -332,7 +335,7 @@ const ungroupSection = async (section: SectionNode): Promise<SceneNode[]> => {
   return orphans;
 };
 
-const handleRequest = async (request: ServerRequest): Promise<PluginResponse> => {
+export const handleRequest = async (request: ServerRequest): Promise<PluginResponse> => {
   try {
     // Extension tools are dispatched through their own map, so adding one does
     // not mean touching the switch below. Errors fall through to the same catch.
@@ -1962,7 +1965,37 @@ figma.on("selectionchange", () => {
   sendStatus();
 });
 
-figma.ui.onmessage = async (message) => {
+/** A message of the plugin window. */
+type UiMessage = {
+  type?: unknown;
+  payload?: unknown;
+  collapsed?: unknown;
+  /** The number of the socket of a `server-request` or a `connection-closed`. */
+  connection?: unknown;
+};
+
+/** The server requests, one at a time, in the order they arrived. */
+const requestQueue = new RequestQueue();
+
+const postResponse = (response: PluginResponse): void => {
+  try {
+    figma.ui.postMessage(response);
+  } catch (err) {
+    figma.ui.postMessage({
+      type: response.type,
+      requestId: response.requestId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+};
+
+/**
+ * Handles one message of the plugin window. A `server-request` joins the
+ * request queue, and its answer goes back when it is its turn and it ends. A
+ * `connection-closed` drops the queued requests of that socket.
+ * @param message - The message.
+ */
+export const onPluginMessage = (message: UiMessage): void => {
   if (message.type === "ui-ready") {
     sendStatus();
     return;
@@ -1982,16 +2015,26 @@ figma.ui.onmessage = async (message) => {
     return;
   }
 
+  if (message.type === "connection-closed") {
+    if (typeof message.connection === "number") requestQueue.dropConnection(message.connection);
+    return;
+  }
+
   if (message.type === "server-request") {
-    const response = await handleRequest(message.payload as ServerRequest);
-    try {
-      figma.ui.postMessage(response);
-    } catch (err) {
-      figma.ui.postMessage({
-        type: response.type,
-        requestId: response.requestId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+    const request = message.payload as ServerRequest;
+    requestQueue.push({
+      tool: request.type,
+      connection: typeof message.connection === "number" ? message.connection : null,
+      timeoutMs: request.timeoutMs,
+      run: () => handleRequest(request),
+      settle: (outcome) =>
+        postResponse(
+          outcome.ok
+            ? outcome.value
+            : { type: request.type, requestId: request.requestId, error: outcome.error }
+        ),
+    });
   }
 };
+
+figma.ui.onmessage = onPluginMessage;

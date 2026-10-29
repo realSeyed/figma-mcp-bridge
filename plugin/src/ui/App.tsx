@@ -56,6 +56,18 @@ type PluginStatus = {
 // networkAccess.allowedDomains or Figma will block the connection.
 const WS_BASE_URL = import.meta.env.VITE_FIGMA_BRIDGE_WS || "ws://localhost:1995/ws";
 
+/**
+ * The number of the last socket. Each server request carries the number of
+ * its socket, so the main thread can drop the queued requests of a socket
+ * that closed: no server waits for their answers.
+ */
+let lastConnection = 0;
+
+/** Tells the main thread that a socket closed. */
+const postConnectionClosed = (connection: number) => {
+  parent.postMessage({ pluginMessage: { type: "connection-closed", connection } }, "*");
+};
+
 export default function App() {
   const [connected, setConnected] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -65,6 +77,8 @@ export default function App() {
     selectionCount: 0,
   });
   const socketRef = useRef<WebSocket | null>(null);
+  /** The number of the socket in socketRef. */
+  const connectionRef = useRef(0);
   const reconnectTimer = useRef<number | null>(null);
 
   const statusLabel = useMemo(
@@ -139,11 +153,14 @@ export default function App() {
         previousSocket.onerror = null;
         previousSocket.onmessage = null;
         previousSocket.close();
+        postConnectionClosed(connectionRef.current);
       }
 
+      const connection = ++lastConnection;
       const wsUrl = `${WS_BASE_URL}?fileKey=${encodeURIComponent(status.fileKey)}&fileName=${encodeURIComponent(status.fileName)}&pluginBuild=${encodeURIComponent(__PLUGIN_BUILD__)}`;
       const ws = new WebSocket(wsUrl);
       socketRef.current = ws;
+      connectionRef.current = connection;
 
       ws.onopen = () => {
         setConnected(true);
@@ -151,6 +168,7 @@ export default function App() {
       };
 
       ws.onclose = () => {
+        postConnectionClosed(connection);
         if (disposed || socketRef.current !== ws) return;
         setConnected(false);
         if (reconnectTimer.current === null) {
@@ -169,7 +187,7 @@ export default function App() {
       ws.onmessage = (event) => {
         if (disposed || socketRef.current !== ws) return;
         const payload = JSON.parse(event.data) as ServerRequest;
-        parent.postMessage({ pluginMessage: { type: "server-request", payload } }, "*");
+        parent.postMessage({ pluginMessage: { type: "server-request", connection, payload } }, "*");
       };
     };
 
@@ -189,6 +207,7 @@ export default function App() {
         ws.onmessage = null;
         ws.close();
         socketRef.current = null;
+        postConnectionClosed(connectionRef.current);
       }
     };
   }, [status.fileKey, status.fileName]);
