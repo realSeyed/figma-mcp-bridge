@@ -26,6 +26,12 @@
  * 50 ms apart, before it makes the journal broken. The journal keeps the
  * count, the head and the byte offset of each line in memory, not the entries.
  *
+ * Before the hash, each string longer than `MAX_JOURNAL_STRING` in the params
+ * or in the data of the response becomes its digest: `{ "omitted": true,
+ * "sha256": <hex of its UTF-8>, "bytes": <UTF-8 length> }`. An image or an
+ * HTML import then adds a short line, not megabytes, and the entry still
+ * proves what was sent. The plugin gets the whole params.
+ *
  * `dump_journal_chunk` is the internal command of `dump_journal`: the leader
  * serves it itself with `chunk`, from the file, and never sends it to a plugin.
  *
@@ -67,6 +73,30 @@ export const GENESIS_HASH = "0".repeat(64);
 
 /** The tool of the entry that records a torn last line moved aside. It is no request. */
 export const RECOVERED_TOOL = "journal_recovered";
+
+/** The longest string, in UTF-16 code units, that an entry holds as it is. */
+export const MAX_JOURNAL_STRING = 8192;
+
+/**
+ * A copy of a value in which each string longer than `MAX_JOURNAL_STRING`, at
+ * any depth, is its digest: `{ omitted: true, sha256, bytes }` of its UTF-8.
+ * @param value - Plain JSON data: the params or the data of a response.
+ * @returns The copy. The value itself is not changed.
+ */
+export function digestLongStrings(value: unknown): unknown {
+  if (typeof value === "string") {
+    if (value.length <= MAX_JOURNAL_STRING) return value;
+    const bytes = Buffer.from(value, "utf8");
+    return { omitted: true, sha256: sha256Hex(bytes), bytes: bytes.length };
+  }
+  if (Array.isArray(value)) return value.map(digestLongStrings);
+  if (isRecord(value)) {
+    const copy: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) copy[key] = digestLongStrings(item);
+    return copy;
+  }
+  return value;
+}
 
 /**
  * The internal command that fetches the entries for `dump_journal`. The leader
@@ -415,8 +445,14 @@ export class WriteJournal {
       auditor: record.auditor,
       tool: record.tool,
       nodeIds: record.nodeIds,
-      params: record.params,
-      response: record.response,
+      params:
+        record.params === null
+          ? null
+          : (digestLongStrings(record.params) as Record<string, unknown>),
+      response:
+        "data" in record.response
+          ? { data: digestLongStrings(record.response.data) }
+          : record.response,
       prevHash: this.headHash,
     };
     let entry: JournalEntry = { ...unhashed, hash: GENESIS_HASH };

@@ -12,8 +12,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson } from "../src/evidence.js";
 import {
+  digestLongStrings,
   entryHash,
   GENESIS_HASH,
+  MAX_JOURNAL_STRING,
   READ_ONLY_REQUESTS,
   WriteJournal,
   type JournalEntry,
@@ -721,6 +723,56 @@ describe("a torn last line", () => {
     },
     TIMEOUT_MS
   );
+});
+
+describe("a long string", () => {
+  /** The digest of a long string, calculated here without the module under test. */
+  const digest = (text: string) => ({
+    omitted: true,
+    sha256: createHash("sha256").update(text, "utf8").digest("hex"),
+    bytes: Buffer.byteLength(text, "utf8"),
+  });
+
+  test(
+    "goes into the entry as its digest, in the params and in the response, and the plugin gets it whole",
+    async () => {
+      // Two bytes in UTF-8 each, so the byte count is not the length.
+      const long = "é".repeat(MAX_JOURNAL_STRING + 1);
+      const answer = "a".repeat(20_000);
+      const { port, plugin } = await bridge({
+        extra: { set_text_content: () => ({ echo: answer, short: "kept" }) },
+      });
+
+      const reply = await postRpc(port, await h.token(), {
+        tool: "set_text_content",
+        nodeIds: [NODE_ID],
+        params: { text: long },
+        fileKey: FILE_KEY,
+      });
+      expect(reply.body).toEqual({ data: { echo: answer, short: "kept" } });
+      const request = plugin.requests.find((r) => r.type === "set_text_content")!;
+      expect(request.params?.text).toBe(long);
+
+      const [entry] = await journalEntries(await h.journalFile());
+      expect(entry.params).toEqual({ ...request.params, text: digest(long) });
+      expect(entry.response).toEqual({ data: { echo: digest(answer), short: "kept" } });
+      expect(digest(long).bytes).toBe(2 * (MAX_JOURNAL_STRING + 1));
+      expect(entry.hash).toBe(independentHash(entry));
+    },
+    TIMEOUT_MS
+  );
+
+  test("the digest walks arrays and objects, and keeps a string of the limit", () => {
+    const limit = "x".repeat(MAX_JOURNAL_STRING);
+    const over = `${limit}y`;
+    const value = { list: [limit, over, 1, null, { inner: over }], flag: true };
+
+    expect(digestLongStrings(value)).toEqual({
+      list: [limit, digest(over), 1, null, { inner: digest(over) }],
+      flag: true,
+    });
+    expect(value.list[1]).toBe(over);
+  });
 });
 
 describe("the append retry", () => {
