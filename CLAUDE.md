@@ -27,6 +27,34 @@ The server is an MCP server on stdio. The first server process is the leader. Ea
 one is a follower and sends each tool call to the leader with HTTP `/rpc`. The leader
 sends the call to the plugin.
 
+A leader process lives as long as the standard input of its MCP client.
+`node server/dist/index.js --standalone` (also `FIGMA_BRIDGE_STANDALONE=1`, or
+`bun run leader`) starts a leader with no MCP transport and no standard-input handler; only
+SIGINT, SIGTERM or SIGHUP stop it. A standalone process never follows: if a healthy leader
+holds the port, it prints the version and the `leaderStartedAt` of that leader and exits
+with 1.
+
+A follower checks its leader every 1 to 2 s (`Election`). A call that loses its leader does
+not wait for that check. `Follower` classifies a failed fetch as `refused` (`ECONNREFUSED`, a
+connect time-out: the leader did not get the request) or `broken` (each other network
+failure: the leader can have sent the request to the plugin). An HTTP status is neither.
+`Node` then runs `Election.checkNow` and waits up to 8 s, every 250 ms, until its process is
+the leader or `/ping` answers. It sends a refused request or a read (`READ_ONLY_REQUESTS`)
+again, one time. It never sends a broken write again: the error says that the change may or
+may not be in the file, and to check it with `get_node`.
+
+The time of a request comes from `server/src/timeouts.ts`, a table keyed by request type:
+60 s for a type without a row. `FIGMA_BRIDGE_REQUEST_TIMEOUT_MS` changes that default only.
+The leader sends the time as `timeoutMs` in each request. A follower waits the time plus the
+grace plus 15 s, thus the leader answers first. The leader pings each plugin every 10 s and
+closes a plugin that misses one ping. When no connection matches a request (a key that is
+absent, or no key and no file), `Bridge` waits for a matching plugin up to
+`FIGMA_BRIDGE_CONNECT_GRACE_MS` (10 s), but only inside the grace after the start of the
+leader or after the last disconnect of a matching file; outside it the request fails at
+once. Each such error holds `No plugin connected`. A time-out error holds `timed out` and a
+disconnect error `Plugin disconnected`; for a write, both say that the change can already be
+in the file.
+
 The leader listens on `127.0.0.1` only. Each server process calls it by the literal
 `http://127.0.0.1:<port>`, not `localhost`, which can resolve to `::1`. A follower sends
 each `/rpc` request with `Content-Type: application/json` and `Authorization: Bearer
@@ -36,12 +64,25 @@ each install, which the first process makes. Before it reads the body, the leade
 405 to each method but `POST`, and no answer has an `Access-Control-Allow-*` header.
 `/ping` stays open. Never log, return, or write the token.
 
-`handleRequest` in `plugin/src/main/code.ts` receives each call. It looks the request type
-up in the merged extension map first. If an entry exists, `handleRequest` runs the entry;
-`edit: true` makes it call `requireEditorMode` first, thus an edit tool stops with an error
-in Dev Mode, which is read-only. If no entry exists, control goes to the switch statement
-of the core tools. `runExtension` wraps each extension call and puts the tool name in front
-of an error that does not carry it, thus a handler throws cause and correction only.
+`handleRequest` in `plugin/src/main/code.ts` receives each call and gives it to
+`runRequest`. That looks the request type up in the merged extension map first. If an entry
+exists, it runs the entry; `edit: true` makes it call `requireEditorMode` first, thus an edit
+tool stops with an error in Dev Mode, which is read-only. If no entry exists, control goes to
+the switch statement of the core tools. `runExtension` wraps each extension call and puts
+the tool name in front of an error that does not carry it, thus a handler throws cause and
+correction only; `handleRequest` does the same for a core tool. After each edit request
+(`EDIT_REQUEST_TYPES` or `edit: true`), also a failed one, `handleRequest` calls
+`figma.commitUndo()`, thus each write is one undo step.
+
+The plugin runs one server request at a time, in arrival order
+(`plugin/src/main/request-queue.ts`). A request has a deadline: its arrival plus its
+`timeoutMs`, or 120 s without one. A request still queued at its deadline does not start. A
+request that runs past it gets an error answer, the next request starts, and its late result
+is dropped. The window numbers each socket and sends the number with each request; at a
+close it posts `connection-closed`, and the queue drops the requests of that socket that did
+not start. `code.ts` exports `handleRequest` and `onPluginMessage` for the tests;
+`plugin/test/helpers/plugin-globals.ts` installs the globals and a fake `figma` before it
+imports `code.ts`.
 
 `FIGMA_BRIDGE_ROLE=auditor` (`server/src/role.ts`) makes a process register the 16 tools of
 `AUDITOR_TOOLS` and no other: `registerTools` gets a wrapper of the server that drops each
@@ -64,6 +105,15 @@ makes one identifier (`plugin/build-identity.ts`), gives it to both bundles with
 `__PLUGIN_BUILD__`, and the window adds it to the WebSocket URL as `pluginBuild`. `Bridge`
 adds 1 to the epoch of a file key at each connection, a replacing one included; a disconnect
 and a read leave it. The epoch lives in memory. `list_files` returns an object, not an array.
+
+Each process appends one JSON line for each event to the diagnostics log
+(`server/src/diagnostics.ts`): `FIGMA_BRIDGE_LOG_FILE`, or `bridge.log` in the state folder
+of the install. It calls `appendFileSync` for each line, thus no handle stays open, and
+renames the file to `bridge.log.1` above 5 MB. Each line has `at`, `pid`, `role` and `event`.
+A line never holds params, data, node content, or the token. Each process keeps its last 50
+events in memory. `/ping` and `list_files` report `health`: the last 20 events of the
+leader, `pending` (the requests at a plugin), and `warnings`; a follower adds a warning when
+its build is not the build of the leader. The `files` entries do not change.
 
 Each process writes evidence files only under its own output root
 (`FIGMA_BRIDGE_OUTPUT_ROOT`, else its working directory). The leader writes no file for
@@ -125,11 +175,20 @@ the entry without `hash`; the first `prevHash` is the genesis hash, 64 times `0`
 is JSON Lines, `FIGMA_BRIDGE_JOURNAL_FILE` or `write-journal.jsonl` in the state folder of
 the install. Only the leader opens it: it loads and checks the file in the `listen`
 callback, appends with `fsync`, and keeps the count, the head and the byte offset of each
-line in memory. A failed check or a failed append makes the journal broken: the leader logs
-it one time, reports it in the `journal` field of `/ping` and `list_files`, refuses each
-write before the plugin sees it, and serves each read. It never truncates, repairs, or
-rewrites the file. The journal holds the params and the responses of each write: it is
-private data of the owner.
+line in memory. One defect is not a failure: a last line without `\n` after valid lines
+(a torn append). The leader copies its bytes to `<journal>.torn-<UTC time>` (flag `wx`, mode
+0o600), cuts the file back to the end of the last valid line, and appends a
+`journal_recovered` entry (`fileKey` `""`, `epoch` 0, and the params
+`{ tornBytes, tornSha256, savedTo }`), and logs it one time. An append tries a failed write
+or `fsync` again 3 times, 50 ms apart, on `EAGAIN`, `EBUSY`, `EINTR`, and on Windows `EPERM`.
+Each other failed check, and an append that still fails, makes the journal broken: the
+leader logs it one time, reports it in the `journal` field of `/ping` and `list_files`,
+refuses each write before the plugin sees it, and serves each read. It never truncates,
+repairs, or rewrites the file, except to move a torn last line aside. Before the hash, each
+string longer than 8192 UTF-16 units in `params` and in `response.data` becomes
+`{ "omitted": true, "sha256", "bytes" }` of its UTF-8; the plugin and the caller get the
+whole value. The journal holds the params and the responses of each write: it is private
+data of the owner.
 
 `dump_journal_chunk` is an internal command that the leader serves itself, from the journal
 file: `handleRPC` answers it before the validation and the bridge, as it answers `list_files`,
@@ -149,7 +208,8 @@ nothing. A dump adds no entry.
 | File                                       | Purpose                                                                                                                |
 | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
 | `plugin/manifest.json`                     | Plugin id, name, and allowed domains. Keep `documentAccess: "dynamic-page"`.                                           |
-| `plugin/src/main/code.ts`                  | `RequestType`, `EDIT_REQUEST_TYPES`, `requireEditorMode`, `handleRequest`, core tools.                                 |
+| `plugin/src/main/code.ts`                  | `RequestType`, `EDIT_REQUEST_TYPES`, `requireEditorMode`, `handleRequest`, `onPluginMessage`, core tools.              |
+| `plugin/src/main/request-queue.ts`         | The request queue of the plugin: one request at a time, the deadlines, the drop of a closed socket.                    |
 | `plugin/src/main/serializer.ts`            | The node output of the read tools, and the base of the dump form.                                                      |
 | `plugin/src/main/dump.ts`                  | The dump form of a node: the read form, the hidden content, and the added fields.                                      |
 | `plugin/src/main/shared.ts`                | Shared helpers: node lookup, colors, fonts, position, variable values.                                                 |
@@ -170,7 +230,9 @@ nothing. A dump adds no entry.
 | `server/src/evidence.ts`                   | Canonical JSON, SHA-256, `EvidenceSet` (the `.partial` write), the manifest envelope.                                  |
 | `server/src/rpc-token.ts`                  | The install token: the path of its file, its creation, its checks. Node built-ins only.                                |
 | `server/src/role.ts`                       | The auditor role: `AUDITOR_TOOLS`, the internal commands, the role parse, the wrapper.                                 |
-| `server/src/journal.ts`                    | The write journal: `READ_ONLY_REQUESTS`, the path, the entry hash, the load check, the append.                         |
+| `server/src/journal.ts`                    | The write journal: `READ_ONLY_REQUESTS`, the path, the entry hash, the load check, the torn tail, the append.          |
+| `server/src/timeouts.ts`                   | The time of each request type, the time of a follower, and the connect grace.                                          |
+| `server/src/diagnostics.ts`                | The diagnostics log: the event lines, the rotation, and the last events for `health`.                                  |
 | `server/src/captures.ts`                   | `save_screenshots`: the plan, the captures, the manifest. The image blocks of `get_screenshot`.                        |
 | `server/src/image-size.ts`                 | The pixel size of a PNG or a JPG, read from its header. Imports nothing.                                               |
 | `server/src/identity.ts`                   | File selection and the identity of one file, for the manifests. Imports types only.                                    |
@@ -194,7 +256,8 @@ nothing. A dump adds no entry.
 | `server/scripts/conformance.ts`            | The dump-conformance test: ID placeholders, the golden file text, the visible projection.                              |
 | `server/scripts/golden/`                   | The golden dump of the conformance fixture. Synthetic data from the test file only.                                    |
 | `server/test/`                             | `bun test` tests. Real server processes against a simulated plugin. Helpers in `helpers/`.                             |
-| `plugin/test/`                             | `bun test` tests of the serializer, the dump form, and the chunk walk. Synthetic nodes.                                |
+| `plugin/test/`                             | `bun test` tests of the serializer, the dump form, the chunk walk, the queue, `handleRequest`. Synthetic nodes.        |
+| `.github/workflows/ci.yml`                 | CI for each pull request and each push to `main`: check, tests, toolset tests, on Ubuntu and Windows.                  |
 | `tools/audit/`                             | The audit toolset in Python 3.11, standard library only. `README.md` holds its rules.                                  |
 | `tools/audit/auditlib/`                    | `dumps.py` (both formats, the visible projection), `manifest.py`, `outputs.py`, `config.py`, `paths.py`, `toolset.py`. |
 | `tools/audit/*.py`                         | `census.py`, `contrast.py`, `sr_precheck.py`, `completeness.py`, `journal_check.py`, and `selfcheck.py`.               |
@@ -272,16 +335,19 @@ mimeType }`), never base64 in text. A capture that is large or that serves as ev
     A new read tool joins `READ_ONLY_REQUESTS` only on purpose: change the list and its test
     (`server/test/write-journal.test.ts`, which writes the names out) together. A read that is
     not on the list is recorded as a write, which is the safe failure.
+20. A new request type that needs more than 60 s adds a row to `REQUEST_TIMEOUTS_MS` in
+    `server/src/timeouts.ts`. The plugin queue and the follower take their times from it.
 
 ## 7. Commands
 
-| Command         | Purpose                                                                                            |
-| --------------- | -------------------------------------------------------------------------------------------------- |
-| `bun install`   | Install. Run it in the root, in `server/`, and in `plugin/`.                                       |
-| `bun run check` | The server build, the plugin type check, the plugin build, the format check.                       |
-| `bun run test`  | The server build, then `bun test` in `server/` and in `plugin/`. Needs no Figma.                   |
-| `bun run e2e`   | In `server/`. The end-to-end script. Needs `FIGMA_FILE_KEY`.                                       |
-| `bun run perf`  | In `server/`. The measurement script. Needs `FIGMA_FILE_KEY`. Reads `FIGMA_READ_FILE_KEY` as well. |
+| Command          | Purpose                                                                                            |
+| ---------------- | -------------------------------------------------------------------------------------------------- |
+| `bun install`    | Install. Run it in the root, in `server/`, and in `plugin/`.                                       |
+| `bun run check`  | The server build, the plugin type check, the plugin build, the format check.                       |
+| `bun run test`   | The server build, then `bun test` in `server/` and in `plugin/`. Needs no Figma.                   |
+| `bun run leader` | The standalone leader. Build first. Stop it with Ctrl+C.                                           |
+| `bun run e2e`    | In `server/`. The end-to-end script. Needs `FIGMA_FILE_KEY`.                                       |
+| `bun run perf`   | In `server/`. The measurement script. Needs `FIGMA_FILE_KEY`. Reads `FIGMA_READ_FILE_KEY` as well. |
 
 Run `bun run check` before each commit. Commit only if the check passes.
 
@@ -327,6 +393,13 @@ the README.
 `FIGMA_BRIDGE_JOURNAL_CHUNK_ENTRIES` is a setting for tests only, in the same way: the most
 entries that one `dump_journal_chunk` request asks for, an integer of 1 or more. The default
 is 500. The harness removes it too. Do not document it in the README.
+
+`FIGMA_BRIDGE_REQUEST_TIMEOUT_MS`, `FIGMA_BRIDGE_CONNECT_GRACE_MS`, `FIGMA_BRIDGE_STANDALONE`
+and `FIGMA_BRIDGE_LOG_FILE` are settings of the owner, and the README documents them. The
+harness removes each of them from a test process unless the test gives it, sets the grace to
+`0`, and sets the log file to a temporary file of the harness. `serverEnv` refuses a process
+without a token file, a journal file, or a log file. A test that runs a module that logs in
+the test process itself sets `FIGMA_BRIDGE_LOG_FILE` first.
 
 `bun run e2e` prints the result line of the journal group W just before the last line:
 `JOURNAL PASS start=<count>:<head> end=<count>:<head> writes=<n>`, or `JOURNAL FAIL ...
