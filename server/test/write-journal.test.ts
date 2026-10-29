@@ -61,6 +61,8 @@ const EXPECTED_READ_ONLY = [
   "get_design_context",
   "get_motion_styles",
   "get_node_motion",
+  "find_nodes",
+  "get_design_system",
   "dump_journal",
   "dump_journal_chunk",
 ];

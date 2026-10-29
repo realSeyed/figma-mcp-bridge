@@ -7,6 +7,7 @@ import * as sections from "./sections.js";
 import * as paints from "./paints.js";
 import * as dumps from "./dumps.js";
 import * as journal from "./journal.js";
+import * as discovery from "./discovery.js";
 
 export type {
   ExtensionRegister,
@@ -31,6 +32,7 @@ export const extensionSchemas = {
   ...paints.schemas,
   ...dumps.schemas,
   ...journal.schemas,
+  ...discovery.schemas,
 };
 
 /** Every extension RPC mapper, merged from the area files. */
@@ -42,6 +44,7 @@ export const extensionRpcToArgs = {
   ...paints.rpcToArgs,
   ...dumps.rpcToArgs,
   ...journal.rpcToArgs,
+  ...discovery.rpcToArgs,
 };
 
 /**
@@ -57,4 +60,5 @@ export function registerExtensionTools(server: McpServer, node: Node): void {
   paints.register(server, node);
   dumps.register(server, node);
   journal.register(server, node);
+  discovery.register(server, node);
 }
