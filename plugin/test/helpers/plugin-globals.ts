@@ -72,8 +72,8 @@ export const fakeFigma: FakeFigma = {
   },
 };
 
-/** The members of the fake itself. A reset removes each other member. */
-const OWN_MEMBERS = new Set(Object.keys(fakeFigma));
+/** The members of the fake itself, as they start. A reset puts them back and removes each other member. */
+const OWN_MEMBERS: Record<string, unknown> = { ...fakeFigma };
 
 globals.__html__ = "<html><body>test</body></html>";
 globals.__PLUGIN_BUILD__ = "test-build";
@@ -86,14 +86,16 @@ await shown;
 
 /**
  * Installs the fake again, and clears what an earlier test left in it:
- * another test file can replace `globalThis.figma` with its own fake.
+ * another test file can replace `globalThis.figma` with its own fake. The
+ * members of the fake go back to their start (a test that changes a member
+ * inside `ui` or `clientStorage` puts it back itself).
  * @returns The fake.
  */
 export const resetFakeFigma = (): FakeFigma => {
   for (const member of Object.keys(fakeFigma)) {
-    if (!OWN_MEMBERS.has(member)) delete fakeFigma[member];
+    if (!(member in OWN_MEMBERS)) delete fakeFigma[member];
   }
-  fakeFigma.editorType = "figma";
+  Object.assign(fakeFigma, OWN_MEMBERS);
   fakeFigma.posted.length = 0;
   fakeFigma.undoCommits = 0;
   globals.figma = fakeFigma;

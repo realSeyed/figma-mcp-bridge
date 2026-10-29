@@ -335,7 +335,7 @@ const ungroupSection = async (section: SectionNode): Promise<SceneNode[]> => {
   return orphans;
 };
 
-export const handleRequest = async (request: ServerRequest): Promise<PluginResponse> => {
+const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
   try {
     // Extension tools are dispatched through their own map, so adding one does
     // not mean touching the switch below. Errors fall through to the same catch.
@@ -1923,6 +1923,36 @@ export const handleRequest = async (request: ServerRequest): Promise<PluginRespo
       error: error instanceof Error ? error.message : String(error),
     };
   }
+};
+
+/** Whether a request writes to the file: an extension with `edit: true`, or a core edit. */
+const isEditRequest = (type: RequestType): boolean => {
+  const extension = getExtensionHandler(type);
+  return extension ? extension.edit : EDIT_REQUEST_TYPES.has(type);
+};
+
+/**
+ * Commits the undo history. Figma does not commit the changes of a plugin by
+ * itself, so without it one undo reverts a long run of agent edits.
+ */
+const commitUndo = (): void => {
+  try {
+    figma.commitUndo();
+  } catch {
+    // The answer goes out either way: the edit is done or failed already.
+  }
+};
+
+/**
+ * Runs one server request. After an edit request, a failed one too, it
+ * commits the undo history: each write is one undo step, also a partial one.
+ * @param request - The request.
+ * @returns The answer.
+ */
+export const handleRequest = async (request: ServerRequest): Promise<PluginResponse> => {
+  const response = await runRequest(request);
+  if (isEditRequest(request.type)) commitUndo();
+  return response;
 };
 
 const UI_WIDTH = 320;
