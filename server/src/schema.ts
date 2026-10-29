@@ -639,6 +639,19 @@ export const toolInputSchemas = {
   }),
 
   get_variable_defs: z.object({
+    collectionId: z
+      .string()
+      .regex(
+        /^VariableCollectionId:.+$/,
+        "Collection ID must start with 'VariableCollectionId:' — use an ID from get_design_system or get_variable_defs"
+      )
+      .optional()
+      .describe("Only this collection. Without it, every local collection."),
+    query: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("Only the variables whose name contains this text, ignoring case"),
     fileKey: fileKeyField,
   }),
 

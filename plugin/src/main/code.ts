@@ -566,32 +566,53 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
           figma.variables.getLocalVariablesAsync(),
         ]);
         const varMap = new Map(allVariables.map((v) => [v.id, v]));
-        const variableData = collections.map((collection) => {
+        // Both filters cut the answer down for a large design system: a
+        // collection, and a part of the variable name, without regard to case.
+        const collectionId = request.params?.collectionId;
+        const query =
+          typeof request.params?.query === "string"
+            ? request.params.query.trim().toLowerCase()
+            : "";
+        const chosen =
+          typeof collectionId === "string"
+            ? collections.filter((collection) => collection.id === collectionId)
+            : collections;
+        if (typeof collectionId === "string" && chosen.length === 0) {
+          throw new Error(
+            `get_variable_defs found no local collection with the ID ${collectionId} for collectionId. Call get_variable_defs without collectionId, or get_design_system, to list the collections.`
+          );
+        }
+        const variableData = chosen.flatMap((collection) => {
           const variables = collection.variableIds
             .map((id) => varMap.get(id))
-            .filter((v): v is Variable => v !== undefined && v !== null);
-          return {
-            id: collection.id,
-            name: collection.name,
-            defaultModeId: collection.defaultModeId,
-            modes: collection.modes.map((mode) => ({
-              modeId: mode.modeId,
-              name: mode.name,
-            })),
-            variables: variables.map((variable) => ({
-              id: variable.id,
-              name: variable.name,
-              resolvedType: variable.resolvedType,
-              description: variable.description,
-              scopes: variable.scopes,
-              valuesByMode: Object.fromEntries(
-                Object.entries(variable.valuesByMode).map(([modeId, value]) => [
-                  modeId,
-                  serializeVariableValue(value),
-                ])
-              ),
-            })),
-          };
+            .filter((v): v is Variable => v !== undefined && v !== null)
+            .filter((v) => query === "" || v.name.toLowerCase().includes(query));
+          // A query leaves out a collection that holds no match.
+          if (query !== "" && variables.length === 0) return [];
+          return [
+            {
+              id: collection.id,
+              name: collection.name,
+              defaultModeId: collection.defaultModeId,
+              modes: collection.modes.map((mode) => ({
+                modeId: mode.modeId,
+                name: mode.name,
+              })),
+              variables: variables.map((variable) => ({
+                id: variable.id,
+                name: variable.name,
+                resolvedType: variable.resolvedType,
+                description: variable.description,
+                scopes: variable.scopes,
+                valuesByMode: Object.fromEntries(
+                  Object.entries(variable.valuesByMode).map(([modeId, value]) => [
+                    modeId,
+                    serializeVariableValue(value),
+                  ])
+                ),
+              })),
+            },
+          ];
         });
         return {
           type: request.type,
