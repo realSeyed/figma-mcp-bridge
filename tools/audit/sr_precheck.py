@@ -40,7 +40,8 @@ FIELDNAMES = [
 
 def format_val(v):
     v = round(v, 2)
-    return int(v) if v.is_integer() else v
+    # An int has is_integer() only from Python 3.12, and the toolset runs on 3.11.
+    return int(v) if isinstance(v, int) or v.is_integer() else v
 
 
 def check_overflow(results, node, parent, top_level_id, require_clip=True):
