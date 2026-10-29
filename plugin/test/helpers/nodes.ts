@@ -434,6 +434,63 @@ export const guardPage = (): FakeNode => {
 };
 
 /**
+ * An auto-layout card for the layout sizing cases, apart from the guard page
+ * so that page and its expected values stay as they are:
+ *
+ * - `30:1` a vertical auto-layout frame that hugs its content, with a min and a max width;
+ * - `30:2` a child that fills the width and hugs the height;
+ * - `30:3` a child that is FIXED on both axes, which reports no layoutSizing;
+ * - `30:4` a child out of the flow (ABSOLUTE).
+ *
+ * Each child carries the sizing fields Figma gives a child of an auto-layout
+ * frame. `30:5`, a frame without auto layout, holds `30:6`, which carries them
+ * too and reports none: outside auto layout they say nothing.
+ */
+export const autoLayoutCard = (): FakeNode =>
+  linkParents(
+    page("30:0", "Layout page", {
+      children: [
+        frame("30:1", "Responsive card", {
+          layoutMode: "VERTICAL",
+          layoutSizingHorizontal: "HUG",
+          layoutSizingVertical: "HUG",
+          layoutPositioning: "AUTO",
+          minWidth: 200,
+          maxWidth: 480,
+          minHeight: null,
+          maxHeight: null,
+          children: [
+            rectangle("30:2", "Fill", {
+              layoutSizingHorizontal: "FILL",
+              layoutSizingVertical: "HUG",
+              layoutPositioning: "AUTO",
+            }),
+            rectangle("30:3", "Fixed", {
+              layoutSizingHorizontal: "FIXED",
+              layoutSizingVertical: "FIXED",
+              layoutPositioning: "AUTO",
+            }),
+            rectangle("30:4", "Badge", {
+              layoutSizingHorizontal: "FIXED",
+              layoutSizingVertical: "FIXED",
+              layoutPositioning: "ABSOLUTE",
+            }),
+          ],
+        }),
+        frame("30:5", "Plain frame", {
+          children: [
+            rectangle("30:6", "Plain child", {
+              layoutSizingHorizontal: "FIXED",
+              layoutSizingVertical: "FIXED",
+              layoutPositioning: "ABSOLUTE",
+            }),
+          ],
+        }),
+      ],
+    })
+  );
+
+/**
  * Finds a node of a fake tree by its ID.
  * @param root - The top node.
  * @param id - The node ID.
