@@ -161,7 +161,7 @@ The leader listens on `127.0.0.1` only, and `/rpc` runs a tool only for a reques
 | Endpoint | Used by                    | Rules                                                                                                                                                                                                                                                                                                                  |
 | -------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/ws`    | the plugin                 | WebSocket upgrade. Reachable from this machine only, through the bind on `127.0.0.1`. The plugin names its `fileKey`.                                                                                                                                                                                                  |
-| `/ping`  | discovery, leader election | `GET`. Open to each local caller; it needs no token. Answers `{ status, version, bridgeCommit, leaderStartedAt, files, journal }`; see [Instrument identity](#instrument-identity).                                                                                                                                    |
+| `/ping`  | discovery, leader election | `GET`. Open to each local caller; it needs no token. Answers `{ status, version, bridgeCommit, leaderStartedAt, files, journal, health }`; see [Instrument identity](#instrument-identity) and [Troubleshooting a session](#troubleshooting-a-session).                                                                |
 | `/rpc`   | follower server processes  | `POST` only. Needs `Content-Type: application/json` (a `charset` parameter is allowed), else 415. Needs `Authorization: Bearer <token>`, else 401. A wrong token gets 403. Each other method gets 405. A request with `X-Figma-Bridge-Role: auditor` may call the tools of [the auditor role](#the-auditor-role) only. |
 
 The leader checks the headers before it reads the body, so a refused request runs no tool. No answer carries an `Access-Control-Allow-*` header: a browser page must send a preflight for a cross-origin JSON POST, and the leader refuses the preflight.
@@ -213,7 +213,8 @@ An audit counts only if the instrument did not change while it ran. `/ping` and 
   "leaderCommit": "…",
   "leaderStartedAt": "2026-01-01T00:00:00.000Z",
   "files": [{ "fileKey": "…", "fileName": "…", "pluginBuild": "…", "epoch": 3 }],
-  "journal": { "status": "ok", "entryCount": 12, "headHash": "…" }
+  "journal": { "status": "ok", "entryCount": 12, "headHash": "…" },
+  "health": { "events": [], "pending": 0, "warnings": [] }
 }
 ```
 
@@ -225,6 +226,7 @@ An audit counts only if the instrument did not change while it ran. `/ping` and 
 | `pluginBuild`     | The build of the plugin that holds the connection: `<commit>[-dirty]+<16 hexadecimal characters>`. The characters are a SHA-256 over `plugin/src/`, the manifest, the lock file, and the Vite configurations. `unknown` for an older plugin. |
 | `epoch`           | A counter for each `fileKey`. It grows by 1 at each plugin connection for that key, also a connection that replaces a live one. A disconnect keeps it. A read never changes it.                                                              |
 | `journal`         | The state of the [write journal](#the-write-journal) of the leader. A follower passes it on. `null` when the leader runs an older build that has no journal.                                                                                 |
+| `health`          | The last events of the leader, the requests at a plugin, and the warnings; see [Troubleshooting a session](#troubleshooting-a-session). A follower passes it on and adds a warning when its build is not the build of the leader.            |
 
 Both build values are written at build time: the server build writes `server/dist/build-info.json`, and the plugin build puts the identifier into the window and the main code. The window shows the plugin build in small text, so the owner can compare it with what `list_files` reports. Rebuild with `bun run check` before a live run: a process of an older build reports an older commit.
 
@@ -255,25 +257,29 @@ Each other request type is recorded, `set_selection` and an unknown type include
 | `auditor`   | `true` for a request with `X-Figma-Bridge-Role: auditor`, or for an own call of a leader process with the auditor role. Else `false`.               |
 | `tool`      | The request type.                                                                                                                                   |
 | `nodeIds`   | The node IDs that the leader sent, or `null`.                                                                                                       |
-| `params`    | The params that the leader sent, after the validation, or `null`.                                                                                   |
+| `params`    | The params that the leader sent, after the validation, or `null`. A [long string](#the-write-journal) in them is its digest.                        |
 | `response`  | `{ "data": … }` with the answer of the plugin (`null` for an answer with no data), or `{ "error": "…" }` for an error, a time-out, or a disconnect. |
 | `prevHash`  | The `hash` of the entry before. The first entry has the **genesis hash**: 64 times `0`.                                                             |
 | `hash`      | The SHA-256, in lowercase hexadecimal, of the canonical JSON of the entry without `hash`, as UTF-8.                                                 |
 
 The canonical JSON sorts the keys of each object and has no whitespace, as for the evidence files. The **head** is the `hash` of the last entry, or the genesis hash for an empty journal. A changed, removed, or added entry breaks the chain from that line on.
 
+**Long strings.** Before the hash, each string longer than 8192 UTF-16 code units in `params` and in the `data` of `response`, at any depth, is recorded as `{ "omitted": true, "sha256": "<SHA-256 of its UTF-8>", "bytes": <length of its UTF-8> }`. An image of `create_image` or the layers of `import_html_layers` thus add a short line, not megabytes, and the entry still proves what was sent: the same text gives the same digest. The plugin and the caller get the whole value. An expected-writes file for `journal_check.py` gives such a param as its digest.
+
 **The file.** JSON Lines in UTF-8 with no BOM: one line for each entry, the canonical JSON of the whole entry, then `\n`. It is `write-journal.jsonl` in the folder of the default token file (`%APPDATA%\figma-mcp-bridge\` on Windows, `$XDG_CONFIG_HOME/figma-mcp-bridge/` or `~/.config/figma-mcp-bridge/` elsewhere), or the file that `FIGMA_BRIDGE_JOURNAL_FILE` names. On macOS and Linux the folder gets mode `700` and the file mode `600`. Only the leader opens the file, and it calls `fsync` after each append. The journal holds the params and the responses of each write, so it is **private data of the owner**: never commit it, and never paste it into a conversation.
 
 **The state.** `/ping` and `list_files` report `journal`: `{ "status": "ok" | "broken", "entryCount": <n>, "headHash": "<hash>" }`, plus `reason` when the status is `broken`. A restart of the leader reads the file again, so the count and the head carry over, and the next entry follows the old head.
 
-**A broken chain.** At start the leader checks each line: it ends with `\n`, it is the canonical JSON of its entry, each field is present with its type, `seq` is the line number, `prevHash` is the `hash` of the line before, and `hash` is correct. A line that fails, or a file that cannot be read, makes the journal broken. The leader then:
+**A torn last line.** An append that stopped halfway, for example at a crash, leaves a last line with no `\n`. When that is the only defect, and each line before it is valid, the leader repairs it at start: it copies the bytes of the torn line to `<journal file>.torn-<UTC time>` (mode `600` on macOS and Linux), cuts the journal back to the end of the last valid line, and appends an entry with the tool `journal_recovered`, `fileKey` `""`, `epoch` 0, and the params `{ "tornBytes": <n>, "tornSha256": "<hash>", "savedTo": "<path>" }`. The chain thus shows the repair, and the journal takes writes again. The leader logs the repair one time. Keep the side file for the auditor.
+
+**A broken chain.** At start the leader checks each line: it ends with `\n`, it is the canonical JSON of its entry, each field is present with its type, `seq` is the line number, `prevHash` is the `hash` of the line before, and `hash` is correct. A line that fails (other than a torn last line, above), or a file that cannot be read, makes the journal broken. The leader then:
 
 - logs the file, the line, and the cause on standard error, one time;
 - reports `status: "broken"` and the `reason` (the line and the cause) in `/ping` and `list_files`, with the count and the head of the valid lines before that line;
 - refuses each write before it reaches the plugin, with an error that gives the repair;
 - still serves each read.
 
-The leader never truncates, repairs, or rewrites the file. A failed append after the request reached the plugin also makes the journal broken: the change can be in the Figma file but not in the journal, and the caller gets an error that says so.
+Apart from a torn last line, the leader never truncates, repairs, or rewrites the file. An append that fails on a passing error (`EAGAIN`, `EBUSY`, `EINTR`, and on Windows `EPERM`, for example while an antivirus holds the file) is tried again up to 3 times, 50 ms apart. An append that still fails after the request reached the plugin also makes the journal broken: the change can be in the Figma file but not in the journal, and the caller gets an error that says so.
 
 **The repair.** Stop each bridge process. Move the journal file aside, and keep it for the auditor. Start the bridge again: a new chain starts at the genesis hash. Tell the auditor, who keeps the old file and its head as the record up to that point.
 
@@ -302,6 +308,68 @@ The manifest is the result of the call, and `manifest.json` holds the same text.
 | `files`                                           | One entry: `kind` (`journal`), `path` (relative to `outputRoot`, with `/`), `sha256`, `bytes`, and `entryCount`.             |
 
 The dump holds the params and the responses of each write, as the journal does: keep it outside each repository.
+
+## Long sessions
+
+A session can run for hours and see the leader process exit, the plugin reconnect, parallel tool calls, and a hung request. The bridge recovers from each of these, or fails the call with an error that names the tool, says whether the change may already be in Figma, and says what to do next.
+
+- **A lost leader.** The first server process is the leader, and it lives as long as its MCP client. When it exits, a follower takes over at once: a call that finds no leader runs the election, waits up to 8 s for a new leader, and sends the call again when the old leader never got it or when it is a read. A write that was in flight when the leader exited is not sent again: its error says that the change may or may not be in the file, so check the file with `get_node` before you retry.
+- **A plugin that reconnects.** After a takeover or a plugin reload, the plugin needs 1.5 to 3 s to connect again. A call in that time waits for it, up to `FIGMA_BRIDGE_CONNECT_GRACE_MS`. A key that never connected fails at once, unless the leader itself started less than the grace ago.
+- **One request at a time.** The plugin runs the requests one by one, in the order they arrived, so parallel calls into one auto layout frame keep their order. A request that runs past its time gets an error, and the next one starts.
+- **Undo.** The plugin commits the undo history after each write, so one undo in Figma reverts one write of the agent, not a whole run.
+- **Timeouts.** A call waits 60 s for the plugin (`get_screenshot` and `create_image` 120 s, `import_html_layers` 300 s), then fails with `<tool> timed out: …`. The leader pings each plugin every 10 s and drops a plugin that does not answer.
+
+### A standalone leader
+
+With two MCP clients, for example one that advises and one that executes, the leader belongs to the client that started first, and closing that client stops the leader under the other one. A standalone leader has no MCP client of its own and runs until you stop it. From the repository root, after a build:
+
+```bash
+bun run leader
+```
+
+This runs `node server/dist/index.js --standalone`. Each MCP client then starts as a follower. Stop the leader with Ctrl+C. If a leader already listens on the port, the command prints the version and the start time of that leader and exits with code 1. After an update, restart the standalone leader too: `list_files` warns when a follower and its leader run different builds.
+
+### Session settings
+
+| Variable                          | Meaning                                                                                                                                                   | When unset                                            |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `FIGMA_BRIDGE_REQUEST_TIMEOUT_MS` | How long a call waits for the plugin when its tool has no time of its own. An integer of 1 or more. A tool with a time of its own keeps it.               | `60000`                                               |
+| `FIGMA_BRIDGE_CONNECT_GRACE_MS`   | How long a call waits for a plugin that is not connected, after the leader started or after the plugin of that file disconnected. `0` turns the wait off. | `10000`                                               |
+| `FIGMA_BRIDGE_STANDALONE`         | `1` starts a standalone leader, as `--standalone` does. `0` or empty is the MCP server. No other value is allowed.                                        | The MCP server.                                       |
+| `FIGMA_BRIDGE_LOG_FILE`           | The diagnostics log of this process. The processes of one install can share it.                                                                           | `bridge.log` in the folder of the default token file. |
+
+A value that is not allowed stops the process at start, with an error that names the variable.
+
+### Troubleshooting a session
+
+`list_files` and `/ping` report `health`:
+
+```json
+"health": {
+  "events": [
+    { "at": "2026-01-01T12:00:00.000Z", "pid": 1234, "role": "LEADER", "event": "request", "tool": "create_frame", "fileKey": "…", "ms": 84, "ok": true, "requestBytes": 312, "responseBytes": 96 }
+  ],
+  "pending": 0,
+  "warnings": []
+}
+```
+
+- `events`: the last 20 events of the leader, oldest first.
+- `pending`: the requests that wait for a plugin answer now. A number that stays above 0 shows a busy or frozen plugin.
+- `warnings`: what to look at, for example a broken write journal, or a follower and a leader of different builds.
+
+Each server process also appends one JSON line for each event to `bridge.log` in the state folder (`%APPDATA%\figma-mcp-bridge\` on Windows, `$XDG_CONFIG_HOME/figma-mcp-bridge/` or `~/.config/figma-mcp-bridge/` elsewhere), or to the file that `FIGMA_BRIDGE_LOG_FILE` names. Above 5 MB the file moves to `bridge.log.1`. A line holds `at`, `pid`, `role`, `event`, and the facts of the event: starts and stops, role changes and takeovers, plugin connects and disconnects with the close code, each finished plugin request with its time and sizes, timeouts, waits for a plugin, recoveries, and journal repairs. A line never holds params, data, node content, or the install token. To see why a session failed, read the last lines. In Git Bash on Windows:
+
+```bash
+tail -n 50 "$APPDATA/figma-mcp-bridge/bridge.log"
+```
+
+| The error holds                                        | What happened                                                     | What to do                                                                                                            |
+| ------------------------------------------------------ | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `No plugin connected for "<file>" (it disconnected …)` | The plugin of that file did not connect again within the grace.   | Run Plugins › Development › Figma MCP Bridge (Fork) in that file, then retry. Running another plugin closes this one. |
+| `timed out: no answer from the Figma plugin`           | The plugin is busy or frozen. A write may still complete.         | Check the file with `get_node`, then retry. If it repeats, run the plugin again.                                      |
+| `may or may not be in the Figma file`                  | The leader exited, or the plugin disconnected, while a write ran. | Check the file with `get_node` before you retry.                                                                      |
+| `the write journal … is broken`                        | The journal failed its check, or an append failed.                | See [the write journal](#the-write-journal).                                                                          |
 
 ## Available Tools
 
@@ -631,6 +699,8 @@ Figma-MCP-Bridge/
         ├── rpc-token.ts  # The install token that each /rpc request carries
         ├── role.ts       # The auditor role: its 16 tools and the request mark
         ├── journal.ts    # The write journal: each write the leader sends, in a hash chain
+        ├── timeouts.ts   # The time of each request type, and the reconnect grace
+        ├── diagnostics.ts # The diagnostics log and the last events for health
         ├── identity.ts   # File selection and the identity of one file
         ├── evidence.ts   # Canonical JSON, SHA-256, and the write of evidence files
         ├── build-info.ts # The commit of this build, from dist/build-info.json
