@@ -583,10 +583,10 @@ describe("a broken chain", () => {
       valid: 1,
     },
     {
-      name: "a torn last line",
-      text: VALID.slice(0, -1),
-      reason: /^line 3: the line does not end with a newline \(a torn append\)/,
-      valid: 2,
+      name: "a bad line before a torn last line",
+      text: `${lines[0]}\n${lines[1].replace('"ok-2"', '"ok-9"')}\n${lines[2]}`,
+      reason: /^line 2: hash is not the SHA-256/,
+      valid: 1,
     },
   ];
 
@@ -640,6 +640,79 @@ describe("a broken chain", () => {
       TIMEOUT_MS
     );
   }
+});
+
+describe("a torn last line", () => {
+  test(
+    "moves aside: its bytes go to a side file, journal_recovered joins the chain, and a write succeeds",
+    async () => {
+      const { text: VALID, entries: ENTRIES } = syntheticJournal();
+      const dir = await h.tempDir("torn");
+      const file = join(dir, "write-journal.jsonl");
+      // The last line lost its newline, as an append that stopped halfway leaves it.
+      await writeFile(file, VALID.slice(0, -1), "utf8");
+      const tornBytes = Buffer.from(`${canonicalJson(ENTRIES[2])}`, "utf8");
+
+      const { port, leader, follower } = await bridge({
+        env: { FIGMA_BRIDGE_JOURNAL_FILE: file },
+      });
+
+      const state = (await ping(port)).journal;
+      expect(state.status).toBe("ok");
+      expect(state.entryCount).toBe(3);
+
+      const sideFiles = (await readdir(dir)).filter((name) =>
+        name.startsWith("write-journal.jsonl.torn-")
+      );
+      expect(sideFiles).toHaveLength(1);
+      const savedTo = join(dir, sideFiles[0]);
+      expect(await readFile(savedTo)).toEqual(tornBytes);
+
+      const entries = await journalEntries(file);
+      expect(entries.slice(0, 2)).toEqual(ENTRIES.slice(0, 2));
+      const recovered = entries[2];
+      expect(recovered).toMatchObject({
+        seq: 3,
+        fileKey: "",
+        epoch: 0,
+        auditor: false,
+        tool: "journal_recovered",
+        nodeIds: null,
+        params: {
+          tornBytes: tornBytes.length,
+          tornSha256: createHash("sha256").update(tornBytes).digest("hex"),
+          savedTo,
+        },
+        response: { data: null },
+        prevHash: ENTRIES[1].hash,
+      });
+      expect(recovered.hash).toBe(independentHash(recovered));
+      expect(state.headHash).toBe(recovered.hash);
+      expect(leader.stderr.filter((line) => line.includes("ended with a torn line"))).toHaveLength(
+        1
+      );
+      expect(leader.stderr.filter((line) => line.includes("is broken"))).toHaveLength(0);
+
+      await outcomeOk(follower, "set_node_properties", {
+        nodeId: NODE_ID,
+        x: 1,
+        fileKey: FILE_KEY,
+      });
+      const after = await journalEntries(file);
+      expect(after).toHaveLength(4);
+      expect(after[3]).toMatchObject({
+        seq: 4,
+        tool: "set_node_properties",
+        prevHash: recovered.hash,
+      });
+      expect((await ping(port)).journal).toEqual({
+        status: "ok",
+        entryCount: 4,
+        headHash: after[3].hash,
+      });
+    },
+    TIMEOUT_MS
+  );
 });
 
 describe("the read-only list", () => {
