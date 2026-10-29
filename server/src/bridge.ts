@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
+import { logEvent, shortError } from "./diagnostics.js";
 import { selectFile } from "./identity.js";
 import { READ_ONLY_REQUESTS } from "./journal.js";
 import type { JournalResponse, WriteJournal } from "./journal.js";
@@ -32,7 +33,8 @@ interface ConnectionWaiter {
 interface PendingRequest {
   /** The request type, for the messages. */
   type: string;
-  resolve: (resp: BridgeResponse) => void;
+  /** Gets the answer and its size in bytes. */
+  resolve: (resp: BridgeResponse, bytes: number) => void;
   reject: (err: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
   ws: WebSocket;
@@ -80,6 +82,7 @@ export class Bridge {
             entry.fileName,
             `it did not answer a ping within ${seconds(PING_INTERVAL_MS)} s`
           );
+          logEvent("plugin_no_pong", { fileKey });
           console.error(`Plugin dead (no pong): ${entry.fileName} (${fileKey})`);
           continue;
         }
@@ -120,6 +123,7 @@ export class Bridge {
     const existing = this.connections.get(fileKey);
     if (existing) {
       existing.ws.close();
+      logEvent("plugin_replace", { fileKey });
     }
     // Count before the connection is stored, so no read sees the new
     // connection with the old epoch.
@@ -133,6 +137,7 @@ export class Bridge {
       isAlive: true,
     });
     this.disconnects.delete(fileKey);
+    logEvent("plugin_connect", { fileKey, pluginBuild, epoch });
     console.error(`Plugin connected: ${fileName} (${fileKey})`);
     for (const waiter of [...this.waiters]) {
       if (waiter.fileKey === undefined || waiter.fileKey === fileKey) waiter.settle(true);
@@ -150,7 +155,7 @@ export class Bridge {
         if (pending) {
           clearTimeout(pending.timeout);
           this.pending.delete(resp.requestId);
-          pending.resolve(resp);
+          pending.resolve(resp, rawBytes(data));
         }
       } catch {
         console.error("Invalid response from plugin");
@@ -162,6 +167,7 @@ export class Bridge {
       if (current?.ws === ws) {
         this.connections.delete(fileKey);
         this.recordDisconnect(fileKey, fileName, describeClose(code, reason));
+        logEvent("plugin_disconnect", { fileKey, code, reason: reason.toString("utf8") });
         console.error(`Plugin disconnected: ${fileName} (${fileKey})`);
       }
       this.rejectPendingForSocket(ws, `Plugin disconnected: ${fileName} (${fileKey})`);
@@ -174,6 +180,7 @@ export class Bridge {
         this.connections.delete(fileKey);
         this.recordDisconnect(fileKey, fileName, `a connection error (${err.message})`);
       }
+      logEvent("plugin_error", { fileKey, error: shortError(err.message) });
       this.rejectPendingForSocket(
         ws,
         `Plugin disconnected: ${fileName} (${fileKey}) after a connection error (${err.message})`
@@ -226,7 +233,12 @@ export class Bridge {
     const absent = key !== undefined ? !this.connections.has(key) : this.connections.size === 0;
     if (absent) {
       const waitMs = this.graceWaitMs(key);
-      const connected = waitMs > 0 && (await this.waitForConnection(key, waitMs));
+      let connected = false;
+      if (waitMs > 0) {
+        const began = Date.now();
+        connected = await this.waitForConnection(key, waitMs);
+        logEvent("plugin_wait", { fileKey: key ?? null, ms: Date.now() - began, ok: connected });
+      }
       // A file that was connected before gets the message that says when and why it left.
       if (!connected && (waitMs > 0 || this.lastDisconnect(key) !== undefined)) {
         throw new Error(this.noPluginMessage(key));
@@ -301,6 +313,11 @@ export class Bridge {
       return `No plugin connected for fileKey "${key}" (this bridge leader started ${age} s ago, and no plugin has connected for that key since). Ask the user to run ${RUN_PLUGIN}${others}`;
     }
     return `No plugin connected (this bridge leader started ${age} s ago, and no plugin has connected since). Ask the user to open the Figma file and run ${RUN_PLUGIN.replace(" in that file", "")}`;
+  }
+
+  /** How many requests wait for a plugin answer now. */
+  pendingCount(): number {
+    return this.pending.size;
   }
 
   listConnectedFiles(): ConnectedFile[] {
@@ -383,15 +400,33 @@ export class Bridge {
           return err instanceof Error ? err : new Error(String(err));
         }
       };
-      const answered = (resp: BridgeResponse): void => {
+      const text = JSON.stringify(request);
+      const startedAt = Date.now();
+      /** Logs the end of the request: its size and its outcome, never its params or its data. */
+      const finished = (event: string, responseBytes: number, error?: string): void => {
+        const fields: Record<string, unknown> = {
+          tool: requestType,
+          fileKey: file.fileKey,
+          ms: Date.now() - startedAt,
+          ok: error === undefined,
+        };
+        if (error !== undefined) fields.error = shortError(error);
+        fields.requestBytes = Buffer.byteLength(text, "utf8");
+        fields.responseBytes = responseBytes;
+        logEvent(event, fields);
+      };
+      const answered = (resp: BridgeResponse, bytes: number): void => {
         const failure = record(
           resp.error ? { error: resp.error } : { data: resp.data === undefined ? null : resp.data }
         );
+        finished("request", bytes, failure?.message ?? resp.error);
         if (failure) reject(failure);
         else resolve(resp);
       };
-      const failed = (err: Error): void => {
-        reject(record({ error: err.message }) ?? err);
+      const failed = (err: Error, event = "request"): void => {
+        const failure = record({ error: err.message }) ?? err;
+        finished(event, 0, failure.message);
+        reject(failure);
       };
 
       const timeout = setTimeout(() => {
@@ -401,7 +436,8 @@ export class Bridge {
             `${requestType} timed out: no answer from the Figma plugin within ${seconds(timeoutMs)} s. ` +
               `The plugin may be busy or frozen, and a write may still complete in Figma. ` +
               `Check with get_node before you retry; if it repeats, ask the user to re-run the plugin.`
-          )
+          ),
+          "request_timeout"
         );
       }, timeoutMs);
 
@@ -413,7 +449,7 @@ export class Bridge {
         ws: conn,
       });
 
-      conn.send(JSON.stringify(request), (err) => {
+      conn.send(text, (err) => {
         // A close of the socket can settle the request first: record it once.
         if (err && this.pending.has(requestId)) {
           clearTimeout(timeout);
@@ -474,6 +510,12 @@ function describeClose(code: number, reason: Buffer): string {
         ? "the connection dropped"
         : "the plugin closed the connection";
   return `${meaning}, code ${code}${text === "" ? "" : `: ${text}`}`;
+}
+
+/** The size of a WebSocket message in bytes. */
+function rawBytes(data: WebSocket.RawData): number {
+  if (Array.isArray(data)) return data.reduce((sum, part) => sum + part.length, 0);
+  return data instanceof ArrayBuffer ? data.byteLength : data.length;
 }
 
 /** Milliseconds rounded to a tenth of a second, for `seconds`. */

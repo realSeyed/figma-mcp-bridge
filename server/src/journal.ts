@@ -38,8 +38,8 @@
  * The journal holds the params and the responses of each write: it is private
  * data of the owner.
  *
- * This module imports only Node built-in modules, `evidence.ts`,
- * `rpc-token.ts` and types.
+ * This module imports only Node built-in modules, `diagnostics.ts`,
+ * `evidence.ts`, `rpc-token.ts` and types.
  */
 
 import {
@@ -60,6 +60,7 @@ import {
   sha256Hex,
   utcTimestamp,
 } from "./evidence.js";
+import { logEvent } from "./diagnostics.js";
 import { installStateFolder } from "./rpc-token.js";
 import type { JournalState } from "./types.js";
 
@@ -391,6 +392,7 @@ export class WriteJournal {
       `The write journal ${this.file} ended with a torn line (${defect}): its ${torn.length} bytes ` +
         `moved to ${savedTo}, and entry ${this.entryCount} (${RECOVERED_TOOL}) records it.`
     );
+    logEvent("journal_recovered", { tornBytes: torn.length, savedTo, seq: this.entryCount });
   }
 
   /** The state for `/ping` and `list_files`. */
@@ -592,6 +594,7 @@ export class WriteJournal {
   private markBroken(reason: string): void {
     if (this.brokenReason !== null) return;
     this.brokenReason = reason;
+    logEvent("journal_broken", { reason });
     console.error(`The write journal ${this.file} is broken: ${reason}. ${REPAIR}`);
   }
 

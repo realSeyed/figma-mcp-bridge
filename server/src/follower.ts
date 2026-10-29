@@ -1,10 +1,12 @@
 import { BRIDGE_COMMIT } from "./build-info.js";
+import { logEvent } from "./diagnostics.js";
 import { AUDITOR_ROLE, ROLE_HEADER } from "./role.js";
 import type { ProcessRole } from "./role.js";
 import { rpcToken } from "./rpc-token.js";
 import { followerTimeoutMs, seconds } from "./timeouts.js";
 import type {
   BridgeResponse,
+  Health,
   IdentityReport,
   LeaderIdentity,
   RPCRequest,
@@ -92,6 +94,18 @@ export class Follower {
         "The leader answered list_files in an old shape. It runs an older build of the bridge: stop the leader process, then restart the bridge processes from the current build."
       );
     }
+    // A leader of an older build sends no health.
+    const sent = leader.health;
+    const health: Health =
+      typeof sent === "object" && sent !== null && Array.isArray(sent.events)
+        ? { events: sent.events, pending: sent.pending, warnings: [...(sent.warnings ?? [])] }
+        : { events: [], pending: 0, warnings: [] };
+    if (leader.leaderCommit !== BRIDGE_COMMIT) {
+      // A standalone leader keeps running across an update until it is restarted.
+      health.warnings.push(
+        `This MCP server runs the build ${BRIDGE_COMMIT}, but the leader runs ${leader.leaderCommit}. Restart the process of the older build: a standalone leader keeps running across an update until it is restarted.`
+      );
+    }
     return {
       bridgeCommit: BRIDGE_COMMIT,
       leaderCommit: leader.leaderCommit,
@@ -100,6 +114,7 @@ export class Follower {
       // A leader of an older build sends no journal.
       journal:
         typeof leader.journal === "object" && leader.journal !== null ? leader.journal : null,
+      health,
     };
   }
 
@@ -138,6 +153,7 @@ export class Follower {
       text = await response.text();
     } catch (err) {
       if ((err as { name?: unknown } | null)?.name === "TimeoutError") {
+        logEvent("leader_timeout", { tool: rpcReq.tool, ms: timeoutMs });
         throw new Error(
           `${rpcReq.tool} timed out: no answer from the bridge leader within ${seconds(timeoutMs)} s. ` +
             `The leader may be busy, and a write may still complete in Figma. ` +

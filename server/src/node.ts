@@ -1,3 +1,4 @@
+import { logEvent, setLogRole } from "./diagnostics.js";
 import { Leader, leaderUrl } from "./leader.js";
 import { Follower, LeaderConnectionError } from "./follower.js";
 import { JOURNAL_CHUNK_REQUEST, READ_ONLY_REQUESTS } from "./journal.js";
@@ -127,13 +128,19 @@ export class Node {
       if (!(err instanceof LeaderConnectionError)) throw err;
       const resend = err.kind === "refused" || READ_ONLY_REQUESTS.has(tool);
       console.error(`${tool}: lost the bridge leader (${err.kind}); recovering`);
-      if (!(await this.recover())) throw new Error(unrecovered(tool, err.kind));
+      logEvent("leader_lost", { tool, kind: err.kind });
+      const began = Date.now();
+      const recovered = await this.recover();
+      logEvent(recovered ? "recovered" : "recovery_failed", { tool, ms: Date.now() - began });
+      if (!recovered) throw new Error(unrecovered(tool, err.kind));
       if (!resend) {
+        logEvent("ambiguous_write", { tool });
         throw new Error(
           `${tool}: the bridge leader process exited while the request was in flight, so the change may or may not be in the Figma file. The bridge has recovered; check the file with get_node before you retry.`
         );
       }
       console.error(`${tool}: the bridge recovered (${this.roleName}); sending the request again`);
+      logEvent("retry", { tool });
       try {
         return await call();
       } catch (again) {
@@ -164,8 +171,12 @@ export class Node {
     const leader = new Leader(this.port);
     await leader.start();
 
+    const previous = this.roleName;
     this.leader = leader;
     this._role = Role.Leader;
+    setLogRole(this.roleName);
+    // A follower that becomes the leader took over from a leader that stopped.
+    logEvent("role", { from: previous, to: this.roleName, takeover: previous === "FOLLOWER" });
     console.error("Became LEADER");
   }
 
@@ -177,7 +188,10 @@ export class Node {
       this.leader = null;
     }
 
+    const previous = this.roleName;
     this._role = Role.Follower;
+    setLogRole(this.roleName);
+    logEvent("role", { from: previous, to: this.roleName });
     console.error("Became FOLLOWER");
   }
 

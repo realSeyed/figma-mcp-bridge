@@ -3,12 +3,13 @@ import http from "node:http";
 import type { Duplex } from "node:stream";
 import { Bridge } from "./bridge.js";
 import { BRIDGE_COMMIT } from "./build-info.js";
+import { recentEvents } from "./diagnostics.js";
 import { JOURNAL_CHUNK_REQUEST, parseChunkParams, WriteJournal } from "./journal.js";
 import type { JournalChunk, JournalChunkParams } from "./journal.js";
 import { AUDITOR_ROLE, AUDITOR_TOOLS, ROLE_HEADER, ROLE_VARIABLE, auditorMayCall } from "./role.js";
 import { rpcToken, tokenFilePath } from "./rpc-token.js";
 import { validateRpc } from "./schema.js";
-import type { IdentityReport, LeaderIdentity, RPCRequest, RPCResponse } from "./types.js";
+import type { Health, IdentityReport, LeaderIdentity, RPCRequest, RPCResponse } from "./types.js";
 import { VERSION } from "./version.js";
 
 /**
@@ -76,14 +77,27 @@ export class Leader {
     return this.bridge;
   }
 
-  /** What the leader knows: its build, its start time, and the connected files. */
-  leaderIdentity(): LeaderIdentity {
+  /** What the leader knows: its build, its start time, the connected files, and its health. */
+  leaderIdentity(): LeaderIdentity & { health: Health } {
     return {
       leaderCommit: BRIDGE_COMMIT,
       leaderStartedAt: this.startedAt,
       files: this.bridge.listConnectedFiles(),
       journal: this.journal.state(),
+      health: this.health(),
     };
+  }
+
+  /** The last events of this process, the requests at a plugin now, and what is wrong. */
+  private health(): Health {
+    const warnings: string[] = [];
+    const journal = this.journal.state();
+    if (journal.status === "broken") {
+      warnings.push(
+        `The write journal is broken (${journal.reason}): the leader refuses each write until the repair.`
+      );
+    }
+    return { events: recentEvents(), pending: this.bridge.pendingCount(), warnings };
   }
 
   /**
@@ -113,7 +127,7 @@ export class Leader {
         if (req.url === "/ping" && req.method === "GET") {
           res.writeHead(200, { "Content-Type": "application/json" });
           // The leader answers, so its commit is the bridgeCommit of /ping.
-          const { bridgeCommit, leaderStartedAt, files, journal } = this.identityReport();
+          const { bridgeCommit, leaderStartedAt, files, journal, health } = this.identityReport();
           res.end(
             JSON.stringify({
               status: "ok",
@@ -122,6 +136,7 @@ export class Leader {
               leaderStartedAt,
               files,
               journal,
+              health,
             })
           );
           return;

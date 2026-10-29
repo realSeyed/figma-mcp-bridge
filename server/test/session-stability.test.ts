@@ -5,6 +5,8 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { Harness } from "./helpers/harness.js";
 import { pngScreenshot, type PluginHandler } from "./helpers/plugin.js";
 import { postRpc } from "./helpers/rpc.js";
@@ -57,6 +59,11 @@ interface Ping {
   version: string;
   leaderStartedAt: string;
   files: Array<{ fileKey: string }>;
+  health: {
+    events: Array<Record<string, unknown> & { event: string; at: string }>;
+    pending: number;
+    warnings: string[];
+  };
 }
 
 async function ping(port: number): Promise<Ping> {
@@ -359,6 +366,7 @@ describe("the standalone leader", () => {
           env: {
             FIGMA_BRIDGE_TOKEN_FILE: await h.tokenFile(),
             FIGMA_BRIDGE_JOURNAL_FILE: await h.journalFile(),
+            FIGMA_BRIDGE_LOG_FILE: await h.logFile(),
             FIGMA_BRIDGE_STANDALONE: "1",
           },
         }),
@@ -369,6 +377,135 @@ describe("the standalone leader", () => {
       expect(duplicate.stderr).toContain(`A bridge leader already listens on 127.0.0.1:${port}`);
       expect(duplicate.stderr).toContain(`version ${before.version}`);
       expect(duplicate.stderr).toContain(`leaderStartedAt ${before.leaderStartedAt}`);
+    },
+    TIMEOUT_MS
+  );
+});
+
+describe("diagnostics", () => {
+  test(
+    "health in /ping and list_files, lines in the log, and no token, params or data in either",
+    async () => {
+      const port = await h.freePort();
+      const env = { FIGMA_BRIDGE_REQUEST_TIMEOUT_MS: "1000" };
+      const leader = await start(port, env);
+      expect(leader.role).toBe("LEADER");
+      await h.plugin({
+        port,
+        fileKey: FILE_KEY,
+        handlers: { get_metadata: () => ({ marker: "data-marker-7" }), set_node_properties: never },
+      });
+      const follower = await start(port, env);
+      expect(follower.role).toBe("FOLLOWER");
+
+      expect((await follower.callTool("get_metadata", { fileKey: FILE_KEY })).ok).toBe(true);
+      const timedOut = await follower.callTool("set_node_properties", {
+        nodeId: NODE_ID,
+        name: "param-marker-9",
+        fileKey: FILE_KEY,
+      });
+      expect(errorOf(timedOut)).toContain("timed out");
+
+      const health = (await ping(port)).health;
+      expect(health.pending).toBe(0);
+      expect(health.warnings).toEqual([]);
+      expect(health.events.map((event) => event.event)).toEqual(
+        expect.arrayContaining(["start", "role", "plugin_connect", "request", "request_timeout"])
+      );
+      for (const event of health.events) {
+        expect(event.at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+        expect(typeof event.pid).toBe("number");
+        expect(typeof event.role).toBe("string");
+      }
+      const read = health.events.find((e) => e.event === "request" && e.tool === "get_metadata");
+      expect(read).toMatchObject({ fileKey: FILE_KEY, ok: true, role: "LEADER" });
+      expect(read!.requestBytes).toBeGreaterThan(0);
+      expect(read!.responseBytes).toBeGreaterThan(0);
+      const timeout = health.events.find((e) => e.event === "request_timeout");
+      expect(timeout).toMatchObject({
+        tool: "set_node_properties",
+        fileKey: FILE_KEY,
+        ok: false,
+        responseBytes: 0,
+      });
+      expect(String(timeout!.error)).toContain("timed out");
+
+      // list_files holds the same health, from the leader and through a follower.
+      for (const server of [leader, follower]) {
+        const outcome = await server.callTool("list_files");
+        if (!outcome.ok) throw new Error(outcome.error);
+        const report = outcome.data as { health: Ping["health"]; files: unknown[] };
+        expect(report.files).toHaveLength(1);
+        expect(report.health.pending).toBe(0);
+        expect(report.health.warnings).toEqual([]);
+        expect(report.health.events.length).toBeGreaterThan(0);
+        expect(report.health.events.length).toBeLessThanOrEqual(20);
+      }
+
+      const log = await readFile(await h.logFile(), "utf8");
+      const lines = log
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      for (const line of lines) {
+        expect(Object.keys(line).slice(0, 4)).toEqual(["at", "pid", "role", "event"]);
+      }
+      expect(new Set(lines.map((line) => line.pid)).size).toBe(2);
+      expect(lines.some((line) => line.event === "role" && line.to === "FOLLOWER")).toBe(true);
+      expect(lines.some((line) => line.event === "request_timeout")).toBe(true);
+
+      const token = await h.token();
+      for (const text of [log, ...leader.stderr, ...follower.stderr]) {
+        expect(text).not.toContain(token);
+      }
+      for (const text of [log, JSON.stringify(health)]) {
+        expect(text).not.toContain("data-marker");
+        expect(text).not.toContain("param-marker");
+      }
+    },
+    TIMEOUT_MS
+  );
+
+  test(
+    "a follower warns when the leader runs another build",
+    async () => {
+      const port = await h.freePort();
+      // A leader of another build: it answers /ping, and list_files over /rpc.
+      const other = createServer((request, response) => {
+        request.resume();
+        response.writeHead(200, { "Content-Type": "application/json" });
+        if (request.url === "/ping") {
+          response.end(JSON.stringify({ status: "ok" }));
+          return;
+        }
+        response.end(
+          JSON.stringify({
+            data: {
+              leaderCommit: "0000000-other-build",
+              leaderStartedAt: "2026-01-01T00:00:00.000Z",
+              files: [],
+              journal: null,
+              health: { events: [], pending: 0, warnings: [] },
+            },
+          })
+        );
+      });
+      await new Promise<void>((done) => other.listen(port, "127.0.0.1", () => done()));
+      h.defer(
+        () =>
+          new Promise<void>((done) => {
+            other.closeAllConnections();
+            other.close(() => done());
+          })
+      );
+
+      const follower = await start(port);
+      expect(follower.role).toBe("FOLLOWER");
+      const outcome = await follower.callTool("list_files");
+      if (!outcome.ok) throw new Error(outcome.error);
+      const warnings = (outcome.data as { health: { warnings: string[] } }).health.warnings;
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("but the leader runs 0000000-other-build");
     },
     TIMEOUT_MS
   );

@@ -3,6 +3,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Node } from "./node.js";
+import { BRIDGE_COMMIT } from "./build-info.js";
+import { logEvent } from "./diagnostics.js";
 import { Election } from "./election.js";
 import { LEADER_HOST, leaderUrl } from "./leader.js";
 import { describeOutputRoot } from "./output-root.js";
@@ -72,6 +74,12 @@ const STANDALONE = resolveStandalone();
  */
 async function runStandalone(): Promise<void> {
   rpcToken();
+  logEvent("start", {
+    version: VERSION,
+    bridgeCommit: BRIDGE_COMMIT,
+    port: PORT,
+    standalone: true,
+  });
   const node = new Node(PORT, ROLE);
   try {
     await node.becomeLeader();
@@ -91,6 +99,7 @@ async function runStandalone(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.error(`Shutting down (${reason})...`);
+    logEvent("shutdown", { reason });
     node.stop();
     process.exit(code);
   };
@@ -127,6 +136,13 @@ async function main(): Promise<void> {
   // Read the install token now: a bad token file stops the process at start,
   // not at the first tool call. The token itself is never logged.
   rpcToken();
+  logEvent("start", {
+    version: VERSION,
+    bridgeCommit: BRIDGE_COMMIT,
+    port: PORT,
+    standalone: false,
+    tools: ROLE ?? "full",
+  });
 
   const node = new Node(PORT, ROLE);
   const election = new Election(PORT, node);
@@ -140,6 +156,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.error(`Shutting down (${reason})...`);
+    logEvent("shutdown", { reason });
 
     const force = setTimeout(() => {
       console.error("Shutdown timeout exceeded, forcing exit");
