@@ -10,6 +10,7 @@ import { existsSync, fsyncSync, writeSync } from "node:fs";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { LOG_FILE_VARIABLE } from "../src/diagnostics.js";
 import { canonicalJson } from "../src/evidence.js";
 import {
   digestLongStrings,
@@ -776,6 +777,18 @@ describe("a long string", () => {
 });
 
 describe("the append retry", () => {
+  // A broken journal writes an event to the diagnostics log. In this test
+  // process that is a file of the harness, never the log of the install.
+  let installLog: string | undefined;
+  beforeEach(async () => {
+    installLog = process.env[LOG_FILE_VARIABLE];
+    process.env[LOG_FILE_VARIABLE] = join(await h.tempDir("log"), "bridge.log");
+  });
+  afterEach(() => {
+    if (installLog === undefined) delete process.env[LOG_FILE_VARIABLE];
+    else process.env[LOG_FILE_VARIABLE] = installLog;
+  });
+
   const RECORD: JournalRecord = {
     fileKey: FILE_KEY,
     epoch: 1,
@@ -865,6 +878,13 @@ describe("the append retry", () => {
     const state = journal.state();
     expect(state.status).toBe("broken");
     expect(state.reason).toBe("the append of entry 1 failed (EBUSY)");
+    const logged = (await readFile(process.env[LOG_FILE_VARIABLE]!, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(logged).toEqual([
+      expect.objectContaining({ event: "journal_broken", reason: state.reason }),
+    ]);
   });
 
   test("an error that does not pass is not tried again", async () => {
