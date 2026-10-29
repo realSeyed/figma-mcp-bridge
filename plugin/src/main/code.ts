@@ -1,5 +1,9 @@
-import { serializeBoundVariableMap, serializeNode, serializeNodeWithinBudget } from "./serializer";
-import type { SerializableNode } from "./serializer";
+import {
+  MAX_NODE_RESULT_CHARS,
+  serializeBoundVariableMap,
+  serializeNodeWithinBudget,
+} from "./serializer";
+import { cutNote, readNode, readNodes, readOptionsOf, readWithinBudget } from "./reads";
 import { addLayersToFrame } from "../html-figma/figma";
 import { RequestQueue } from "./request-queue";
 import { getExtensionHandler } from "./extensions";
@@ -352,17 +356,30 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
       requireEditorMode(request.type);
     }
     switch (request.type) {
-      case "get_document":
+      case "get_document": {
+        const pageId = request.params?.pageId;
+        let page: PageNode = figma.currentPage;
+        if (typeof pageId === "string") {
+          const found = figma.root.children.find((candidate) => candidate.id === pageId);
+          if (!found) {
+            throw new Error(
+              `get_document found no page with the ID ${pageId} for pageId. Call get_metadata to list the pages of this file.`
+            );
+          }
+          await found.loadAsync();
+          page = found;
+        }
         return {
           type: request.type,
           requestId: request.requestId,
-          data: serializeNode(figma.currentPage),
+          data: readNode(page, readOptionsOf(request.params)),
         };
+      }
       case "get_selection":
         return {
           type: request.type,
           requestId: request.requestId,
-          data: figma.currentPage.selection.map((node) => serializeNode(node)),
+          data: readNodes(figma.currentPage.selection, readOptionsOf(request.params)),
         };
       case "get_node": {
         const nodeId = request.nodeIds && request.nodeIds[0];
@@ -392,7 +409,11 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
         return {
           type: request.type,
           requestId: request.requestId,
-          data: serializeNodeWithinBudget(node as SceneNode),
+          // Without depth and detail the read keeps its own path, byte for byte.
+          data:
+            request.params?.depth === undefined && request.params?.detail === undefined
+              ? serializeNodeWithinBudget(node as SceneNode)
+              : readNode(node as SceneNode, readOptionsOf(request.params)),
         };
       }
       case "get_styles": {
@@ -457,59 +478,27 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
       }
       case "get_design_context": {
         const depth = typeof request.params?.depth === "number" ? request.params.depth : 2;
-        const serializeWithDepth = async (
-          node: SerializableNode,
-          currentDepth: number
-        ): Promise<ReturnType<typeof serializeNode>> => {
-          const serialized = serializeNode(node);
-          if (currentDepth >= depth && serialized.children) {
-            // Truncate children at depth limit, but show count
-            return {
-              ...serialized,
-              children: undefined,
-              childCount:
-                (node as ChildrenMixin & SceneNode).children?.filter((c) => c.visible !== false)
-                  .length ?? 0,
-            } as ReturnType<typeof serializeNode> & { childCount: number };
-          }
-          if (serialized.children) {
-            const childNodes = await Promise.all(
-              serialized.children.map((child) => figma.getNodeByIdAsync(child.id))
-            );
-            const serializedChildren = await Promise.all(
-              childNodes
-                .filter(
-                  (n): n is SceneNode =>
-                    n !== null && n.type !== "DOCUMENT" && "visible" in n && n.visible !== false
-                )
-                .map((n) => serializeWithDepth(n, currentDepth + 1))
-            );
-            return {
-              ...serialized,
-              children: serializedChildren,
-            };
-          }
-          return serialized;
-        };
-
         const selection = figma.currentPage.selection;
-        const contextNodes =
-          selection.length > 0
-            ? await Promise.all(selection.map((node) => serializeWithDepth(node, 0)))
-            : [await serializeWithDepth(figma.currentPage, 0)];
-
+        const roots = selection.length > 0 ? selection : [figma.currentPage];
+        const base = {
+          fileName: figma.root.name,
+          currentPage: {
+            id: figma.currentPage.id,
+            name: figma.currentPage.name,
+          },
+          selectionCount: selection.length,
+        };
+        // One walk, stopped at depth and at the budget. A node at the depth
+        // limit reports childCount in place of its children.
+        const data = readWithinBudget(roots, { depth }, ({ nodes, cut }) =>
+          cut.some(Boolean)
+            ? { ...base, context: nodes, truncated: true, note: cutNote(MAX_NODE_RESULT_CHARS) }
+            : { ...base, context: nodes }
+        );
         return {
           type: request.type,
           requestId: request.requestId,
-          data: {
-            fileName: figma.root.name,
-            currentPage: {
-              id: figma.currentPage.id,
-              name: figma.currentPage.name,
-            },
-            selectionCount: selection.length,
-            context: contextNodes,
-          },
+          data,
         };
       }
       case "get_variable_defs": {

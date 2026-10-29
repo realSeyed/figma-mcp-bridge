@@ -316,7 +316,7 @@ export const serializeLetterSpacing = (letterSpacing: LetterSpacing | symbol) =>
   return { value: letterSpacing.value, unit: letterSpacing.unit };
 };
 
-const getBounds = (node: SerializableNode): SerializedBounds | undefined => {
+export const getBounds = (node: SerializableNode): SerializedBounds | undefined => {
   if ("x" in node && "y" in node && "width" in node && "height" in node) {
     return {
       x: node.x,
@@ -667,8 +667,12 @@ export const serializeNode = (node: SerializableNode): SerializedNode => {
   return { ...base, children: visible.map((child) => serializeNode(child)) };
 };
 
-/** The most characters one node read hands back before it starts cutting. */
-export const MAX_NODE_RESULT_CHARS = 50_000;
+/**
+ * The most characters one node read hands back before it starts cutting. It
+ * stays under the 40,000 characters at which Gemini CLI drops the middle of a
+ * tool result, so a cut is always one this budget made and marked.
+ */
+export const MAX_NODE_RESULT_CHARS = 35_000;
 
 /**
  * Serializes a node, cutting the subtree short when it will not fit.

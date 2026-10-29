@@ -73,28 +73,45 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "get_document",
-    "Get the current Figma page document tree. When multiple files are connected, specify fileKey.",
+    'Get the node tree of a page: the current page, or pageId. The result is cut at 35000 characters, marked truncated, and a node it stopped at reports childCount. A real page rarely fits whole: pass detail: "outline" with depth 1 or 2 to map it, then get_node on the part you need, or find_nodes to look a node up by name. When multiple files are connected, specify fileKey.',
     toolInputSchemas.get_document.shape,
-    async ({ fileKey }): Promise<ToolResult> => {
-      return renderResponse(() => node.send("get_document", undefined, fileKey));
+    async ({ pageId, depth, detail, fileKey }): Promise<ToolResult> => {
+      const params: Record<string, unknown> = {};
+      if (pageId !== undefined) params.pageId = pageId;
+      if (depth !== undefined) params.depth = depth;
+      if (detail !== undefined) params.detail = detail;
+      return renderResponse(() => node.sendWithParams("get_document", undefined, params, fileKey), {
+        tool: "get_document",
+      });
     }
   );
 
   server.tool(
     "get_selection",
-    "Get the currently selected nodes in Figma. When multiple files are connected, specify fileKey.",
+    'Get the currently selected nodes in Figma. All of them share one budget of 35000 characters; a node past it comes back as { id, name, type, childCount, truncated }. depth and detail: "outline" make a large selection cheaper. When multiple files are connected, specify fileKey.',
     toolInputSchemas.get_selection.shape,
-    async ({ fileKey }): Promise<ToolResult> => {
-      return renderResponse(() => node.send("get_selection", undefined, fileKey));
+    async ({ depth, detail, fileKey }): Promise<ToolResult> => {
+      const params: Record<string, unknown> = {};
+      if (depth !== undefined) params.depth = depth;
+      if (detail !== undefined) params.detail = detail;
+      return renderResponse(
+        () => node.sendWithParams("get_selection", undefined, params, fileKey),
+        { tool: "get_selection" }
+      );
     }
   );
 
   server.tool(
     "get_node",
-    "Get a specific Figma node by ID. Accepts top-level IDs like '4029:12345' and instance-child IDs like 'I12740:17806;12740:17793'. Never use hyphens. When multiple files are connected, specify fileKey.",
+    "Get a specific Figma node by ID, with its subtree. Accepts top-level IDs like '4029:12345' and instance-child IDs like 'I12740:17806;12740:17793'. Never use hyphens. The result is cut at 35000 characters, marked truncated, and a node it stopped at reports childCount. Use detail: \"full\" (default) for one component, and depth with detail: \"outline\" to map a large frame first. Children of an auto-layout frame report layoutSizing when they hug or fill. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_node.shape,
-    async ({ nodeId, fileKey }): Promise<ToolResult> => {
-      return renderResponse(() => node.send("get_node", [nodeId], fileKey));
+    async ({ nodeId, depth, detail, fileKey }): Promise<ToolResult> => {
+      const params: Record<string, unknown> = {};
+      if (depth !== undefined) params.depth = depth;
+      if (detail !== undefined) params.detail = detail;
+      return renderResponse(() => node.sendWithParams("get_node", [nodeId], params, fileKey), {
+        tool: "get_node",
+      });
     }
   );
 
@@ -122,15 +139,16 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "get_design_context",
-    "Get the design context for the current selection or page. Returns a summarized tree structure optimized for understanding the current design context. When multiple files are connected, specify fileKey.",
+    "Get the design context for the current selection or page. Returns a summarized tree structure optimized for understanding the current design context, depth levels deep (default 2). The result is cut at 35000 characters and then carries truncated and a note. When multiple files are connected, specify fileKey.",
     toolInputSchemas.get_design_context.shape,
     async ({ depth, fileKey }): Promise<ToolResult> => {
       const params: Record<string, unknown> = {};
       if (depth !== undefined && depth > 0) {
         params.depth = depth;
       }
-      return renderResponse(() =>
-        node.sendWithParams("get_design_context", undefined, params, fileKey)
+      return renderResponse(
+        () => node.sendWithParams("get_design_context", undefined, params, fileKey),
+        { tool: "get_design_context" }
       );
     }
   );

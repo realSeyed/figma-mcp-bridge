@@ -7,6 +7,34 @@ import { extensionRpcToArgs, extensionSchemas } from "./extensions/index.js";
  * @returns A Zod enum schema for export formats.
  */
 const createExportFormatSchema = () => z.enum(["PNG", "SVG", "JPG", "PDF"]);
+/**
+ * The depth of a budgeted read. A factory, as in `schema-common.ts`, so each
+ * tool gets its own copy and the listed schema holds no `$ref`.
+ * @param what - What the depth counts from, for the description.
+ * @returns The optional field.
+ */
+const createReadDepthSchema = (what: string) =>
+  z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      `How many levels below ${what} to list; 0 lists ${what} alone with its childCount. A node at the limit reports childCount in place of children. Lower is cheaper.`
+    );
+
+/**
+ * The detail of a budgeted read.
+ * @returns The optional field.
+ */
+const createReadDetailSchema = () =>
+  z
+    .enum(["full", "outline"])
+    .optional()
+    .describe(
+      "full (default) reports every style field, for one component. outline reports id, name, type, bounds, and the first 80 characters of a text, about a tenth of the size: use it to map a page."
+    );
+
 const textAlignHorizontal = z.enum(["LEFT", "CENTER", "RIGHT", "JUSTIFIED"]);
 const textAlignVertical = z.enum(["TOP", "CENTER", "BOTTOM"]);
 const textAutoResize = z.enum(["NONE", "WIDTH_AND_HEIGHT", "HEIGHT", "TRUNCATE"]);
@@ -567,10 +595,17 @@ export const toolInputSchemas = {
   ...extensionSchemas,
 
   get_document: z.object({
+    pageId: createFigmaNodeIdSchema()
+      .optional()
+      .describe("The page to read, defaulting to the current page. get_metadata lists the pages."),
+    depth: createReadDepthSchema("the page"),
+    detail: createReadDetailSchema(),
     fileKey: fileKeyField,
   }),
 
   get_selection: z.object({
+    depth: createReadDepthSchema("each selected node"),
+    detail: createReadDetailSchema(),
     fileKey: fileKeyField,
   }),
 
@@ -578,6 +613,8 @@ export const toolInputSchemas = {
     nodeId: createFigmaNodeIdSchema().describe(
       "The node ID to fetch. Accepts top-level IDs like '4029:12345' and instance-child IDs like 'I12740:17806;12740:17793'."
     ),
+    depth: createReadDepthSchema("the node"),
+    detail: createReadDetailSchema(),
     fileKey: fileKeyField,
   }),
 
@@ -592,6 +629,8 @@ export const toolInputSchemas = {
   get_design_context: z.object({
     depth: z
       .number()
+      .int()
+      .min(0)
       .optional()
       .describe("How many levels deep to traverse the node tree (default 2)"),
     fileKey: fileKeyField,
