@@ -4,9 +4,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { Harness } from "./helpers/harness.js";
 import { pngScreenshot, type PluginHandler } from "./helpers/plugin.js";
 import { postRpc } from "./helpers/rpc.js";
+import { SERVER_ENTRY, serverEnv } from "./helpers/server-process.js";
 
 const FILE_KEY = "stability-file";
 const NODE_ID = "1:1";
@@ -52,6 +54,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 interface Ping {
+  version: string;
   leaderStartedAt: string;
   files: Array<{ fileKey: string }>;
 }
@@ -321,6 +324,51 @@ describe("a lost leader", () => {
       expect(await read).toEqual({ ok: true, data: METADATA });
       expect(reads).toBe(2);
       expect(plugin.requests.filter((r) => r.type === "create_frame")).toHaveLength(1);
+    },
+    TIMEOUT_MS
+  );
+});
+
+describe("the standalone leader", () => {
+  test(
+    "serves a follower after the other client closes, and a second standalone exits with 1",
+    async () => {
+      const port = await h.freePort();
+      const standalone = await h.standalone({ port, cwd: await h.tempDir("cwd") });
+      const metadata = { fileName: "stability" };
+      await h.plugin({ port, fileKey: FILE_KEY, handlers: { get_metadata: () => metadata } });
+      const first = await start(port);
+      const second = await start(port);
+      expect([first.role, second.role]).toEqual(["FOLLOWER", "FOLLOWER"]);
+      const before = await ping(port);
+
+      // The MCP client of one follower ends; the leader is not its process.
+      await first.close();
+      expect(await second.callTool("get_metadata", { fileKey: FILE_KEY })).toEqual({
+        ok: true,
+        data: metadata,
+      });
+      expect((await ping(port)).leaderStartedAt).toBe(before.leaderStartedAt);
+      expect(second.stderr.join("\n")).not.toContain("Became LEADER");
+      expect(standalone.stderr.join("\n")).not.toContain("Shutting down");
+
+      // The variable starts a standalone leader too. It never follows.
+      const duplicate = spawnSync("node", [SERVER_ENTRY], {
+        env: serverEnv({
+          port,
+          env: {
+            FIGMA_BRIDGE_TOKEN_FILE: await h.tokenFile(),
+            FIGMA_BRIDGE_JOURNAL_FILE: await h.journalFile(),
+            FIGMA_BRIDGE_STANDALONE: "1",
+          },
+        }),
+        encoding: "utf8",
+        timeout: 15_000,
+      });
+      expect(duplicate.status).toBe(1);
+      expect(duplicate.stderr).toContain(`A bridge leader already listens on 127.0.0.1:${port}`);
+      expect(duplicate.stderr).toContain(`version ${before.version}`);
+      expect(duplicate.stderr).toContain(`leaderStartedAt ${before.leaderStartedAt}`);
     },
     TIMEOUT_MS
   );

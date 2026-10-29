@@ -5,6 +5,7 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,6 +22,7 @@ const STRIPPED_VARIABLES = [
   "FIGMA_BRIDGE_ROLE",
   "FIGMA_BRIDGE_REQUEST_TIMEOUT_MS",
   "FIGMA_BRIDGE_CONNECT_GRACE_MS",
+  "FIGMA_BRIDGE_STANDALONE",
 ];
 
 /** How long a process has to log its role. */
@@ -37,8 +39,8 @@ export interface ServerOptions {
    * removes the variable. `FIGMA_BRIDGE_OUTPUT_ROOT`,
    * `FIGMA_BRIDGE_TOKEN_FILE`, `FIGMA_BRIDGE_JOURNAL_FILE`,
    * `FIGMA_BRIDGE_DUMP_CHUNK_NODES`, `FIGMA_BRIDGE_JOURNAL_CHUNK_ENTRIES`,
-   * `FIGMA_BRIDGE_ROLE`, `FIGMA_BRIDGE_REQUEST_TIMEOUT_MS`, and
-   * `FIGMA_BRIDGE_CONNECT_GRACE_MS` are removed unless
+   * `FIGMA_BRIDGE_ROLE`, `FIGMA_BRIDGE_REQUEST_TIMEOUT_MS`,
+   * `FIGMA_BRIDGE_CONNECT_GRACE_MS`, and `FIGMA_BRIDGE_STANDALONE` are removed unless
    * they are given here, so a variable of the developer does not leak into a test.
    * `FIGMA_BRIDGE_TOKEN_FILE` and `FIGMA_BRIDGE_JOURNAL_FILE` are required: no
    * test reads the real token file or the real write journal.
@@ -166,6 +168,56 @@ export async function startServer(options: ServerOptions): Promise<ServerProcess
       }${log}`
     );
   }
+}
+
+/** A standalone leader: `node dist/index.js --standalone`, with no MCP client. */
+export interface StandaloneProcess {
+  /** Each line the process wrote to standard error. */
+  stderr: string[];
+  /** The exit code, when the process ends. */
+  exited: Promise<number | null>;
+  /** Stops the process with SIGTERM and waits for its end. */
+  close(): Promise<void>;
+}
+
+/**
+ * Starts a standalone leader with no standard input, and waits until it logs
+ * that it listens.
+ * @param options - Port, working directory, and environment changes.
+ * @returns The running process.
+ */
+export async function startStandalone(options: ServerOptions): Promise<StandaloneProcess> {
+  const child = spawn("node", [options.entry ?? SERVER_ENTRY, "--standalone"], {
+    cwd: options.cwd,
+    env: serverEnv(options),
+    // No standard input at all: a standalone leader must not stop at its end.
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  const stderr: string[] = [];
+  child.stderr.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split(/\r?\n/)) {
+      if (line.trim() !== "") stderr.push(line.trim());
+    }
+  });
+  const exited = new Promise<number | null>((done) => child.once("exit", (code) => done(code)));
+
+  const listening = `Standalone leader listening on 127.0.0.1:${options.port}`;
+  const deadline = Date.now() + ROLE_TIMEOUT_MS;
+  while (!stderr.some((line) => line.includes(listening))) {
+    if (child.exitCode !== null || Date.now() > deadline) {
+      child.kill();
+      throw new Error(`The standalone leader did not start:\n${stderr.join("\n")}`);
+    }
+    await new Promise((done) => setTimeout(done, 25));
+  }
+  return {
+    stderr,
+    exited,
+    async close() {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      await exited;
+    },
+  };
 }
 
 /**

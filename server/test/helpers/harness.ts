@@ -19,7 +19,13 @@ import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startServer, type ServerOptions, type ServerProcess } from "./server-process.js";
+import {
+  startServer,
+  startStandalone,
+  type ServerOptions,
+  type ServerProcess,
+  type StandaloneProcess,
+} from "./server-process.js";
 import { connectPlugin, type PluginOptions, type SimulatedPlugin } from "./plugin.js";
 
 /** The port of the production bridge. The harness never uses it. */
@@ -133,17 +139,33 @@ export class Harness {
    * @returns The running process.
    */
   async server(options: ServerOptions): Promise<ServerProcess> {
-    const server = await startServer({
-      ...options,
-      env: {
-        FIGMA_BRIDGE_TOKEN_FILE: await this.tokenFile(),
-        FIGMA_BRIDGE_JOURNAL_FILE: await this.journalFile(),
-        FIGMA_BRIDGE_CONNECT_GRACE_MS: "0",
-        ...options.env,
-      },
-    });
+    const server = await startServer({ ...options, env: await this.env(options.env) });
     this.defer(() => server.close());
     return server;
+  }
+
+  /**
+   * Starts `node dist/index.js --standalone` with the files of this harness,
+   * as `server` does, and waits until it listens. Stopped at cleanup.
+   * @param options - Port, working directory, and environment changes.
+   * @returns The running process.
+   */
+  async standalone(options: ServerOptions): Promise<StandaloneProcess> {
+    const leader = await startStandalone({ ...options, env: await this.env(options.env) });
+    this.defer(() => leader.close());
+    return leader;
+  }
+
+  /** The files of this harness and no grace, then the changes of the test. */
+  private async env(
+    changes: Record<string, string | undefined> = {}
+  ): Promise<Record<string, string | undefined>> {
+    return {
+      FIGMA_BRIDGE_TOKEN_FILE: await this.tokenFile(),
+      FIGMA_BRIDGE_JOURNAL_FILE: await this.journalFile(),
+      FIGMA_BRIDGE_CONNECT_GRACE_MS: "0",
+      ...changes,
+    };
   }
 
   /**

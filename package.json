@@ -10,7 +10,8 @@
     "format": "prettier --write --ignore-unknown .",
     "format:check": "prettier --check --ignore-unknown .",
     "check": "cd server && bun run build && cd ../plugin && bun run typecheck && bun run build && cd .. && bun run format:check",
-    "test": "cd server && bun run build && bun test && cd ../plugin && bun test"
+    "test": "cd server && bun run build && bun test && cd ../plugin && bun test",
+    "leader": "node server/dist/index.js --standalone"
   },
   "lint-staged": {
     "**/*": "prettier --write --ignore-unknown"
