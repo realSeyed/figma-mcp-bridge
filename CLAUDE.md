@@ -232,7 +232,8 @@ nothing. A dump adds no entry.
 | `plugin/src/main/serializer.ts`            | The node output of the read tools, and the base of the dump form.                                                      |
 | `plugin/src/main/dump.ts`                  | The dump form of a node: the read form, the hidden content, and the added fields.                                      |
 | `plugin/src/main/reads.ts`                 | The budgeted reads: one walk with `depth` and `detail`, the cut, the note.                                             |
-| `plugin/src/main/shared.ts`                | Shared helpers: node lookup, colors, fonts, position, variable values.                                                 |
+| `plugin/src/main/shared.ts`                | Shared helpers: node lookup, colors, fonts (cached list, `resolveFont`), text styles, position, variable values.       |
+| `plugin/src/main/layout.ts`                | The order of a create, the child-layout fields and their rules, `finishOrRemove`, and the result of a create.          |
 | `plugin/src/main/extensions/types.ts`      | The `ExtensionHandler` type.                                                                                           |
 | `plugin/src/main/extensions/index.ts`      | Merges the area maps. Exports `ExtensionRequestType`.                                                                  |
 | `plugin/src/main/extensions/batch.ts`      | Shared batch helpers: param reading, error wording, the two phases of a batch.                                         |
@@ -241,6 +242,7 @@ nothing. A dump adds no entry.
 | `plugin/src/main/extensions/components.ts` | Component and component set handlers.                                                                                  |
 | `plugin/src/main/extensions/sections.ts`   | Section handlers.                                                                                                      |
 | `plugin/src/main/extensions/paints.ts`     | Paint handlers: `clear_paints`.                                                                                        |
+| `plugin/src/main/extensions/assets.ts`     | Asset handlers: `set_image_fill`, `create_svg`.                                                                        |
 | `plugin/src/main/extensions/dumps.ts`      | `dump_nodes_chunk`, the internal chunk command of a dump.                                                              |
 | `plugin/src/main/extensions/discovery.ts`  | `find_nodes` and `get_design_system`.                                                                                  |
 | `plugin/src/main/extensions/e2e.ts`        | `e2e_fixture`, the test helper that builds the conformance fixture parts no tool writes.                               |
@@ -255,21 +257,23 @@ nothing. A dump adds no entry.
 | `server/src/timeouts.ts`                   | The time of each request type, the time of a follower, and the connect grace.                                          |
 | `server/src/diagnostics.ts`                | The diagnostics log: the event lines, the rotation, and the last events for `health`.                                  |
 | `server/src/captures.ts`                   | `save_screenshots`: the plan, the captures, the manifest. The image blocks of `get_screenshot`.                        |
-| `server/src/image-size.ts`                 | The pixel size of a PNG or a JPG, read from its header. Imports nothing.                                               |
+| `server/src/image-size.ts`                 | The pixel size of a PNG, a JPG, or a GIF, read from its header. Imports nothing.                                       |
+| `server/src/image-source.ts`               | The image sources of `create_image` and `set_image_fill`: URL, data URI, the local folders, the format and size check. |
 | `server/src/identity.ts`                   | File selection and the identity of one file, for the manifests. Imports types only.                                    |
 | `server/src/build-info.ts`                 | `BRIDGE_COMMIT`, read from `dist/build-info.json`.                                                                     |
 | `server/scripts/write-build-info.mjs`      | The build step that writes `dist/build-info.json`.                                                                     |
 | `plugin/build-identity.ts`                 | The plugin build identifier. Both Vite configurations import it.                                                       |
-| `server/src/schema-common.ts`              | `createFigmaNodeIdSchema`, `createHexColorSchema`, `fileKeyField`.                                                     |
+| `server/src/schema-common.ts`              | `createFigmaNodeIdSchema`, `createHexColorSchema`, `createParentIdSchema`, `createChildLayoutFields`, `fileKeyField`.  |
 | `server/src/tools.ts`                      | `registerTools` of the core tools.                                                                                     |
 | `server/src/tool-helpers.ts`               | `renderResponse`, `parseToolInput`, the `ToolResult` type.                                                             |
-| `server/src/extensions/types.ts`           | The area file types.                                                                                                   |
-| `server/src/extensions/index.ts`           | Merges `schemas`, `rpcToArgs`, and `register`.                                                                         |
+| `server/src/extensions/types.ts`           | The area file types, `ExtensionRpcSchemaMap` included.                                                                 |
+| `server/src/extensions/index.ts`           | Merges `schemas`, `rpcSchemas`, `rpcToArgs`, and `register`.                                                           |
 | `server/src/extensions/variables.ts`       | Variable and variable collection tools.                                                                                |
 | `server/src/extensions/typography.ts`      | Text style tools.                                                                                                      |
 | `server/src/extensions/components.ts`      | Component and component set tools.                                                                                     |
 | `server/src/extensions/sections.ts`        | Section tools.                                                                                                         |
 | `server/src/extensions/paints.ts`          | Paint tools: `clear_paints`.                                                                                           |
+| `server/src/extensions/assets.ts`          | Asset tools: `set_image_fill` (with its wire schema in `rpcSchemas`) and `create_svg`.                                 |
 | `server/src/extensions/dumps.ts`           | `dump_nodes`: the chunk loop, `TreeBuilder`, the files, and the manifest.                                              |
 | `server/src/extensions/journal.ts`         | `dump_journal`: the chunk loop, the chain check, the files, and the manifest.                                          |
 | `server/src/extensions/discovery.ts`       | `find_nodes` and `get_design_system`: the schemas and the registration.                                                |
@@ -279,7 +283,7 @@ nothing. A dump adds no entry.
 | `server/scripts/golden/`                   | The golden dump of the conformance fixture. Synthetic data from the test file only.                                    |
 | `server/test/`                             | `bun test` tests. Real server processes against a simulated plugin. Helpers in `helpers/`.                             |
 | `plugin/test/`                             | `bun test` tests of the serializer, the dump form, the chunk walk, the queue, `handleRequest`. Synthetic nodes.        |
-| `plugin/test/helpers/fake-figma.ts`        | A fake file: pages, selection, lookup, search, `exportAsync`, variables, styles. Generic, for reads and writes.        |
+| `plugin/test/helpers/fake-figma.ts`        | A fake file for reads (pages, lookup, search, exports, variables, styles); `writes` adds creates and layout rules.     |
 | `.github/workflows/ci.yml`                 | CI for each pull request and each push to `main`: check, tests, toolset tests, on Ubuntu and Windows.                  |
 | `tools/audit/`                             | The audit toolset in Python 3.11, standard library only. `README.md` holds its rules.                                  |
 | `tools/audit/auditlib/`                    | `dumps.py` (both formats, the visible projection), `manifest.py`, `outputs.py`, `config.py`, `paths.py`, `toolset.py`. |
@@ -298,9 +302,10 @@ repository. Its figures use the visible projection of a dump, the projection of
 
 An extension file must not import `schema.ts` or `tools.ts`; this prevents an import cycle.
 It imports only `schema-common.ts`, `tool-helpers.ts`, `output-root.ts`, `identity.ts`,
-`evidence.ts`, packages, and types; `output-root.ts`, `identity.ts`, and `evidence.ts`
-import neither `schema.ts` nor `tools.ts`. `evidence.ts` imports only Node built-in modules,
-`output-root.ts`, and `identity.ts`.
+`evidence.ts`, `image-source.ts`, packages, and types; `output-root.ts`, `identity.ts`,
+`evidence.ts`, and `image-source.ts` import neither `schema.ts` nor `tools.ts`. `evidence.ts`
+imports only Node built-in modules, `output-root.ts`, and `identity.ts`. `image-source.ts`
+imports only Node built-in modules, `image-size.ts`, and `output-root.ts`.
 
 ## 5. Tool recipe
 
@@ -309,8 +314,13 @@ import neither `schema.ts` nor `tools.ts`. `evidence.ts` imports only Node built
    For a refinement keep a plain object for `.shape` and a refined schema for the parse, as
    `createTextShape` and `createTextInput` in `schema.ts` do.
 3. Server: add the mapper to `rpcToArgs` of the area file.
-4. Server: register it in `register`, with `parseToolInput`, `renderResponse`, and `node.sendWithParams`.
-5. README: add one row to the table "Available Tools".
+4. Server: if the handler rewrites the params before it sends them (for example, it loads a
+   `source` into base64 bytes), add the schema of the sent params to `rpcSchemas` of the area
+   file. `extensions/index.ts` merges it into `rpcInputSchemas` of `schema.ts`, and the leader
+   validates each `/rpc` request of that tool against it. Without an entry it validates
+   against the schema of step 2, which then refuses each call of a follower.
+5. Server: register it in `register`, with `parseToolInput`, `renderResponse`, and `node.sendWithParams`.
+6. README: add one row to the table "Available Tools".
 
 ## 6. Conventions
 
@@ -360,6 +370,20 @@ mimeType }`), never base64 in text. A capture that is large or that serves as ev
     not on the list is recorded as a write, which is the safe failure.
 20. A new request type that needs more than 60 s adds a row to `REQUEST_TIMEOUTS_MS` in
     `server/src/timeouts.ts`. The plugin queue and the follower take their times from it.
+21. A create tool validates before it creates: the parent (`findParent`), the fonts
+    (`resolveFont`), the text style, the image, and the child-layout fields
+    (`checkChildLayout`), all in `plugin/src/main/layout.ts` and `shared.ts`. It makes the
+    node only when each check passes, and runs each later step inside `finishOrRemove`, which
+    removes the node and throws again when Figma refuses a step. A refused create leaves no
+    node. Inside the switch of `code.ts`, write `return await finishOrRemove(...)`: without
+    `await`, the rejection escapes the `try` of `runRequest`.
+22. A create applies its fields in one order: validate; create; name, `resize`, paints, corner
+    radius, clip; the own auto layout of the node; insert into the parent at `index`, else
+    on top; `layoutPositioning`; `layoutSizingHorizontal` and `layoutSizingVertical`; the min
+    and max sizes; for a text, `textAutoResize`; `x` and `y`. A set tool applies the size
+    before the sizing modes and before `textAutoResize`, and `x` and `y` last. A create
+    returns `describeCreated` (`layout.ts`), and a set tool reports `applied` values read back
+    from the node.
 
 ## 7. Commands
 
@@ -418,8 +442,8 @@ entries that one `dump_journal_chunk` request asks for, an integer of 1 or more.
 is 500. The harness removes it too. Do not document it in the README.
 
 `FIGMA_BRIDGE_REQUEST_TIMEOUT_MS`, `FIGMA_BRIDGE_CONNECT_GRACE_MS`, `FIGMA_BRIDGE_STANDALONE`,
-`FIGMA_BRIDGE_LOG_FILE` and `FIGMA_BRIDGE_MAX_RESULT_CHARS` are settings of the owner, and the
-README documents them. The harness removes each of them from a test process unless the test
+`FIGMA_BRIDGE_LOG_FILE`, `FIGMA_BRIDGE_MAX_RESULT_CHARS` and `FIGMA_BRIDGE_ASSET_ROOT` are
+settings of the owner, and the README documents them. The harness removes each of them from a test process unless the test
 gives it, sets the grace to `0`, and sets the log file to a temporary file of the harness. `serverEnv` refuses a process
 without a token file, a journal file, or a log file. A test that runs a module that logs in
 the test process itself sets `FIGMA_BRIDGE_LOG_FILE` first.
