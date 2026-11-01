@@ -5,6 +5,8 @@
 - [Fork scope: free Figma plan](#fork-scope-free-figma-plan)
 - [Demo](#demo)
 - [Quick Start](#quick-start)
+- [Recommended workflow](#recommended-workflow)
+- [Troubleshooting](#troubleshooting)
 - [Available Tools](#available-tools)
 - [Reading Notes](#reading-notes)
 - [Local development](#local-development)
@@ -82,9 +84,23 @@ cd server && bun install && bun run build && cd ..
 cd plugin && bun install && bun run build && cd ..
 ```
 
-### 2. Add the MCP server to your favourite AI tool
+### 2. Start a leader in its own terminal
 
-Point your AI tool (Cursor, Windsurf, Claude Code, Claude Desktop) at the server you just built, using an absolute path:
+```bash
+bun run leader
+```
+
+The standalone leader holds the plugin connection and the [write journal](#the-write-journal), and runs until you stop it with Ctrl+C. Each MCP client then starts as a follower, so closing one client never stops the bridge under another. Without it, the first MCP client to start is the leader. See [A standalone leader](#a-standalone-leader).
+
+### 3. Add the MCP server to your AI tool
+
+Point your AI tool at the server you just built, with an absolute path. In Claude Code:
+
+```bash
+claude mcp add figma-bridge -- node /path/to/figma-mcp-bridge/server/dist/index.js
+```
+
+In Cursor, Windsurf, or Claude Desktop:
 
 ```json
 {
@@ -95,23 +111,66 @@ Point your AI tool (Cursor, Windsurf, Claude Code, Claude Desktop) at the server
 }
 ```
 
-In Claude Code that is:
+In Gemini CLI, in `.gemini/settings.json` or `~/.gemini/settings.json`:
 
-```bash
-claude mcp add figma-bridge -- node /path/to/figma-mcp-bridge/server/dist/index.js
+```json
+{
+  "mcpServers": {
+    "figma-bridge": {
+      "command": "node",
+      "args": ["/path/to/figma-mcp-bridge/server/dist/index.js"],
+      "trust": true,
+      "timeout": 600000,
+      "env": { "FIGMA_BRIDGE_TOOLSET": "design" }
+    }
+  }
+}
 ```
 
-### 3. Add the Figma plugin
+- `trust: true` skips the confirmation of each tool call. `timeout` is in milliseconds: a `batch` of 100 ops can take minutes.
+- `FIGMA_BRIDGE_TOOLSET: "design"` gives the model the tools that build a design and leaves the audit and beta tools out (see [Tool sets](#tool-sets)).
+- Gemini CLI loads the MCP servers of a project settings file only in a trusted folder. Trust the folder when Gemini CLI asks, or put the entry in `~/.gemini/settings.json`.
+- Gemini CLI cuts a text result over 40,000 characters (`tools.truncateToolOutputThreshold`) to its first and last part. The bridge keeps each result under 38,000 (`FIGMA_BRIDGE_MAX_RESULT_CHARS`), so the default needs nothing. If you lower the threshold, set `FIGMA_BRIDGE_MAX_RESULT_CHARS` at least 100 below it.
+
+The server gives each client its own instructions (see [Recommended workflow](#recommended-workflow)), and Gemini CLI shows the `design_session` prompt as the `/design_session` command.
+
+### 4. Add the Figma plugin
 
 In Figma go to `Plugins > Development > Import plugin from manifest` and select `plugin/manifest.json` from this checkout. The plugin appears as **Figma MCP Bridge (Fork)**.
 
-### 4. Start using it 🎉
+### 5. Start using it 🎉
 
-Open a Figma file, run the plugin, and start prompting your AI tool. The MCP server will automatically connect to the plugin.
+Keep the Figma desktop app open, with the plugin running in one file. Then prompt your AI tool; the MCP server connects to the plugin by itself. Running another plugin in that file closes this one: run it again before the next call.
 
-To work across multiple files, just open the plugin in each Figma file. The bridge keeps all connections active and your AI agent can target any of them by `fileKey`.
+To work across multiple files, open the plugin in each Figma file. The bridge keeps all connections active and your AI agent can target any of them by `fileKey`.
 
 If you want to know more about how it works, read the [How it works](#how-it-works) section.
+
+## Recommended workflow
+
+The server tells its client how to work: each MCP client gets the server `instructions`, which Gemini CLI and Claude Code add to the system instructions of the model. In short:
+
+1. **Start.** `list_files` (pass `fileKey` on every call when several files are connected), `get_design_system` for the variables, the text styles and the components, and `find_nodes` to locate a target. Read with `get_node` and `detail: "outline"` with a `depth`, never a whole page in full.
+2. **Build with `batch`**, one component or one page section per batch, with `{ "ref": "<op id>" }` for the IDs of new nodes and a `batchId` on every batch, so that a retry is safe. Never send writes in parallel: put them in one batch, or make the client wait for each one (`wait_for_previous` in Gemini CLI).
+3. **Pass `parentId`** on every create, and name each node `Area/Thing` (`Card/Title`, `PLP/Grid`), so that `find_nodes` finds it after the context is lost.
+4. **Auto layout.** A container is a `create_frame` with `layoutMode`, `padding`, `itemSpacing` and its sizing; its children take `layoutSizingHorizontal: "FILL"`; a text takes a width or `FILL` and `textAutoResize: "HEIGHT"`; a badge takes `layoutPositioning: "ABSOLUTE"`; a grid is a `HORIZONTAL` frame with `layoutWrap: "WRAP"`.
+5. **Design system first:** variables bound with `bind_variables`, text styles, components (`create_component`, `combine_as_variants`, `add_component_property`, `bind_component_property`), then instances (`create_instance`, `set_instance_properties` with `[{ "name": "Title", "value": "Mug" }]`).
+6. **Images:** `set_image_fill` with a PNG or JPEG of at most 4,096 pixels a side; items with the same source load it one time, and the `imageHash` it returns puts the same image elsewhere. `create_instance` returns the `children` of the new instance, so `{ "ref": "card", "path": "children.0.id" }` names its image layer. Icons: `create_svg`.
+7. **Verify** with `get_screenshot` of the changed component or section, not of the page.
+8. **Recover:** "may or may not be in the file" means look with `find_nodes` or `get_node` before a retry; "No plugin connected" means run the plugin again; a validation error lists every bad item, so correct all of them; a result-size error means narrow the read.
+
+The `design_session` prompt (the `/design_session` command in Gemini CLI) adds the order of work for an e-commerce design: tokens, the type ramp, the primitives (Button, Input, Badge, Price, Rating, Icon), the composites (ProductCard, CartItem, Nav, Footer), the templates at 375, 768 and 1440 pixels, then the pages (PLP, PDP, Cart, Checkout, Account, Admin) section by section; the names; a checklist for each step; and the recovery rules. A process with the auditor role gets instructions for a review instead, and no prompt.
+
+### Tool sets
+
+`FIGMA_BRIDGE_TOOLSET` picks the tools a process registers:
+
+| Value            | Tools                                                                                                                                                                                                                                                           |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| unset, or `full` | Every tool. An existing MCP configuration keeps working.                                                                                                                                                                                                        |
+| `design`         | Every tool but the seven beta motion tools, `dump_nodes`, `dump_journal`, `save_screenshots`, `import_html_layers`, `get_design_context` (`get_node` with `depth` replaces it) and `set_selection`. Each turn of the model then carries fewer tool definitions. |
+
+Any other value stops the process at start. The [auditor role](#the-auditor-role) ignores the variable and says so in one line. The `batch` tool lists only the tools of its own process.
 
 ## Audit configuration
 
@@ -162,7 +221,7 @@ The leader listens on `127.0.0.1` only, and `/rpc` runs a tool only for a reques
 | Endpoint | Used by                    | Rules                                                                                                                                                                                                                                                                                                                  |
 | -------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/ws`    | the plugin                 | WebSocket upgrade. Reachable from this machine only, through the bind on `127.0.0.1`. The plugin names its `fileKey`.                                                                                                                                                                                                  |
-| `/ping`  | discovery, leader election | `GET`. Open to each local caller; it needs no token. Answers `{ status, version, bridgeCommit, leaderStartedAt, files, journal, health }`; see [Instrument identity](#instrument-identity) and [Troubleshooting a session](#troubleshooting-a-session).                                                                |
+| `/ping`  | discovery, leader election | `GET`. Open to each local caller; it needs no token. Answers `{ status, version, bridgeCommit, leaderStartedAt, files, journal, health }`; see [Instrument identity](#instrument-identity) and [Troubleshooting](#troubleshooting).                                                                                    |
 | `/rpc`   | follower server processes  | `POST` only. Needs `Content-Type: application/json` (a `charset` parameter is allowed), else 415. Needs `Authorization: Bearer <token>`, else 401. A wrong token gets 403. Each other method gets 405. A request with `X-Figma-Bridge-Role: auditor` may call the tools of [the auditor role](#the-auditor-role) only. |
 
 The leader checks the headers before it reads the body, so a refused request runs no tool. No answer carries an `Access-Control-Allow-*` header: a browser page must send a preflight for a cross-origin JSON POST, and the leader refuses the preflight.
@@ -227,7 +286,7 @@ An audit counts only if the instrument did not change while it ran. `/ping` and 
 | `pluginBuild`     | The build of the plugin that holds the connection: `<commit>[-dirty]+<16 hexadecimal characters>`. The characters are a SHA-256 over `plugin/src/`, the manifest, the lock file, and the Vite configurations. `unknown` for an older plugin. |
 | `epoch`           | A counter for each `fileKey`. It grows by 1 at each plugin connection for that key, also a connection that replaces a live one. A disconnect keeps it. A read never changes it.                                                              |
 | `journal`         | The state of the [write journal](#the-write-journal) of the leader. A follower passes it on. `null` when the leader runs an older build that has no journal.                                                                                 |
-| `health`          | The last events of the leader, the requests at a plugin, and the warnings; see [Troubleshooting a session](#troubleshooting-a-session). A follower passes it on and adds a warning when its build is not the build of the leader.            |
+| `health`          | The last events of the leader, the requests at a plugin, and the warnings; see [Troubleshooting](#troubleshooting). A follower passes it on and adds a warning when its build is not the build of the leader.                                |
 
 Both build values are written at build time: the server build writes `server/dist/build-info.json`, and the plugin build puts the identifier into the window and the main code. The window shows the plugin build in small text, so the owner can compare it with what `list_files` reports. Rebuild with `bun run check` before a live run: a process of an older build reports an older commit.
 
@@ -340,10 +399,11 @@ This runs `node server/dist/index.js --standalone`. Each MCP client then starts 
 | `FIGMA_BRIDGE_LOG_FILE`           | The diagnostics log of this process. The processes of one install can share it.                                                                                                                                                                                          | `bridge.log` in the folder of the default token file.                        |
 | `FIGMA_BRIDGE_MAX_RESULT_CHARS`   | The most characters of JSON text one tool result hands an agent. A read over it is an error with a way to narrow the call; a write over it succeeds with `resultOmitted`. An integer of 1 or more.                                                                       | `38000`                                                                      |
 | `FIGMA_BRIDGE_ASSET_ROOT`         | One or more folders, separated by `;` on Windows and `:` elsewhere, that `create_image` and `set_image_fill` may read a local image from, besides the working directory and the output root. Checked by real path at each call; a folder that does not exist is skipped. | None: local images come from the working directory and the output root only. |
+| `FIGMA_BRIDGE_TOOLSET`            | The tools this process registers: `full`, or `design` for the tools that build a design (see [Tool sets](#tool-sets)). The auditor role ignores it.                                                                                                                      | `full`                                                                       |
 
 A value that is not allowed stops the process at start, with an error that names the variable.
 
-### Troubleshooting a session
+## Troubleshooting
 
 `list_files` and `/ping` report `health`:
 
@@ -367,95 +427,155 @@ Each server process also appends one JSON line for each event to `bridge.log` in
 tail -n 50 "$APPDATA/figma-mcp-bridge/bridge.log"
 ```
 
-| The error holds                                        | What happened                                                     | What to do                                                                                                            |
-| ------------------------------------------------------ | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `No plugin connected for "<file>" (it disconnected …)` | The plugin of that file did not connect again within the grace.   | Run Plugins › Development › Figma MCP Bridge (Fork) in that file, then retry. Running another plugin closes this one. |
-| `timed out: no answer from the Figma plugin`           | The plugin is busy or frozen. A write may still complete.         | Check the file with `get_node`, then retry. If it repeats, run the plugin again.                                      |
-| `may or may not be in the Figma file`                  | The leader exited, or the plugin disconnected, while a write ran. | Check the file with `get_node` before you retry.                                                                      |
-| `the write journal … is broken`                        | The journal failed its check, or an append failed.                | See [the write journal](#the-write-journal).                                                                          |
+| The error holds                                                  | What happened                                                       | What to do                                                                                                            |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `No plugin connected for "<file>" (it disconnected …)`           | The plugin of that file did not connect again within the grace.     | Run Plugins › Development › Figma MCP Bridge (Fork) in that file, then retry. Running another plugin closes this one. |
+| `timed out: no answer from the Figma plugin`                     | The plugin is busy or frozen. A write may still complete.           | Check the file with `get_node`, then retry. If it repeats, run the plugin again.                                      |
+| `may or may not be in the Figma file`                            | The leader exited, or the plugin disconnected, while a write ran.   | Check the file with `get_node` before you retry.                                                                      |
+| `the write journal … is broken`                                  | The journal failed its check, or an append failed.                  | See [the write journal](#the-write-journal).                                                                          |
+| `more than a tool result may hand an agent`                      | A read would return more than `FIGMA_BRIDGE_MAX_RESULT_CHARS`.      | Narrow the read: `detail: "outline"`, `depth`, `withinId`, `query`, or `limit`, or use `find_nodes`.                  |
+| `Input validation error` or `wrote nothing. Correct these items` | An argument, or one item of a list, is wrong. Nothing was written.  | Correct every item the error lists and send the call again.                                                           |
+| `batch ran nothing`                                              | An op of a batch is wrong, or a `batchId` came back with other ops. | Correct each op it names; give a new `batchId` for a new batch.                                                       |
+| `not run: the batch stopped at ops[<n>]`                         | An op failed. With `rollback`, the batch deleted the nodes it made. | Correct `ops[<n>]` and send the batch again with a new `batchId`.                                                     |
+
+A tool that the model does not see: check `FIGMA_BRIDGE_TOOLSET` (the `design` set leaves some out, see [Tool sets](#tool-sets)) and the role of the process. In Gemini CLI, `/mcp` lists the server, its tools, and the `design_session` prompt.
 
 ## Available Tools
 
-| Tool                           | Description                                                                                                                                                                                                                                                                                          |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list_files`                   | List the connected Figma files and the identity of the bridge: `bridgeCommit`, `leaderCommit`, `leaderStartedAt`, for each file `fileKey`, `fileName`, `pluginBuild`, `epoch` (see [Instrument identity](#instrument-identity)), and `journal`, the state of the [write journal](#the-write-journal) |
-| `get_document`                 | Get the node tree of the current page, or of `pageId`, within 35,000 characters. `depth` and `detail: "outline"` map a big page cheaply (see [Reading Notes](#reading-notes))                                                                                                                        |
-| `get_selection`                | Get the currently selected nodes in Figma, all within one budget of 35,000 characters; takes `depth` and `detail`                                                                                                                                                                                    |
-| `get_node`                     | Get a specific Figma node by ID (colon format, e.g. `4029:12345`), within 35,000 characters; takes `depth` and `detail`                                                                                                                                                                              |
-| `get_styles`                   | Get all local paint, text, effect, and grid styles                                                                                                                                                                                                                                                   |
-| `get_metadata`                 | Get file name, pages, and current page info                                                                                                                                                                                                                                                          |
-| `get_design_context`           | Get a depth-limited tree optimized for understanding design context, within 35,000 characters                                                                                                                                                                                                        |
-| `get_variable_defs`            | Get variable collections with their default mode, and every variable with its scopes, description, and values; `collectionId` and `query` narrow it                                                                                                                                                  |
-| `find_nodes`                   | Find nodes by a part of their name, by type, or both, on the current page, in one node, or in the whole file, and return their IDs, parents, and bounds                                                                                                                                              |
-| `get_design_system`            | Read the variables (default-mode values), the text, paint and effect styles, and the local components of the file in one compact call                                                                                                                                                                |
-| `get_screenshot`               | Export 1 to 4 nodes for a quick look. A PNG or JPG is fitted to `maxEdge` (default 1,024 pixels) and comes back as an image block; a short SVG comes back as markup text; a PDF or anything larger is an error that points to `save_screenshots` (see [Captures](#captures))                         |
-| `save_screenshots`             | Export screenshots, save them under the output root, and return a manifest with the path, bytes, SHA-256, pixel size, and scale of each capture, never image data (see [Captures](#captures))                                                                                                        |
-| `dump_nodes`                   | Write the complete subtree of each root, hidden content included, as canonical JSON under the output root, and return only a manifest (see [Dumps](#dumps))                                                                                                                                          |
-| `dump_journal`                 | Write the whole write journal of the leader as canonical JSON under the output root, and return only a manifest with the entry count and the head. Adds no entry (see [The write journal](#the-write-journal))                                                                                       |
-| `get_motion_styles`            | List all available animation presets (beta)                                                                                                                                                                                                                                                          |
-| `get_node_motion`              | Read a node's current animation styles and properties (beta)                                                                                                                                                                                                                                         |
-| `apply_animation_style`        | Apply a preset animation style to a node (beta)                                                                                                                                                                                                                                                      |
-| `remove_animation_style`       | Remove an applied animation style from a node (beta)                                                                                                                                                                                                                                                 |
-| `apply_manual_keyframe_track`  | Apply a manual keyframe track to a node property (beta)                                                                                                                                                                                                                                              |
-| `remove_manual_keyframe_track` | Remove a manual keyframe track from a node property (beta)                                                                                                                                                                                                                                           |
-| `set_timeline_duration`        | Set the duration of a timeline in seconds (beta)                                                                                                                                                                                                                                                     |
-| `set_node_visibility`          | Show or hide specific nodes                                                                                                                                                                                                                                                                          |
-| `set_text_content`             | Replace the contents of a text node                                                                                                                                                                                                                                                                  |
-| `set_text_properties`          | Patch font, size, alignment, auto-resize, color, and bounds on a text node. The size goes before `textAutoResize`, and a font the file lacks is refused with the closest families                                                                                                                    |
-| `set_node_properties`          | Patch name, position, size, visibility, opacity, corner radius, clipping, and the child layout: `layoutSizingHorizontal`, `layoutSizingVertical`, `layoutPositioning`, min and max sizes, and `index`                                                                                                |
-| `set_solid_fill`               | Replace a node's fill or stroke with a single solid paint                                                                                                                                                                                                                                            |
-| `set_gradient_fill`            | Replace a node's fill or stroke with a linear/radial/angular/diamond gradient                                                                                                                                                                                                                        |
-| `clear_paints`                 | Set the fills or the strokes of up to 200 nodes to an empty list, and report the paints that were there                                                                                                                                                                                              |
-| `set_effects`                  | Replace a node's effects list (drop/inner shadows, layer/background blurs)                                                                                                                                                                                                                           |
-| `set_stroke_properties`        | Patch stroke weight, align, dash pattern, cap, and join                                                                                                                                                                                                                                              |
-| `set_auto_layout`              | Configure auto-layout direction, padding (with a `padding` shorthand), gap, alignment, sizing, and wrap                                                                                                                                                                                              |
-| `create_page`                  | Create a new page in the document, optionally switching to it                                                                                                                                                                                                                                        |
-| `create_frame`                 | Create a frame with its own auto layout, padding, gap, stroke, corner radius, and clipping, plus the child-layout fields and `index`, so one call makes a card or a row                                                                                                                              |
-| `create_text`                  | Create a text node with a font or a `textStyleId`. A `width` without a `height` wraps the text (`textAutoResize: "HEIGHT"`)                                                                                                                                                                          |
-| `create_shape`                 | Create a rectangle, ellipse, or line, with the child-layout fields and `index`                                                                                                                                                                                                                       |
-| `create_image`                 | Create an image-backed rectangle from a URL, a data URI, or a local path: a PNG, JPEG, or GIF of at most 4,096 pixels a side                                                                                                                                                                         |
-| `set_image_fill`               | Fill up to 50 existing nodes, instance layers included, with an image from a source or a reused `imageHash`                                                                                                                                                                                          |
-| `create_svg`                   | Place an SVG icon as a vector frame, scaled by `width` or `height`, with the child-layout fields and `index`                                                                                                                                                                                         |
-| `import_html_layers`           | Bulk-import an html-figma layer tree (JSON) as frames, text, rectangles, and vectors                                                                                                                                                                                                                 |
-| `duplicate_nodes`              | Duplicate nodes in place — each copy lands in its source's parent, directly above it                                                                                                                                                                                                                 |
-| `reparent_nodes`               | Move nodes into another parent                                                                                                                                                                                                                                                                       |
-| `group_nodes`                  | Wrap a list of nodes (sharing a parent) in a new group                                                                                                                                                                                                                                               |
-| `ungroup_node`                 | Ungroup a group, a frame, or a section — children move up to its parent                                                                                                                                                                                                                              |
-| `set_selection`                | Set the page selection to a list of node IDs (works in Dev Mode)                                                                                                                                                                                                                                     |
-| `scroll_and_zoom_into_view`    | Frame the viewport around the given nodes (works in Dev Mode)                                                                                                                                                                                                                                        |
-| `delete_nodes`                 | Delete nodes with explicit confirmation                                                                                                                                                                                                                                                              |
-| `create_variable_collection`   | Create a variable collection for design tokens (one mode on a free plan)                                                                                                                                                                                                                             |
-| `update_variable_collection`   | Rename a variable collection                                                                                                                                                                                                                                                                         |
-| `delete_variable_collection`   | Delete a variable collection and every variable in it, with explicit confirmation                                                                                                                                                                                                                    |
-| `create_variables`             | Create up to 200 variables in one collection with values, aliases, scopes                                                                                                                                                                                                                            |
-| `update_variables`             | Change the name, value, scopes, or description of up to 200 variables                                                                                                                                                                                                                                |
-| `delete_variables`             | Delete up to 200 variables and report what aliased each one, with explicit confirmation                                                                                                                                                                                                              |
-| `bind_variables`               | Bind variables to node fields such as `fills`, `itemSpacing`, or `characters`, or remove a binding                                                                                                                                                                                                   |
-| `list_fonts`                   | List the fonts Figma can use, grouped by family                                                                                                                                                                                                                                                      |
-| `create_text_style`            | Create a local text style, optionally with variables driving its fields                                                                                                                                                                                                                              |
-| `update_text_style`            | Change the name, font, metrics, or bound variables of a text style                                                                                                                                                                                                                                   |
-| `delete_text_style`            | Delete a text style with explicit confirmation                                                                                                                                                                                                                                                       |
-| `apply_text_style`             | Apply a text style to up to 200 text nodes, or to one range of characters                                                                                                                                                                                                                            |
-| `list_components`              | List the local components and component sets of a page, of one section, or of the whole file                                                                                                                                                                                                         |
-| `get_component`                | Read one component or component set: its properties, its variants, and its default variant                                                                                                                                                                                                           |
-| `get_instance`                 | Read one instance: its main component, its property values, and its overrides                                                                                                                                                                                                                        |
-| `create_component`             | Create a local component, by converting a node or from a width and a height                                                                                                                                                                                                                          |
-| `combine_as_variants`          | Combine 2 to 50 components into one component set, laid out in a row or a column                                                                                                                                                                                                                     |
-| `create_instance`              | Create an instance of a component, or of one variant of a component set                                                                                                                                                                                                                              |
-| `swap_instance`                | Point an instance at another component or variant, in place                                                                                                                                                                                                                                          |
-| `detach_instance`              | Turn up to 200 instances into plain frames                                                                                                                                                                                                                                                           |
-| `add_component_property`       | Add a BOOLEAN, TEXT, INSTANCE_SWAP, or VARIANT property to a component or a component set                                                                                                                                                                                                            |
-| `edit_component_property`      | Rename a component property, or change its default value or its preferred values                                                                                                                                                                                                                     |
-| `delete_component_property`    | Delete a component property with explicit confirmation                                                                                                                                                                                                                                               |
-| `bind_component_property`      | Point a layer's `characters`, `visible`, or `mainComponent` at a component property, or remove the link                                                                                                                                                                                              |
-| `set_instance_properties`      | Set the property values of one instance, including which variant of a set it is                                                                                                                                                                                                                      |
-| `list_sections`                | List the sections of the current page or of the whole file, with their nesting                                                                                                                                                                                                                       |
-| `get_section`                  | Read one section: its children, where its content really sits, and what hangs outside it                                                                                                                                                                                                             |
-| `create_section`               | Create a section, empty at a given size or wrapped around nodes that are already there                                                                                                                                                                                                               |
-| `move_to_section`              | Move nodes into a section without moving them on the canvas, and optionally fit it around them                                                                                                                                                                                                       |
-| `move_out_of_section`          | Lift nodes out of their section to whatever holds it, without moving them on the canvas                                                                                                                                                                                                              |
-| `fit_section`                  | Draw a section tight around the children it holds, leaving padding, without moving any of them                                                                                                                                                                                                       |
-| `batch`                        | Run up to 100 tool calls in order in one call; a later op takes `{ "ref": "<id>" }` to use the node ID of an earlier one, a stopped batch deletes the nodes it created, and a `batchId` makes a retry safe (see [Batches](#batches))                                                                 |
+The tools are grouped by area. A tool marked _(full)_ is left out of the `design` tool set (see [Tool sets](#tool-sets)). A read carries the MCP annotation `readOnlyHint`; a delete, `detach_instance`, and `clear_paints` carry `destructiveHint`.
+
+### Core: read
+
+| Tool                          | Description                                                                                                                                                                                                                                                                                          |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_files`                  | List the connected Figma files and the identity of the bridge: `bridgeCommit`, `leaderCommit`, `leaderStartedAt`, for each file `fileKey`, `fileName`, `pluginBuild`, `epoch` (see [Instrument identity](#instrument-identity)), and `journal`, the state of the [write journal](#the-write-journal) |
+| `get_document`                | Get the node tree of the current page, or of `pageId`, within 35,000 characters. `depth` and `detail: "outline"` map a big page cheaply (see [Reading Notes](#reading-notes))                                                                                                                        |
+| `get_selection`               | Get the currently selected nodes in Figma, all within one budget of 35,000 characters; takes `depth` and `detail`                                                                                                                                                                                    |
+| `get_node`                    | Get a specific Figma node by ID (colon format, e.g. `4029:12345`), within 35,000 characters; takes `depth` and `detail`                                                                                                                                                                              |
+| `get_metadata`                | Get file name, pages, and current page info                                                                                                                                                                                                                                                          |
+| `get_styles`                  | Get all local paint, text, effect, and grid styles                                                                                                                                                                                                                                                   |
+| `get_variable_defs`           | Get variable collections with their default mode, and every variable with its scopes, description, and values; `collectionId` and `query` narrow it                                                                                                                                                  |
+| `get_design_context` _(full)_ | Get a depth-limited tree optimized for understanding design context, within 35,000 characters                                                                                                                                                                                                        |
+| `get_screenshot`              | Export 1 to 4 nodes for a quick look. A PNG or JPG is fitted to `maxEdge` (default 1,024 pixels) and comes back as an image block; a short SVG comes back as markup text; a PDF or anything larger is an error that points to `save_screenshots` (see [Captures](#captures))                         |
+
+### Core: edit
+
+| Tool                        | Description                                                                                                                                                                                           |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `set_node_visibility`       | Show or hide specific nodes                                                                                                                                                                           |
+| `set_text_content`          | Replace the contents of a text node                                                                                                                                                                   |
+| `set_text_properties`       | Patch font, size, alignment, auto-resize, color, and bounds on a text node. The size goes before `textAutoResize`, and a font the file lacks is refused with the closest families                     |
+| `set_node_properties`       | Patch name, position, size, visibility, opacity, corner radius, clipping, and the child layout: `layoutSizingHorizontal`, `layoutSizingVertical`, `layoutPositioning`, min and max sizes, and `index` |
+| `set_solid_fill`            | Replace a node's fill or stroke with a single solid paint                                                                                                                                             |
+| `set_gradient_fill`         | Replace a node's fill or stroke with a linear/radial/angular/diamond gradient                                                                                                                         |
+| `clear_paints`              | Set the fills or the strokes of up to 200 nodes to an empty list, and report the paints that were there                                                                                               |
+| `set_effects`               | Replace a node's effects list (drop/inner shadows, layer/background blurs)                                                                                                                            |
+| `set_stroke_properties`     | Patch stroke weight, align, dash pattern, cap, and join                                                                                                                                               |
+| `duplicate_nodes`           | Duplicate nodes in place — each copy lands in its source's parent, directly above it                                                                                                                  |
+| `reparent_nodes`            | Move nodes into another parent                                                                                                                                                                        |
+| `group_nodes`               | Wrap a list of nodes (sharing a parent) in a new group                                                                                                                                                |
+| `ungroup_node`              | Ungroup a group, a frame, or a section — children move up to its parent                                                                                                                               |
+| `set_selection` _(full)_    | Set the page selection to a list of node IDs (works in Dev Mode)                                                                                                                                      |
+| `scroll_and_zoom_into_view` | Frame the viewport around the given nodes (works in Dev Mode)                                                                                                                                         |
+| `delete_nodes`              | Delete nodes with explicit confirmation                                                                                                                                                               |
+
+### Core: motion (beta)
+
+| Tool                                    | Description                                                  |
+| --------------------------------------- | ------------------------------------------------------------ |
+| `get_motion_styles` _(full)_            | List all available animation presets (beta)                  |
+| `get_node_motion` _(full)_              | Read a node's current animation styles and properties (beta) |
+| `apply_animation_style` _(full)_        | Apply a preset animation style to a node (beta)              |
+| `remove_animation_style` _(full)_       | Remove an applied animation style from a node (beta)         |
+| `apply_manual_keyframe_track` _(full)_  | Apply a manual keyframe track to a node property (beta)      |
+| `remove_manual_keyframe_track` _(full)_ | Remove a manual keyframe track from a node property (beta)   |
+| `set_timeline_duration` _(full)_        | Set the duration of a timeline in seconds (beta)             |
+
+### Layout and images
+
+| Tool                          | Description                                                                                                                                                             |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `create_page`                 | Create a new page in the document, optionally switching to it                                                                                                           |
+| `create_frame`                | Create a frame with its own auto layout, padding, gap, stroke, corner radius, and clipping, plus the child-layout fields and `index`, so one call makes a card or a row |
+| `create_text`                 | Create a text node with a font or a `textStyleId`. A `width` without a `height` wraps the text (`textAutoResize: "HEIGHT"`)                                             |
+| `create_shape`                | Create a rectangle, ellipse, or line, with the child-layout fields and `index`                                                                                          |
+| `set_auto_layout`             | Configure auto-layout direction, padding (with a `padding` shorthand), gap, alignment, sizing, and wrap                                                                 |
+| `create_image`                | Create an image-backed rectangle from a URL, a data URI, or a local path: a PNG, JPEG, or GIF of at most 4,096 pixels a side                                            |
+| `set_image_fill`              | Fill up to 50 existing nodes, instance layers included, with an image from a source or a reused `imageHash`                                                             |
+| `create_svg`                  | Place an SVG icon as a vector frame, scaled by `width` or `height`, with the child-layout fields and `index`                                                            |
+| `import_html_layers` _(full)_ | Bulk-import an html-figma layer tree (JSON) as frames, text, rectangles, and vectors                                                                                    |
+
+### Discovery
+
+| Tool                | Description                                                                                                                                             |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `find_nodes`        | Find nodes by a part of their name, by type, or both, on the current page, in one node, or in the whole file, and return their IDs, parents, and bounds |
+| `get_design_system` | Read the variables (default-mode values), the text, paint and effect styles, and the local components of the file in one compact call                   |
+
+### Batch
+
+| Tool    | Description                                                                                                                                                                                                                          |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `batch` | Run up to 100 tool calls in order in one call; a later op takes `{ "ref": "<id>" }` to use the node ID of an earlier one, a stopped batch deletes the nodes it created, and a `batchId` makes a retry safe (see [Batches](#batches)) |
+
+### Variables
+
+| Tool                         | Description                                                                                        |
+| ---------------------------- | -------------------------------------------------------------------------------------------------- |
+| `create_variable_collection` | Create a variable collection for design tokens (one mode on a free plan)                           |
+| `update_variable_collection` | Rename a variable collection                                                                       |
+| `delete_variable_collection` | Delete a variable collection and every variable in it, with explicit confirmation                  |
+| `create_variables`           | Create up to 200 variables in one collection with values, aliases, scopes                          |
+| `update_variables`           | Change the name, value, scopes, or description of up to 200 variables                              |
+| `delete_variables`           | Delete up to 200 variables and report what aliased each one, with explicit confirmation            |
+| `bind_variables`             | Bind variables to node fields such as `fills`, `itemSpacing`, or `characters`, or remove a binding |
+
+### Text styles
+
+| Tool                | Description                                                               |
+| ------------------- | ------------------------------------------------------------------------- |
+| `list_fonts`        | List the fonts Figma can use, grouped by family                           |
+| `create_text_style` | Create a local text style, optionally with variables driving its fields   |
+| `update_text_style` | Change the name, font, metrics, or bound variables of a text style        |
+| `delete_text_style` | Delete a text style with explicit confirmation                            |
+| `apply_text_style`  | Apply a text style to up to 200 text nodes, or to one range of characters |
+
+### Components
+
+| Tool                        | Description                                                                                                                                                                                                                        |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_components`           | List the local components and component sets of a page, of one section, or of the whole file                                                                                                                                       |
+| `get_component`             | Read one component or component set: its properties, its variants, and its default variant                                                                                                                                         |
+| `get_instance`              | Read one instance: its main component, its property values, and its overrides                                                                                                                                                      |
+| `create_component`          | Create a local component, by converting a node or from a width and a height                                                                                                                                                        |
+| `combine_as_variants`       | Combine 2 to 50 components into one component set, laid out in a row or a column                                                                                                                                                   |
+| `create_instance`           | Create an instance of a component, or of one variant of a component set. The result lists the first-level layers as `children`, so a batch reaches the image layer of a new card with `{ "ref": "card", "path": "children.0.id" }` |
+| `swap_instance`             | Point an instance at another component or variant, in place                                                                                                                                                                        |
+| `detach_instance`           | Turn up to 200 instances into plain frames                                                                                                                                                                                         |
+| `add_component_property`    | Add a BOOLEAN, TEXT, INSTANCE_SWAP, or VARIANT property to a component or a component set                                                                                                                                          |
+| `edit_component_property`   | Rename a component property, or change its default value or its preferred values                                                                                                                                                   |
+| `delete_component_property` | Delete a component property with explicit confirmation                                                                                                                                                                             |
+| `bind_component_property`   | Point a layer's `characters`, `visible`, or `mainComponent` at a component property, or remove the link                                                                                                                            |
+| `set_instance_properties`   | Set the property values of one instance, including which variant of a set it is                                                                                                                                                    |
+
+### Sections
+
+| Tool                  | Description                                                                                    |
+| --------------------- | ---------------------------------------------------------------------------------------------- |
+| `list_sections`       | List the sections of the current page or of the whole file, with their nesting                 |
+| `get_section`         | Read one section: its children, where its content really sits, and what hangs outside it       |
+| `create_section`      | Create a section, empty at a given size or wrapped around nodes that are already there         |
+| `move_to_section`     | Move nodes into a section without moving them on the canvas, and optionally fit it around them |
+| `move_out_of_section` | Lift nodes out of their section to whatever holds it, without moving them on the canvas        |
+| `fit_section`         | Draw a section tight around the children it holds, leaving padding, without moving any of them |
+
+### Audit
+
+| Tool                        | Description                                                                                                                                                                                                    |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `save_screenshots` _(full)_ | Export screenshots, save them under the output root, and return a manifest with the path, bytes, SHA-256, pixel size, and scale of each capture, never image data (see [Captures](#captures))                  |
+| `dump_nodes` _(full)_       | Write the complete subtree of each root, hidden content included, as canonical JSON under the output root, and return only a manifest (see [Dumps](#dumps))                                                    |
+| `dump_journal` _(full)_     | Write the whole write journal of the leader as canonical JSON under the output root, and return only a manifest with the entry count and the head. Adds no entry (see [The write journal](#the-write-journal)) |
 
 All tools accept an optional `fileKey` parameter when multiple Figma files are connected. Use `list_files` to discover connected files and their keys.
 
@@ -571,7 +691,7 @@ A written item has `kind: "capture"`, `index`, `nodeId`, `nodeName`, `path`, `fo
 - `create_component` takes either `fromNodeId`, which converts a node in place and keeps its children, size, position, and paint, or `width` and `height`, which makes an empty component — so `fillHex` belongs to the second form only. A node that is already a component, a component set, or an instance is refused, as is a node inside one.
 - A variant carries its properties in its name: `Size=Small`, or several pairs as in `Size=Small, State=Hover`. `combine_as_variants` checks every name before the first write — all the components name the same properties, and no two repeat the same combination of values — so a call with a bad name writes nothing and reports every name to correct.
 - `figma.combineAsVariants` stacks every variant on one spot, so `combine_as_variants` lays the set out afterwards: `layout` picks a row or a column, `gap` sets the space between the variants, and the set is resized to fit them plus `padding`.
-- `create_instance` and `swap_instance` pick a variant with `variantProperties`, a list of name and value pairs: `[{ "name": "Size", "value": "Large" }]`. The old form, a property name mapped to its value (`{ "Size": "Large" }`), still works. Every value is text in Figma, so write `24` as `"24"`. A value that matches no variant comes back with the valid values of each property; a set of values that still matches several variants comes back naming the properties that need one too, so an instance never lands on an arbitrary variant. Leave `variantProperties` out and the set's default variant is used.
+- `create_instance` and `swap_instance` pick a variant with `variantProperties`, a list of name and value pairs: `[{ "name": "Size", "value": "Large" }]`. The old form, a property name mapped to its value (`{ "Size": "Large" }`), still works. Every value is text in Figma, so write `24` as `"24"`. A value that matches no variant comes back with the valid values of each property; a set of values that still matches several variants comes back naming the properties that need one too, so an instance never lands on an arbitrary variant. Leave `variantProperties` out and the set's default variant is used. `create_instance` also returns `children`, the first-level layers of the new instance as `{ id, name, type }`: an instance layer has an ID of the form `I<instance>;<layer>`, which a batch cannot build, so `{ "ref": "<op id>", "path": "children.0.id" }` is the way to reach it.
 - `detach_instance` refuses an instance inside another instance: Figma detaches every instance above a nested one as well, so the call would reach further than it names. Detach the outer instance instead.
 - The property tools name a property either way: the display name Figma shows (`Label`) or the full name carrying the suffix Figma appends (`Label#12:0`). An exact full name wins, which also matches Figma's own rule that a `VARIANT` property takes precedence on a name collision; a display name that somehow matches two properties is refused with both full names rather than guessed at.
 - Take the name `add_component_property` and `edit_component_property` return, not the one you asked for. Figma keeps the display names of one component apart and renames a colliding one behind the call — asking for a second `Text` stores `Text2#16:13` — so the returned name is what the file carries and what the other tools take. The suffix does not change on a rename.
@@ -769,6 +889,9 @@ Figma-MCP-Bridge/
         ├── node.ts       # Dynamic leader/follower role switching
         ├── election.ts   # Leader election & health monitoring
         ├── tools.ts      # MCP tool definitions
+        ├── batch.ts      # The batch tool and the tool registry
+        ├── toolset.ts    # The design tool set and the MCP annotations
+        ├── guide.ts      # The server instructions and the design_session prompt
         └── types.ts      # Shared types
 ```
 
