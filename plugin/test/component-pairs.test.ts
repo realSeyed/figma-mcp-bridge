@@ -41,6 +41,10 @@ const variant = (id: string, size: string, state: string): FakeNode => {
       type: "INSTANCE",
       x: 0,
       y: 0,
+      children: [
+        { id: `I9:${counter};2:10`, name: "Card/Image", type: "RECTANGLE" },
+        { id: `I9:${counter};2:11`, name: "Card/Title", type: "TEXT" },
+      ],
     };
     instance.getMainComponentAsync = async () => node;
     return instance;
@@ -108,6 +112,17 @@ describe("create_instance variantProperties", () => {
     expect(response.error).toBeUndefined();
     expect((response.data as { mainComponentId: string }).mainComponentId).toBe("2:4");
     expect(created).toEqual({ "2:4": 1 });
+  });
+
+  test("lists the first-level layers of the new instance", async () => {
+    // A batch reaches a layer of a new instance only through this list.
+    const response = await call("create_instance", { componentId: "2:2" });
+    expect(response.error).toBeUndefined();
+    const data = response.data as { id: string; children: unknown[] };
+    expect(data.children).toEqual([
+      { id: `I${data.id};2:10`, name: "Card/Image", type: "RECTANGLE" },
+      { id: `I${data.id};2:11`, name: "Card/Title", type: "TEXT" },
+    ]);
   });
 
   test("still takes an object of name to value", async () => {

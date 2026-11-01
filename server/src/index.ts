@@ -8,11 +8,14 @@ import { logEvent } from "./diagnostics.js";
 import { Election } from "./election.js";
 import { LEADER_HOST, leaderUrl } from "./leader.js";
 import { describeOutputRoot } from "./output-root.js";
+import { AUDITOR_INSTRUCTIONS, registerDesignSessionPrompt, SERVER_INSTRUCTIONS } from "./guide.js";
 import { AUDITOR_TOOLS, missingTools, parseRole, restrictServer, ROLE_VARIABLE } from "./role.js";
 import type { ProcessRole } from "./role.js";
 import { rpcToken } from "./rpc-token.js";
 import { checkTimingSettings } from "./timeouts.js";
 import { maxResultChars } from "./tool-helpers.js";
+import { parseToolset, toolsetAllows, TOOLSET_VARIABLE } from "./toolset.js";
+import type { Toolset } from "./toolset.js";
 import { registerTools } from "./tools.js";
 import { VERSION } from "./version.js";
 
@@ -45,6 +48,17 @@ function resolveRole(): ProcessRole {
   }
 }
 const ROLE = resolveRole();
+
+// A set tool set other than full or design stops the process at start, as a bad role does.
+function resolveToolset(): Toolset {
+  try {
+    return parseToolset(process.env[TOOLSET_VARIABLE]);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+}
+const TOOLSET = resolveToolset();
 
 // A bad timing or result-size value stops the process at start, not at the first tool call.
 try {
@@ -143,7 +157,7 @@ async function main(): Promise<void> {
     bridgeCommit: BRIDGE_COMMIT,
     port: PORT,
     standalone: false,
-    tools: ROLE ?? "full",
+    tools: ROLE ?? TOOLSET,
   });
 
   const node = new Node(PORT, ROLE);
@@ -193,15 +207,25 @@ async function main(): Promise<void> {
     console.error("Unhandled rejection:", reason);
   });
 
-  const server = new McpServer({
-    name: "figma-bridge",
-    version: VERSION,
-  });
+  const server = new McpServer(
+    { name: "figma-bridge", version: VERSION },
+    { instructions: ROLE === null ? SERVER_INSTRUCTIONS : AUDITOR_INSTRUCTIONS }
+  );
 
   if (ROLE === null) {
-    registerTools(server, node, PORT);
+    if (TOOLSET === "full") {
+      registerTools(server, node, PORT);
+    } else {
+      registerTools(restrictServer(server, toolsetAllows(TOOLSET)).server, node, PORT);
+    }
+    registerDesignSessionPrompt(server);
   } else {
-    const restricted = restrictServer(server, AUDITOR_TOOLS);
+    if (process.env[TOOLSET_VARIABLE]) {
+      console.error(
+        `${TOOLSET_VARIABLE} is ignored: the ${ROLE} role registers its own tool list.`
+      );
+    }
+    const restricted = restrictServer(server, (name) => AUDITOR_TOOLS.includes(name));
     registerTools(restricted.server, node, PORT);
     // A renamed tool must not make the list shorter without notice.
     const missing = missingTools(restricted.registered, AUDITOR_TOOLS);
@@ -214,7 +238,7 @@ async function main(): Promise<void> {
     }
   }
 
-  console.error(`Starting MCP server (role: ${node.roleName}, tools: ${ROLE ?? "full"})`);
+  console.error(`Starting MCP server (role: ${node.roleName}, tools: ${ROLE ?? TOOLSET})`);
 
   transport = new StdioServerTransport();
   await server.connect(transport);

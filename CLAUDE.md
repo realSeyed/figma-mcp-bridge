@@ -7,6 +7,11 @@ This fork adds component, variable, text style, and section tools to the Figma M
 The fork also adds audit tools: dumps and captures that the bridge writes to disk, with a
 manifest as the tool result, and an auditor role that only reads.
 
+The fork lets an executor model (Gemini CLI, Claude, or another MCP client) do production
+design work with no coaching in the chat: the server gives its own instructions and a
+session prompt, marks reads and destructive writes, and can register a smaller design tool
+set. `server/test/ecommerce-scenario.test.ts` proves the whole path, a leader crash included.
+
 ## 2. Scope
 
 1. Do not add a feature that needs a paid Figma plan.
@@ -236,6 +241,31 @@ remembered in memory for 60 minutes (200 at most) with the hash of the input; th
 replays the result. A stop with `rollback` calls the recorded `delete_nodes` once for each
 created node, newest first.
 
+The recorder also gives each tool its MCP annotations: it forwards each registration as
+`server.tool(name, description, shape, annotations, handler)` with `toolAnnotations`
+(`server/src/toolset.ts`). A registration never passes annotations itself. `readOnlyHint:
+true` goes to each name on `READ_ONLY_REQUESTS` but `dump_nodes`, `save_screenshots`,
+`dump_journal` and `scroll_and_zoom_into_view` (they write a file or move the viewport);
+`destructiveHint: true` (with `readOnlyHint: false`) to each `delete_*`, `detach_instance` and
+`clear_paints`. Each other tool has none.
+
+`FIGMA_BRIDGE_TOOLSET` (`server/src/toolset.ts`) is unset or `full` (each tool, the default)
+or `design`, which drops `DESIGN_EXCLUDED_TOOLS`: the 7 beta motion tools, `dump_nodes`,
+`dump_journal`, `save_screenshots`, `import_html_layers`, `get_design_context` and
+`set_selection`. `index.ts` passes `restrictServer(server, toolsetAllows(toolset))` to
+`registerTools`; `restrictServer` takes a predicate, which the auditor role uses too. Another
+value stops the process at start, as a bad role does. The auditor role ignores the variable
+and logs one line. The `batch` enum lists only the tools registered in its process.
+
+`server/src/guide.ts` holds the guidance texts. `index.ts` passes `SERVER_INSTRUCTIONS`
+(4,000 characters at most) as the `instructions` of the `McpServer` of the full and the
+design sets, and `AUDITOR_INSTRUCTIONS` (1,500 at most) to the auditor role.
+`registerDesignSessionPrompt` registers the MCP prompt `design_session`
+(`DESIGN_SESSION_PROMPT`, 8,000 at most) for the full and the design sets only. Each tool
+name in backticks in a text must be a tool of each set that gets the text:
+`server/test/guide.test.ts` checks it. Write a name that is not a tool (for example the
+Gemini CLI option wait_for_previous) without backticks.
+
 ## 4. File map
 
 | File                                       | Purpose                                                                                                                |
@@ -280,6 +310,8 @@ created node, newest first.
 | `server/src/schema-common.ts`              | `createFigmaNodeIdSchema`, `createHexColorSchema`, `createParentIdSchema`, `createChildLayoutFields`, `fileKeyField`.  |
 | `server/src/tools.ts`                      | `registerTools` of the core tools.                                                                                     |
 | `server/src/tool-helpers.ts`               | `renderResponse`, `parseToolInput`, the `ToolResult` type.                                                             |
+| `server/src/toolset.ts`                    | `FIGMA_BRIDGE_TOOLSET`: the design set, `parseToolset`, `toolsetAllows`; `toolAnnotations`, the MCP annotations.       |
+| `server/src/guide.ts`                      | The server instructions, the auditor instructions, and the `design_session` prompt with its registration.              |
 | `server/src/batch.ts`                      | `recordTools` (the tool registry), `batch`: the refs, the order, the rollback, the dedupe, the result cap.             |
 | `server/src/extensions/types.ts`           | The area file types, `ExtensionRpcSchemaMap` included.                                                                 |
 | `server/src/extensions/index.ts`           | Merges `schemas`, `rpcSchemas`, `rpcToArgs`, and `register`.                                                           |
@@ -298,6 +330,12 @@ created node, newest first.
 | `server/scripts/golden/`                   | The golden dump of the conformance fixture. Synthetic data from the test file only.                                    |
 | `server/test/`                             | `bun test` tests. Real server processes against a simulated plugin. Helpers in `helpers/`.                             |
 | `server/test/tool-schemas.test.ts`         | The portable-schema lint: the `tools/list` of a real server, checked against the rules of convention 23.               |
+| `server/test/helpers/schema-lint.ts`       | The lint rules, the open-object allowlist, and `listRegisteredTools`: the `tools/list` of an in-memory server.         |
+| `server/test/toolset.test.ts`              | The annotations, the design set (reduced, 120,000 characters at most, lint-clean), and the start checks.               |
+| `server/test/guide.test.ts`                | The tool names and the lengths of the guidance texts; the instructions and the prompt that each role gets.             |
+| `server/test/readme-tools.test.ts`         | The README tool tables against the registered tools, and the _(full)_ marks against the design set.                    |
+| `server/test/ecommerce-scenario.test.ts`   | The end-to-end scenario: a shop built through a design follower, a leader crash, a replayed batch.                     |
+| `server/test/helpers/scenario-plugin.ts`   | The stateful simulated plugin of the scenario: an in-memory document, result shapes copied from the real handlers.     |
 | `plugin/test/`                             | `bun test` tests of the serializer, the dump form, the chunk walk, the queue, `handleRequest`. Synthetic nodes.        |
 | `plugin/test/helpers/fake-figma.ts`        | A fake file for reads (pages, lookup, search, exports, variables, styles); `writes` adds creates and layout rules.     |
 | `.github/workflows/ci.yml`                 | CI for each pull request and each push to `main`: check, tests, toolset tests, on Ubuntu and Windows.                  |
@@ -336,11 +374,20 @@ imports only Node built-in modules, `image-size.ts`, and `output-root.ts`.
    validates each `/rpc` request of that tool against it. Without an entry it validates
    against the schema of step 2, which then refuses each call of a follower.
 5. Server: register it in `register`, with `parseToolInput`, `renderResponse`, and `node.sendWithParams`.
-6. README: add one row to the table "Available Tools".
+6. README: add one row to the table of its area under "Available Tools", marked _(full)_ if
+   the design set leaves it out. `server/test/readme-tools.test.ts` compares the tables with
+   the registered tools.
 7. The new tool is batchable at once: `batch` calls each recorded tool. Add it to
    `BATCH_EXCLUDED_TOOLS` in `server/src/batch.ts` only if it writes a file, returns an
    image, or must not run inside a batch. Run `server/test/tool-schemas.test.ts`: the new
    schema must pass the portable-schema rules (convention 23).
+8. Annotations follow `READ_ONLY_REQUESTS` (convention 19) and `toolAnnotations` in
+   `server/src/toolset.ts`: a read gets `readOnlyHint`, a tool that removes something gets
+   `destructiveHint` (a `delete_*` name gets it by itself). Pass none at the registration.
+9. Decide whether the design set keeps the tool (an executor needs it to build a design),
+   else add it to `DESIGN_EXCLUDED_TOOLS`; then run `server/test/toolset.test.ts`, which holds
+   the design `tools/list` to 120,000 characters. Decide whether `server/src/guide.ts` names
+   it, and run `server/test/guide.test.ts`.
 
 ## 6. Conventions
 
@@ -410,8 +457,8 @@ mimeType }`), never base64 in text. A capture that is large or that serves as ev
     absent or `false`, and each `type: "object"` with properties; no `type` array but
     `[X, "null"]`; `enum` of non-empty strings only; a `description` on each top-level field,
     a default written as "Default: X."; a name that matches `^[a-z][a-z0-9_]{0,47}$`; and the
-    whole `tools/list` result 150,000 characters or less. The open-object allowlist, each with
-    its reason in the test: `apply_animation_style.animationStyleData`,
+    whole `tools/list` result 150,000 characters or less (120,000 for the design set). The
+    open-object allowlist, each with its reason in `server/test/helpers/schema-lint.ts`: `apply_animation_style.animationStyleData`,
     `apply_manual_keyframe_track.field`, `apply_manual_keyframe_track.track`,
     `remove_manual_keyframe_track.field` (beta motion records), and `batch.ops[].args`
     (`argsJson` is the portable alternative). Write a map as an array of `{ name, value }`
@@ -430,6 +477,13 @@ mimeType }`), never base64 in text. A capture that is large or that serves as ev
 | `bun run leader` | The standalone leader. Build first. Stop it with Ctrl+C.                                           |
 | `bun run e2e`    | In `server/`. The end-to-end script. Needs `FIGMA_FILE_KEY`.                                       |
 | `bun run perf`   | In `server/`. The measurement script. Needs `FIGMA_FILE_KEY`. Reads `FIGMA_READ_FILE_KEY` as well. |
+
+The scenario test runs in `bun run test`. To check it for flakiness, run it three times in
+`server/` after a build:
+
+```bash
+bun test --rerun-each 3 test/ecommerce-scenario.test.ts
+```
 
 Run `bun run check` before each commit. Commit only if the check passes.
 
@@ -477,8 +531,8 @@ entries that one `dump_journal_chunk` request asks for, an integer of 1 or more.
 is 500. The harness removes it too. Do not document it in the README.
 
 `FIGMA_BRIDGE_REQUEST_TIMEOUT_MS`, `FIGMA_BRIDGE_CONNECT_GRACE_MS`, `FIGMA_BRIDGE_STANDALONE`,
-`FIGMA_BRIDGE_LOG_FILE`, `FIGMA_BRIDGE_MAX_RESULT_CHARS` and `FIGMA_BRIDGE_ASSET_ROOT` are
-settings of the owner, and the README documents them. The harness removes each of them from a test process unless the test
+`FIGMA_BRIDGE_LOG_FILE`, `FIGMA_BRIDGE_MAX_RESULT_CHARS`, `FIGMA_BRIDGE_ASSET_ROOT` and
+`FIGMA_BRIDGE_TOOLSET` are settings of the owner, and the README documents them. The harness removes each of them from a test process unless the test
 gives it, sets the grace to `0`, and sets the log file to a temporary file of the harness. `serverEnv` refuses a process
 without a token file, a journal file, or a log file. A test that runs a module that logs in
 the test process itself sets `FIGMA_BRIDGE_LOG_FILE` first.

@@ -26,6 +26,7 @@ const STRIPPED_VARIABLES = [
   "FIGMA_BRIDGE_LOG_FILE",
   "FIGMA_BRIDGE_MAX_RESULT_CHARS",
   "FIGMA_BRIDGE_ASSET_ROOT",
+  "FIGMA_BRIDGE_TOOLSET",
 ];
 
 /** How long a process has to log its role. */
@@ -44,7 +45,8 @@ export interface ServerOptions {
    * `FIGMA_BRIDGE_DUMP_CHUNK_NODES`, `FIGMA_BRIDGE_JOURNAL_CHUNK_ENTRIES`,
    * `FIGMA_BRIDGE_ROLE`, `FIGMA_BRIDGE_REQUEST_TIMEOUT_MS`,
    * `FIGMA_BRIDGE_CONNECT_GRACE_MS`, `FIGMA_BRIDGE_STANDALONE`,
-   * `FIGMA_BRIDGE_LOG_FILE`, and `FIGMA_BRIDGE_MAX_RESULT_CHARS` are removed unless
+   * `FIGMA_BRIDGE_LOG_FILE`, `FIGMA_BRIDGE_MAX_RESULT_CHARS`, `FIGMA_BRIDGE_ASSET_ROOT`,
+   * and `FIGMA_BRIDGE_TOOLSET` are removed unless
    * they are given here, so a variable of the developer does not leak into a test.
    * `FIGMA_BRIDGE_TOKEN_FILE`, `FIGMA_BRIDGE_JOURNAL_FILE` and
    * `FIGMA_BRIDGE_LOG_FILE` are required: no test reads the real token file or
@@ -74,6 +76,10 @@ export interface ServerProcess {
   stderr: string[];
   /** The names that `tools/list` returns. */
   listTools(): Promise<string[]>;
+  /** The names that `prompts/list` returns; none when the server has no prompt. */
+  listPrompts(): Promise<string[]>;
+  /** The `instructions` of the initialize result. */
+  instructions(): string | undefined;
   /** Calls one tool and parses its text content as JSON. */
   callTool(name: string, args?: Record<string, unknown>): Promise<ToolOutcome>;
   /** Calls one tool and returns its content blocks as they are, images too. */
@@ -139,6 +145,12 @@ export async function startServer(options: ServerOptions): Promise<ServerProcess
         } while (cursor !== undefined);
         return names;
       },
+      async listPrompts() {
+        if (client.getServerCapabilities()?.prompts === undefined) return [];
+        const page = await client.listPrompts();
+        return page.prompts.map((prompt) => prompt.name);
+      },
+      instructions: () => client.getInstructions(),
       async callToolRaw(name, args = {}) {
         const result = await client.callTool({ name, arguments: args }, undefined, {
           timeout: 30_000,

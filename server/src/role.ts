@@ -82,19 +82,23 @@ export function auditorMayCall(tool: string): boolean {
 }
 
 export interface RestrictedServer {
-  /** Pass this to `registerTools`: it drops each tool outside the list. */
+  /** Pass this to `registerTools`: it drops each tool that the predicate refuses. */
   server: McpServer;
   /** The names that reached the real server. */
   registered: ReadonlySet<string>;
 }
 
 /**
- * Wraps the server so that `tool` and `registerTool` register a tool of
- * `allowed` only. A tool outside the list never exists, not for a moment.
+ * Wraps the server so that `tool` and `registerTool` register a tool that
+ * `allows` accepts only. A tool it refuses never exists, not for a moment.
+ * The auditor role and the `design` tool set both use it.
  * @param server - The MCP server.
- * @param allowed - The names that may be registered.
+ * @param allows - Whether a name may be registered.
  */
-export function restrictServer(server: McpServer, allowed: readonly string[]): RestrictedServer {
+export function restrictServer(
+  server: McpServer,
+  allows: (name: string) => boolean
+): RestrictedServer {
   const registered = new Set<string>();
   // A stand-in for the handle of a tool that was not registered.
   const skipped = { remove() {}, enable() {}, disable() {}, update() {}, enabled: false };
@@ -102,7 +106,7 @@ export function restrictServer(server: McpServer, allowed: readonly string[]): R
   const guard =
     (method: "tool" | "registerTool") =>
     (name: string, ...rest: unknown[]): unknown => {
-      if (!allowed.includes(name)) return skipped;
+      if (!allows(name)) return skipped;
       registered.add(name);
       return (server[method] as (...args: unknown[]) => unknown)(name, ...rest);
     };

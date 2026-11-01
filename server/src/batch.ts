@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { canonicalJson } from "./evidence.js";
 import type { ToolResult } from "./tool-helpers.js";
+import { toolAnnotations } from "./toolset.js";
 
 /**
  * The `batch` tool: up to 100 tool calls in order, in one MCP call.
@@ -13,7 +14,9 @@ import type { ToolResult } from "./tool-helpers.js";
  * each plugin request of a batch over `/rpc` as one call of its own, and the
  * write journal of the leader records each one.
  *
- * Imports `evidence.js`, packages, and types only.
+ * The recorder also gives each tool its MCP annotations (`toolset.ts`).
+ *
+ * Imports `evidence.js`, `toolset.js`, packages, and types only.
  */
 
 /** The handler of a tool, as `server.tool` takes it. */
@@ -35,7 +38,7 @@ export interface RecordedServer {
 
 /**
  * Wraps the server so that each `tool` call that registers a tool is
- * recorded. A tool that the role wrapper drops (its stub has `enabled: false`)
+ * recorded and forwarded with the annotations of `toolAnnotations`. A tool that the role wrapper drops (its stub has `enabled: false`)
  * is not recorded.
  * @param server - The MCP server, or the restricted server of a role.
  */
@@ -43,14 +46,22 @@ export function recordTools(server: McpServer): RecordedServer {
   const tools = new Map<string, RecordedTool>();
 
   const record = (name: string, ...rest: unknown[]): unknown => {
-    const handle = (server.tool as (...args: unknown[]) => unknown)(name, ...rest);
-    if ((handle as { enabled?: boolean } | undefined)?.enabled === false) return handle;
     const handler = rest[rest.length - 1] as ToolHandler;
     const args = rest.slice(0, -1);
     const description = typeof args[0] === "string" ? (args.shift() as string) : "";
-    // The first object left is the shape; a second one would be the annotations.
+    // The first object left is the shape. No registration passes annotations:
+    // they come from the name, so the read-only list governs each tool.
     const shape = args.find((arg) => typeof arg === "object" && arg !== null) as
       z.ZodRawShape | undefined;
+    const annotations = toolAnnotations(name);
+    const forwarded = [
+      description,
+      ...(shape ? [shape] : []),
+      ...(annotations ? [annotations] : []),
+      handler,
+    ];
+    const handle = (server.tool as (...args: unknown[]) => unknown)(name, ...forwarded);
+    if ((handle as { enabled?: boolean } | undefined)?.enabled === false) return handle;
     tools.set(name, { description, shape, handler });
     return handle;
   };
