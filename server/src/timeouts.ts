@@ -28,6 +28,9 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 export const REQUEST_TIMEOUTS_MS: ReadonlyMap<string, number> = new Map([
   ["get_screenshot", 120_000],
   ["create_image", 120_000],
+  // Each distinct image is decoded and made in Figma before the first write.
+  ["set_image_fill", 120_000],
+  ["create_svg", 60_000],
   ["import_html_layers", 300_000],
   // Its own row, so a change of the default leaves the dumps as they are.
   ["dump_nodes_chunk", 60_000],

@@ -7,7 +7,7 @@ import {
   createTextStyleIdSchema,
   fileKeyField,
 } from "./schema-common.js";
-import { extensionRpcToArgs, extensionSchemas } from "./extensions/index.js";
+import { extensionRpcSchemas, extensionRpcToArgs, extensionSchemas } from "./extensions/index.js";
 
 /**
  * Creates a Zod schema that validates a screenshot export format.
@@ -1029,6 +1029,7 @@ const importHtmlLayersRpcInput = importHtmlLayersInput
 
 const rpcInputSchemas = {
   ...toolInputSchemas,
+  ...extensionRpcSchemas,
   create_image: createImageRpcInput,
   import_html_layers: importHtmlLayersRpcInput,
 } as const;

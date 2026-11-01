@@ -109,6 +109,8 @@ const EXTENSION_WRITES = [
   "bind_component_property",
   "set_instance_properties",
   "clear_paints",
+  "set_image_fill",
+  "create_svg",
   "create_section",
   "fit_section",
   "move_to_section",
