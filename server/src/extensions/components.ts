@@ -17,12 +17,61 @@ const componentIdField = createFigmaNodeIdSchema().describe(
   "The component or component set to use. A component set narrows to one variant through variantProperties."
 );
 
-const variantPropertiesField = z
-  .record(z.string())
-  .optional()
-  .describe(
-    'Which variant of a component set to use, as property name to value, e.g. { "Size": "Large", "State": "Hover" }. Every value is text in Figma, so write 24 as "24". Applies to a component set only; omitted, the set\'s default variant is used.'
-  );
+/** The most pairs one variantProperties or properties list carries. */
+const MAX_PAIRS = 50;
+
+/** A boolean as the text the pairs carry; any other value as it is. */
+const booleanToString = (value: unknown): unknown =>
+  typeof value === "boolean" ? String(value) : value;
+
+/**
+ * Turns the old object form, `{ "Size": "Large" }`, into the pairs a strict
+ * schema reader can fill, `[{ "name": "Size", "value": "Large" }]`, and each
+ * boolean value into text. Pairs pass through, their booleans made text.
+ * Anything else reaches the array schema unchanged and fails there.
+ * @param raw - The parameter value.
+ * @returns The pairs, or the value as it was.
+ */
+const toPairs = (raw: unknown): unknown => {
+  if (Array.isArray(raw)) {
+    return raw.map((item: unknown) =>
+      typeof item === "object" && item !== null && !Array.isArray(item)
+        ? { ...item, value: booleanToString((item as { value?: unknown }).value) }
+        : item
+    );
+  }
+  if (typeof raw === "object" && raw !== null) {
+    return Object.entries(raw).map(([name, value]) => ({ name, value: booleanToString(value) }));
+  }
+  return raw;
+};
+
+/**
+ * A list of name and value pairs. The SDK advertises the array schema inside
+ * the preprocess, and still runs the preprocess on each call, so a caller may
+ * keep sending an object of name to value.
+ * @param valueField - The schema of one value.
+ * @param description - The description of the list.
+ */
+const pairsField = (valueField: z.ZodString, description: string) =>
+  z
+    .preprocess(
+      toPairs,
+      z
+        .array(
+          z.object({
+            name: z.string().min(1).describe("The property name"),
+            value: valueField,
+          })
+        )
+        .max(MAX_PAIRS)
+    )
+    .describe(description);
+
+const variantPropertiesField = pairsField(
+  z.string().min(1).describe("The value, as text"),
+  'Which variant of a component set to use, as name and value pairs, e.g. [{ "name": "Size", "value": "Large" }, { "name": "State", "value": "Hover" }]. Every value is text in Figma, so write 24 as "24". Applies to a component set only; omitted, the set\'s default variant is used.'
+).optional();
 
 /**
  * The two forms of `create_component`: converting a node, or building an empty
@@ -95,7 +144,10 @@ const preferredValuesField = z
   );
 
 const propertyValueDescription =
-  "BOOLEAN takes true or false, TEXT and VARIANT take a string, and INSTANCE_SWAP takes the node ID of the component an instance starts on, e.g. '4029:12345'.";
+  'Every value is text: BOOLEAN takes "true" or "false", TEXT and VARIANT take a string, and INSTANCE_SWAP takes the node ID of the component an instance starts on, e.g. \'4029:12345\'.';
+
+/** A property value as text; a boolean becomes "true" or "false". */
+const propertyValueField = () => z.preprocess(booleanToString, z.string());
 
 /**
  * The form of `edit_component_property`: at least one field to change.
@@ -113,8 +165,7 @@ const editComponentPropertyShape = z.object({
     .describe(
       'The new display name, without a "#" suffix. The call returns the full name the file carries afterwards, which Figma changes when the new name collides with another property of this component.'
     ),
-  newDefaultValue: z
-    .union([z.string(), z.boolean()])
+  newDefaultValue: propertyValueField()
     .optional()
     .describe(
       `The new default value an instance starts on. ${propertyValueDescription} A VARIANT property takes none: the first variant of the set is the default.`
@@ -138,7 +189,7 @@ export const schemas = {
       .enum(["currentPage", "allPages"])
       .optional()
       .describe(
-        "Which components to list: currentPage reads the page open in Figma, allPages the whole file. currentPage. Ignored when sectionId is given."
+        "Which components to list: currentPage reads the page open in Figma, allPages the whole file. Default: currentPage. Ignored when sectionId is given."
       ),
     sectionId: createFigmaNodeIdSchema()
       .optional()
@@ -188,13 +239,19 @@ export const schemas = {
     layout: z
       .enum(["ROW", "COLUMN"])
       .optional()
-      .describe("How the variants are laid out: ROW left to right, COLUMN top to bottom. ROW."),
-    gap: z.number().min(0).optional().describe("Space between the variants, in pixels. 24."),
+      .describe(
+        "How the variants are laid out: ROW left to right, COLUMN top to bottom. Default: ROW."
+      ),
+    gap: z
+      .number()
+      .min(0)
+      .optional()
+      .describe("Space between the variants, in pixels. Default: 24."),
     padding: z
       .number()
       .min(0)
       .optional()
-      .describe("Space between the variants and the edge of the set, in pixels. 24."),
+      .describe("Space between the variants and the edge of the set, in pixels. Default: 24."),
     fileKey: fileKeyField,
   }),
 
@@ -240,9 +297,9 @@ export const schemas = {
       .describe(
         "The property type. VARIANT is an axis of a component set and is refused on a single component. SLOT is not supported."
       ),
-    defaultValue: z
-      .union([z.string(), z.boolean()])
-      .describe(`The value an instance starts on. ${propertyValueDescription}`),
+    defaultValue: propertyValueField().describe(
+      `The value an instance starts on. ${propertyValueDescription}`
+    ),
     preferredValues: preferredValuesField,
     fileKey: fileKeyField,
   }),
@@ -275,11 +332,10 @@ export const schemas = {
 
   set_instance_properties: z.object({
     nodeId: createFigmaNodeIdSchema().describe("The instance to change"),
-    properties: z
-      .record(z.union([z.string(), z.boolean()]))
-      .describe(
-        `The properties to set, as property name to value, e.g. { "Label": "Buy", "Show icon": false }. Each name is the display name or the full name. ${propertyValueDescription}`
-      ),
+    properties: pairsField(
+      z.string().describe("The value, as text"),
+      `The properties to set, as name and value pairs, e.g. [{ "name": "Label", "value": "Buy" }, { "name": "Show icon", "value": "false" }]. Each name is the display name or the full name. ${propertyValueDescription}`
+    ),
     fileKey: fileKeyField,
   }),
 } satisfies ExtensionSchemaMap;
