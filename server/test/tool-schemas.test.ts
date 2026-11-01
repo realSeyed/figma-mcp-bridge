@@ -21,6 +21,7 @@ const OPEN_OBJECT_ALLOWLIST: ReadonlyMap<string, string> = new Map([
   ["apply_manual_keyframe_track.field", "beta motion record, passed to Figma as it is"],
   ["apply_manual_keyframe_track.track", "beta motion record, passed to Figma as it is"],
   ["remove_manual_keyframe_track.field", "beta motion record, passed to Figma as it is"],
+  ["batch.ops[].args", "the args of any tool; argsJson is the portable alternative"],
 ]);
 
 /** The most characters of the whole `tools/list` result. */
