@@ -435,3 +435,15 @@ export const findTextStyle = async (styleId: string): Promise<TextStyle | string
   }
   return style as TextStyle;
 };
+
+/**
+ * Writes a colour as the lowercase `#rrggbb` the read tools report.
+ * @param color - The colour, each channel from 0 to 1.
+ * @returns The hex string.
+ */
+export const rgbToHex = (color: RGB): string => {
+  const clamp = (value: number) => Math.min(255, Math.max(0, Math.round(value * 255)));
+  return `#${[clamp(color.r), clamp(color.g), clamp(color.b)]
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("")}`;
+};

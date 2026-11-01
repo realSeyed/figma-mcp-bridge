@@ -10,8 +10,7 @@ import { getExtensionHandler } from "./extensions";
 import type { ExtensionHandler, ExtensionRequestType } from "./extensions";
 import {
   ancestorIdsOf,
-  appendToParentIfProvided,
-  ensureFont,
+  findTextStyle,
   getParentNodeById,
   getSceneNodeById,
   getTextNodeById,
@@ -23,9 +22,26 @@ import {
   parseHexColor,
   positionNode,
   resizeNodeIfSupported,
+  resolveFont,
+  rgbToHex,
   serializeVariableValue,
   supportsChildren,
 } from "./shared";
+import {
+  applyAutoLayout,
+  applyChildLayout,
+  checkChildLayout,
+  checkHex,
+  describeCreated,
+  fieldError,
+  findParent,
+  finishOrRemove,
+  hasAutoLayout,
+  placeInParent,
+  readBackChildLayout,
+  readChildLayout,
+} from "./layout";
+import type { ChildLayout, SizingMode } from "./layout";
 
 type RequestType =
   | "get_document"
@@ -309,11 +325,113 @@ const runExtension = async (
  * @returns The error to throw.
  */
 const unsupportedProperty = (tool: RequestType, node: SceneNode, property: string): Error =>
-  new Error(
-    node.type === "SECTION"
-      ? `${tool} cannot set ${property} on ${node.id} "${node.name}": a SECTION has no ${property}. Call create_frame with this section as parentId and set ${property} on the frame instead.`
-      : `${tool} cannot set ${property} on ${node.id} "${node.name}": a ${node.type} node has no ${property}. Call get_node to read the properties this node carries.`
-  );
+  new Error(unsupportedPropertyText(tool, node, property));
+
+/**
+ * The sentence of `unsupportedProperty`, for a validation that collects several.
+ * @param tool - The tool the caller asked for.
+ * @param node - The node it was pointed at.
+ * @param property - The property, spelled as the caller would say it.
+ * @returns The sentence.
+ */
+const unsupportedPropertyText = (tool: RequestType, node: SceneNode, property: string): string =>
+  node.type === "SECTION"
+    ? `${tool} cannot set ${property} on ${node.id} "${node.name}": a SECTION has no ${property}. Call create_frame with this section as parentId and set ${property} on the frame instead.`
+    : `${tool} cannot set ${property} on ${node.id} "${node.name}": a ${node.type} node has no ${property}. Call get_node to read the properties this node carries.`;
+
+/**
+ * The first paint of a list when it is a solid one, to read a write back.
+ * @param paints - A fills or strokes list, or figma.mixed.
+ * @returns The paint, or undefined.
+ */
+const firstSolid = (paints: ReadonlyArray<Paint> | symbol | undefined): SolidPaint | undefined => {
+  if (!Array.isArray(paints)) return undefined;
+  const first = (paints as ReadonlyArray<Paint>)[0];
+  return first && first.type === "SOLID" ? first : undefined;
+};
+
+/** Whether a create call named its parent. */
+const namesParent = (params: Record<string, unknown>): boolean =>
+  params.parentId !== undefined && params.parentId !== null;
+
+/**
+ * Puts a new node into its parent, step 5 of the create order in `layout.ts`.
+ * Without a parentId and an index it stays where Figma made it: on top of the
+ * page the user is viewing.
+ * @param node - The new node.
+ * @param parent - The parent, the open page when parentId is absent.
+ * @param params - The request params.
+ * @param index - The position among the parent's children, or undefined.
+ */
+const placeNew = (
+  node: SceneNode,
+  parent: BaseNode & ChildrenMixin,
+  params: Record<string, unknown>,
+  index: number | undefined
+): void => {
+  if (namesParent(params) || index !== undefined) placeInParent(node, parent, index);
+};
+
+/**
+ * The sizing of an axis of a new auto-layout frame the caller left open.
+ * @param size - The width or height param.
+ * @returns FIXED when a size was given, else HUG.
+ */
+const defaultSizing = (size: unknown): SizingMode => (typeof size === "number" ? "FIXED" : "HUG");
+
+/**
+ * Keeps the size of a new frame through the switch to auto layout.
+ *
+ * Turning auto layout on can make Figma hug an axis, which drops the size the
+ * frame was given. Each axis that is to stay FIXED is set so at once, and the
+ * size is put back if it moved.
+ * @param frame - The new frame, with its auto layout on.
+ * @param sizing - The sizing each axis ends with.
+ * @param width - The width it was given.
+ * @param height - The height it was given.
+ */
+const keepGivenSize = (
+  frame: FrameNode,
+  sizing: ChildLayout,
+  width: number,
+  height: number
+): void => {
+  const fixedWidth = sizing.layoutSizingHorizontal === "FIXED";
+  const fixedHeight = sizing.layoutSizingVertical === "FIXED";
+  if (fixedWidth) frame.layoutSizingHorizontal = "FIXED";
+  if (fixedHeight) frame.layoutSizingVertical = "FIXED";
+  if ((fixedWidth && frame.width !== width) || (fixedHeight && frame.height !== height)) {
+    frame.resize(fixedWidth ? width : frame.width, fixedHeight ? height : frame.height);
+  }
+};
+
+/**
+ * A value read back from a node, or the written one when Figma reports
+ * figma.mixed, as it does for a stroke that differs per side or per vertex.
+ * @param value - The value read from the node.
+ * @param written - The value the call wrote.
+ * @returns The value to report.
+ */
+const readBack = (value: unknown, written: unknown): unknown =>
+  typeof value === "symbol" ? written : value;
+
+/**
+ * Counts the stops of the gradient a call wrote, read from the node.
+ * @param node - The node.
+ * @param target - fill or stroke.
+ * @param written - The count the call wrote.
+ * @returns The count.
+ */
+const readBackGradientStops = (node: SceneNode, target: string, written: number): number => {
+  const paints = (node as SceneNode & Record<string, unknown>)[
+    target === "stroke" ? "strokes" : "fills"
+  ];
+  const first = Array.isArray(paints) ? (paints[0] as Paint | undefined) : undefined;
+  return first && "gradientStops" in first ? first.gradientStops.length : written;
+};
+
+const isTextAutoResize = (value: unknown): value is TextNode["textAutoResize"] =>
+  value === "NONE" || value === "WIDTH_AND_HEIGHT" || value === "HEIGHT" || value === "TRUNCATE";
 
 /**
  * Ungroups a section: its children move up to its parent and it is removed.
@@ -757,6 +875,7 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
         };
       }
       case "set_text_properties": {
+        const tool = "set_text_properties";
         const nodeId = request.nodeIds && request.nodeIds[0];
         if (!nodeId) {
           throw new Error("nodeIds is required for set_text_properties");
@@ -765,9 +884,10 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
         const node = await getTextNodeById(nodeId);
         const params = request.params ?? {};
         const applied: Record<string, unknown> = {};
+        const problems: string[] = [];
 
-        await loadFontsForTextNode(node);
-
+        // Validation: the new font must be one Figma has, and loads here.
+        let font: FontName | undefined;
         if (typeof params.fontFamily === "string" || typeof params.fontStyle === "string") {
           const currentFontName = typeof node.fontName === "symbol" ? null : node.fontName;
           const nextFamily =
@@ -776,12 +896,20 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
             typeof params.fontStyle === "string" ? params.fontStyle : currentFontName?.style;
 
           if (!nextFamily || !nextStyle) {
-            throw new Error(
-              "fontFamily and fontStyle must resolve to a concrete font for set_text_properties"
+            problems.push(
+              "fontFamily and fontStyle must resolve to a concrete font: the node mixes fonts, so pass both."
             );
+          } else {
+            font = await resolveFont(nextFamily, nextStyle, problems);
           }
+        }
+        checkHex(params, "fillHex", problems);
+        if (problems.length > 0) throw fieldError(tool, problems);
 
-          node.fontName = await ensureFont(nextFamily, nextStyle);
+        await loadFontsForTextNode(node);
+
+        if (font) {
+          node.fontName = font;
           applied.fontName = node.fontName;
         }
 
@@ -809,16 +937,6 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
           applied.textAlignVertical = node.textAlignVertical;
         }
 
-        if (
-          params.textAutoResize === "NONE" ||
-          params.textAutoResize === "WIDTH_AND_HEIGHT" ||
-          params.textAutoResize === "HEIGHT" ||
-          params.textAutoResize === "TRUNCATE"
-        ) {
-          node.textAutoResize = params.textAutoResize;
-          applied.textAutoResize = node.textAutoResize;
-        }
-
         if (typeof params.lineHeightPx === "number") {
           node.lineHeight = {
             unit: "PIXELS",
@@ -839,20 +957,35 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
           const fillOpacity =
             typeof params.fillOpacity === "number" ? params.fillOpacity : undefined;
           applyTextFill(node, params.fillHex, fillOpacity);
-          applied.fillHex = params.fillHex;
-          applied.fillOpacity = fillOpacity ?? 1;
+          const paint = firstSolid(node.fills);
+          applied.fillHex = paint ? rgbToHex(paint.color) : params.fillHex;
+          applied.fillOpacity = paint ? (paint.opacity ?? 1) : (fillOpacity ?? 1);
+        }
+
+        // A resize drops the auto-resize set before it, so the size goes
+        // first and textAutoResize after it: an explicit mode is kept.
+        resizeNodeIfSupported(node, params.width, params.height);
+
+        if (
+          params.textAutoResize === "NONE" ||
+          params.textAutoResize === "WIDTH_AND_HEIGHT" ||
+          params.textAutoResize === "HEIGHT" ||
+          params.textAutoResize === "TRUNCATE"
+        ) {
+          node.textAutoResize = params.textAutoResize;
+          applied.textAutoResize = node.textAutoResize;
+        }
+
+        if (typeof params.width === "number" || typeof params.height === "number") {
+          applied.width = node.width;
+          applied.height = node.height;
+          applied.textAutoResize = node.textAutoResize;
         }
 
         if (typeof params.x === "number" || typeof params.y === "number") {
           positionNode(node, params.x, params.y);
           applied.x = node.x;
           applied.y = node.y;
-        }
-
-        resizeNodeIfSupported(node, params.width, params.height);
-        if (typeof params.width === "number" || typeof params.height === "number") {
-          applied.width = node.width;
-          applied.height = node.height;
         }
 
         return {
@@ -866,6 +999,7 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
         };
       }
       case "set_node_properties": {
+        const tool = "set_node_properties";
         const nodeId = request.nodeIds && request.nodeIds[0];
         if (!nodeId) {
           throw new Error("nodeIds is required for set_node_properties");
@@ -880,6 +1014,48 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
           throw new Error("At least one property is required for set_node_properties");
         }
 
+        // Validation: every field is checked against the node before the
+        // first write, so a refused call leaves the node as it was.
+        const problems: string[] = [];
+        const layout = readChildLayout(params, problems);
+        if ((typeof params.x === "number" || typeof params.y === "number") && !("x" in node)) {
+          problems.push(`Node does not support x/y positioning: ${nodeId}`);
+        }
+        if (
+          (typeof params.width === "number" || typeof params.height === "number") &&
+          !("resize" in node)
+        ) {
+          problems.push(`Node does not support resizing: ${nodeId}`);
+        }
+        if (typeof params.rotation === "number" && !("rotation" in node)) {
+          problems.push(unsupportedPropertyText(tool, node, "rotation"));
+        }
+        if (typeof params.opacity === "number" && !("opacity" in node)) {
+          problems.push(unsupportedPropertyText(tool, node, "opacity"));
+        }
+        if (typeof params.cornerRadius === "number" && !("cornerRadius" in node)) {
+          problems.push(`Node does not support cornerRadius: ${node.id}`);
+        }
+        if (typeof params.clipsContent === "boolean" && !("clipsContent" in node)) {
+          problems.push(unsupportedPropertyText(tool, node, "clipsContent"));
+        }
+        if (layout.index !== undefined && !node.parent) {
+          problems.push(`index needs a parent, and ${node.id} "${node.name}" has none.`);
+        }
+        checkChildLayout(
+          layout,
+          {
+            type: node.type,
+            autoLayout: hasAutoLayout(node),
+            parent: node.parent,
+            namedParent: true,
+          },
+          problems
+        );
+        if (problems.length > 0) {
+          throw problems.length === 1 ? new Error(problems[0]) : fieldError(tool, problems);
+        }
+
         if (typeof params.name === "string") {
           node.name = params.name;
           applied.name = node.name;
@@ -890,44 +1066,48 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
           applied.visible = node.visible;
         }
 
-        if (typeof params.x === "number" || typeof params.y === "number") {
-          if (!("x" in node) || !("y" in node)) {
-            throw new Error(`Node does not support x/y positioning: ${nodeId}`);
-          }
-          positionNode(node, params.x, params.y);
-          applied.x = node.x;
-          applied.y = node.y;
-        }
-
+        // The size goes before the sizing modes, so an explicit HUG or FILL
+        // is not undone by it.
         if (typeof params.width === "number" || typeof params.height === "number") {
           resizeNodeIfSupported(node, params.width, params.height);
           applied.width = node.width;
           applied.height = node.height;
         }
 
-        if (typeof params.rotation === "number") {
-          if (!("rotation" in node)) {
-            throw unsupportedProperty("set_node_properties", node, "rotation");
-          }
+        if (typeof params.rotation === "number" && "rotation" in node) {
           node.rotation = params.rotation;
           applied.rotation = node.rotation;
         }
 
-        if (typeof params.opacity === "number") {
-          if (!("opacity" in node)) {
-            throw unsupportedProperty("set_node_properties", node, "opacity");
-          }
+        if (typeof params.opacity === "number" && "opacity" in node) {
           node.opacity = params.opacity;
           applied.opacity = node.opacity;
         }
 
-        if (typeof params.cornerRadius === "number") {
-          if (!("cornerRadius" in node)) {
-            throw new Error(`Node does not support cornerRadius: ${node.id}`);
-          }
+        if (typeof params.cornerRadius === "number" && "cornerRadius" in node) {
           const cornerNode = node as CornerMixin;
           cornerNode.cornerRadius = params.cornerRadius;
           applied.cornerRadius = cornerNode.cornerRadius;
+        }
+
+        if (typeof params.clipsContent === "boolean" && "clipsContent" in node) {
+          node.clipsContent = params.clipsContent;
+          applied.clipsContent = node.clipsContent;
+        }
+
+        if (layout.index !== undefined && node.parent) {
+          await loadIfPage(node.parent);
+          placeInParent(node, node.parent, layout.index);
+        }
+        applyChildLayout(node, layout);
+        readBackChildLayout(node, layout, applied);
+
+        // Last: Figma ignores x and y of a child in an auto-layout flow, and
+        // takes them on an ABSOLUTE child only after the positioning.
+        if (typeof params.x === "number" || typeof params.y === "number") {
+          positionNode(node, params.x, params.y);
+          applied.x = "x" in node ? node.x : undefined;
+          applied.y = "y" in node ? node.y : undefined;
         }
 
         return {
@@ -957,6 +1137,12 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
 
         setSolidFill(node, params.hex, opacity, target);
 
+        // Read back from the node: what Figma stored, not what was asked.
+        const paints = (node as SceneNode & Record<string, unknown>)[
+          target === "stroke" ? "strokes" : "fills"
+        ] as ReadonlyArray<Paint>;
+        const paint = firstSolid(paints);
+
         return {
           type: request.type,
           requestId: request.requestId,
@@ -965,8 +1151,8 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
             nodeName: node.name,
             applied: {
               target,
-              hex: params.hex,
-              opacity: opacity ?? 1,
+              hex: paint ? rgbToHex(paint.color) : params.hex,
+              opacity: paint ? (paint.opacity ?? 1) : (opacity ?? 1),
             },
           },
         };
@@ -1029,7 +1215,7 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
             applied: {
               target,
               gradientType: paintType,
-              stops: paint.gradientStops.length,
+              stops: readBackGradientStops(node, target, paint.gradientStops.length),
             },
           },
         };
@@ -1097,7 +1283,7 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
           data: {
             nodeId: node.id,
             nodeName: node.name,
-            applied: { count: built.length },
+            applied: { count: (node as BlendMixin).effects.length },
           },
         };
       }
@@ -1116,7 +1302,10 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
             throw new Error(`Node does not support strokeWeight: ${node.id}`);
           }
           (node as MinimalStrokesMixin).strokeWeight = params.strokeWeight;
-          applied.strokeWeight = params.strokeWeight;
+          applied.strokeWeight = readBack(
+            (node as MinimalStrokesMixin).strokeWeight,
+            params.strokeWeight
+          );
         }
 
         if (
@@ -1128,7 +1317,7 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
             throw new Error(`Node does not support strokeAlign: ${node.id}`);
           }
           (node as MinimalStrokesMixin).strokeAlign = params.strokeAlign;
-          applied.strokeAlign = params.strokeAlign;
+          applied.strokeAlign = (node as MinimalStrokesMixin).strokeAlign;
         }
 
         if (Array.isArray(params.dashPattern)) {
@@ -1142,7 +1331,7 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
             return n;
           });
           (node as MinimalStrokesMixin).dashPattern = pattern;
-          applied.dashPattern = pattern;
+          applied.dashPattern = [...(node as MinimalStrokesMixin).dashPattern];
         }
 
         if (typeof params.strokeCap === "string") {
@@ -1150,7 +1339,10 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
             throw new Error(`Node does not support strokeCap: ${node.id}`);
           }
           (node as SceneNode & { strokeCap: StrokeCap }).strokeCap = params.strokeCap as StrokeCap;
-          applied.strokeCap = params.strokeCap;
+          applied.strokeCap = readBack(
+            (node as SceneNode & { strokeCap: StrokeCap | symbol }).strokeCap,
+            params.strokeCap
+          );
         }
 
         if (typeof params.strokeJoin === "string") {
@@ -1159,7 +1351,10 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
           }
           (node as SceneNode & { strokeJoin: StrokeJoin }).strokeJoin =
             params.strokeJoin as StrokeJoin;
-          applied.strokeJoin = params.strokeJoin;
+          applied.strokeJoin = readBack(
+            (node as SceneNode & { strokeJoin: StrokeJoin | symbol }).strokeJoin,
+            params.strokeJoin
+          );
         }
 
         return {
@@ -1186,74 +1381,7 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
         const params = request.params ?? {};
         const applied: Record<string, unknown> = {};
 
-        if (
-          params.layoutMode === "NONE" ||
-          params.layoutMode === "HORIZONTAL" ||
-          params.layoutMode === "VERTICAL"
-        ) {
-          frame.layoutMode = params.layoutMode;
-          applied.layoutMode = params.layoutMode;
-        }
-
-        if (typeof params.itemSpacing === "number") {
-          frame.itemSpacing = params.itemSpacing;
-          applied.itemSpacing = params.itemSpacing;
-        }
-        if (typeof params.counterAxisSpacing === "number") {
-          (frame as FrameNode & { counterAxisSpacing: number }).counterAxisSpacing =
-            params.counterAxisSpacing;
-          applied.counterAxisSpacing = params.counterAxisSpacing;
-        }
-
-        if (typeof params.paddingTop === "number") {
-          frame.paddingTop = params.paddingTop;
-          applied.paddingTop = params.paddingTop;
-        }
-        if (typeof params.paddingRight === "number") {
-          frame.paddingRight = params.paddingRight;
-          applied.paddingRight = params.paddingRight;
-        }
-        if (typeof params.paddingBottom === "number") {
-          frame.paddingBottom = params.paddingBottom;
-          applied.paddingBottom = params.paddingBottom;
-        }
-        if (typeof params.paddingLeft === "number") {
-          frame.paddingLeft = params.paddingLeft;
-          applied.paddingLeft = params.paddingLeft;
-        }
-
-        if (
-          params.primaryAxisAlignItems === "MIN" ||
-          params.primaryAxisAlignItems === "MAX" ||
-          params.primaryAxisAlignItems === "CENTER" ||
-          params.primaryAxisAlignItems === "SPACE_BETWEEN"
-        ) {
-          frame.primaryAxisAlignItems = params.primaryAxisAlignItems;
-          applied.primaryAxisAlignItems = params.primaryAxisAlignItems;
-        }
-        if (
-          params.counterAxisAlignItems === "MIN" ||
-          params.counterAxisAlignItems === "MAX" ||
-          params.counterAxisAlignItems === "CENTER" ||
-          params.counterAxisAlignItems === "BASELINE"
-        ) {
-          frame.counterAxisAlignItems = params.counterAxisAlignItems;
-          applied.counterAxisAlignItems = params.counterAxisAlignItems;
-        }
-
-        if (params.primaryAxisSizingMode === "FIXED" || params.primaryAxisSizingMode === "AUTO") {
-          frame.primaryAxisSizingMode = params.primaryAxisSizingMode;
-          applied.primaryAxisSizingMode = params.primaryAxisSizingMode;
-        }
-        if (params.counterAxisSizingMode === "FIXED" || params.counterAxisSizingMode === "AUTO") {
-          frame.counterAxisSizingMode = params.counterAxisSizingMode;
-          applied.counterAxisSizingMode = params.counterAxisSizingMode;
-        }
-
-        if (params.layoutWrap === "NO_WRAP" || params.layoutWrap === "WRAP") {
-          (frame as FrameNode & { layoutWrap: "NO_WRAP" | "WRAP" }).layoutWrap = params.layoutWrap;
-          applied.layoutWrap = params.layoutWrap;
-        }
+        applyAutoLayout(frame, params, applied);
 
         return {
           type: request.type,
@@ -1292,235 +1420,351 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
         };
       }
       case "create_frame": {
+        const tool = "create_frame";
         const params = request.params ?? {};
-        const frame = figma.createFrame();
-
-        if (typeof params.name === "string") {
-          frame.name = params.name;
+        const problems: string[] = [];
+        const parent = await findParent(params.parentId, problems);
+        const layout = readChildLayout(params, problems);
+        checkHex(params, "fillHex", problems);
+        checkHex(params, "strokeHex", problems);
+        const ownAutoLayout =
+          params.layoutMode === "HORIZONTAL" || params.layoutMode === "VERTICAL";
+        if (parent) {
+          checkChildLayout(
+            layout,
+            { type: "FRAME", autoLayout: ownAutoLayout, parent, namedParent: namesParent(params) },
+            problems
+          );
         }
+        if (problems.length > 0 || !parent) throw fieldError(tool, problems);
 
         const width = typeof params.width === "number" ? params.width : 100;
         const height = typeof params.height === "number" ? params.height : 100;
-        frame.resize(width, height);
+        // With its own auto layout, a frame keeps a size the caller gave and
+        // hugs its content on an axis that has neither a size nor a sizing.
+        const sizing: ChildLayout = ownAutoLayout
+          ? {
+              ...layout,
+              layoutSizingHorizontal: layout.layoutSizingHorizontal ?? defaultSizing(params.width),
+              layoutSizingVertical: layout.layoutSizingVertical ?? defaultSizing(params.height),
+            }
+          : layout;
 
-        if (typeof params.fillHex === "string") {
-          const fillOpacity =
-            typeof params.fillOpacity === "number" ? params.fillOpacity : undefined;
-          setSolidFill(frame, params.fillHex, fillOpacity);
-        }
+        const frame = figma.createFrame();
+        return await finishOrRemove(frame, () => {
+          if (typeof params.name === "string") {
+            frame.name = params.name;
+          }
+          frame.resize(width, height);
 
-        await appendToParentIfProvided(frame, params.parentId);
-        positionNode(frame, params.x, params.y);
+          if (typeof params.fillHex === "string") {
+            const fillOpacity =
+              typeof params.fillOpacity === "number" ? params.fillOpacity : undefined;
+            setSolidFill(frame, params.fillHex, fillOpacity);
+          }
+          if (typeof params.strokeHex === "string") {
+            setSolidFill(frame, params.strokeHex, undefined, "stroke");
+          }
+          if (typeof params.strokeWeight === "number") {
+            frame.strokeWeight = params.strokeWeight;
+          }
+          if (
+            params.strokeAlign === "INSIDE" ||
+            params.strokeAlign === "OUTSIDE" ||
+            params.strokeAlign === "CENTER"
+          ) {
+            frame.strokeAlign = params.strokeAlign;
+          }
+          if (typeof params.cornerRadius === "number") {
+            frame.cornerRadius = params.cornerRadius;
+          }
+          if (typeof params.clipsContent === "boolean") {
+            frame.clipsContent = params.clipsContent;
+          }
 
-        return {
-          type: request.type,
-          requestId: request.requestId,
-          data: {
-            nodeId: frame.id,
-            nodeName: frame.name,
-            parentId: frame.parent?.id,
-            x: frame.x,
-            y: frame.y,
-            width: frame.width,
-            height: frame.height,
-          },
-        };
+          applyAutoLayout(frame, params, {});
+          if (ownAutoLayout) keepGivenSize(frame, sizing, width, height);
+          placeNew(frame, parent, params, layout.index);
+          applyChildLayout(frame, sizing);
+          positionNode(frame, params.x, params.y);
+
+          return {
+            type: request.type,
+            requestId: request.requestId,
+            data: describeCreated(frame),
+          };
+        });
       }
       case "create_text": {
+        const tool = "create_text";
         const params = request.params ?? {};
+        const problems: string[] = [];
+        const parent = await findParent(params.parentId, problems);
+        const layout = readChildLayout(params, problems);
+        checkHex(params, "fillHex", problems);
+
+        // The font loads here, before the node exists: a font the file cannot
+        // use is refused with the closest families, and leaves nothing.
+        let style: TextStyle | undefined;
+        let font: FontName | undefined;
+        if (typeof params.textStyleId === "string") {
+          const clashes = [
+            "fontFamily",
+            "fontStyle",
+            "fontSize",
+            "lineHeightPx",
+            "letterSpacingPx",
+          ].filter((field) => params[field] !== undefined && params[field] !== null);
+          if (clashes.length > 0) {
+            problems.push(
+              `textStyleId sets the font, the size, the line height, and the letter spacing, so it does not go with ${clashes.join(", ")}. Drop ${clashes.length === 1 ? "it" : "them"}, or drop textStyleId.`
+            );
+          }
+          const found = await findTextStyle(params.textStyleId);
+          if (typeof found === "string") {
+            problems.push(`textStyleId: ${found}`);
+          } else {
+            style = found;
+            try {
+              await figma.loadFontAsync(found.fontName);
+              font = found.fontName;
+            } catch (err) {
+              problems.push(
+                `textStyleId: the font "${found.fontName.family} ${found.fontName.style}" of this style could not be loaded: ${err instanceof Error ? err.message : String(err)}. Pick a style whose font this file can use, or pass fontFamily and fontStyle instead.`
+              );
+            }
+          }
+        } else {
+          const fontFamily = typeof params.fontFamily === "string" ? params.fontFamily : "Inter";
+          const fontStyle = typeof params.fontStyle === "string" ? params.fontStyle : "Regular";
+          font = await resolveFont(fontFamily, fontStyle, problems);
+        }
+        if (parent) {
+          checkChildLayout(
+            layout,
+            { type: "TEXT", autoLayout: false, parent, namedParent: namesParent(params) },
+            problems
+          );
+        }
+        if (problems.length > 0 || !parent || !font) throw fieldError(tool, problems);
+        const loadedFont = font;
+
+        // With a width and no height, the text wraps at that width and grows
+        // downward; a text that fills its parent's width does the same.
+        const autoResize = isTextAutoResize(params.textAutoResize)
+          ? params.textAutoResize
+          : typeof params.height !== "number" &&
+              (typeof params.width === "number" || layout.layoutSizingHorizontal === "FILL")
+            ? "HEIGHT"
+            : undefined;
+
         const text = figma.createText();
+        return await finishOrRemove(text, async () => {
+          text.fontName = loadedFont;
+          if (style) {
+            await text.setTextStyleIdAsync(style.id);
+          }
 
-        const fontFamily = typeof params.fontFamily === "string" ? params.fontFamily : "Inter";
-        const fontStyle = typeof params.fontStyle === "string" ? params.fontStyle : "Regular";
-        text.fontName = await ensureFont(fontFamily, fontStyle);
+          if (typeof params.name === "string") {
+            text.name = params.name;
+          }
+          if (typeof params.characters === "string") {
+            text.characters = params.characters;
+          }
+          if (typeof params.fontSize === "number") {
+            text.fontSize = params.fontSize;
+          }
+          if (typeof params.fillHex === "string") {
+            const fillOpacity =
+              typeof params.fillOpacity === "number" ? params.fillOpacity : undefined;
+            applyTextFill(text, params.fillHex, fillOpacity);
+          }
 
-        if (typeof params.name === "string") {
-          text.name = params.name;
-        }
-        if (typeof params.characters === "string") {
-          text.characters = params.characters;
-        }
-        if (typeof params.fontSize === "number") {
-          text.fontSize = params.fontSize;
-        }
-        if (typeof params.fillHex === "string") {
-          const fillOpacity =
-            typeof params.fillOpacity === "number" ? params.fillOpacity : undefined;
-          applyTextFill(text, params.fillHex, fillOpacity);
-        }
+          if (
+            params.textAlignHorizontal === "LEFT" ||
+            params.textAlignHorizontal === "CENTER" ||
+            params.textAlignHorizontal === "RIGHT" ||
+            params.textAlignHorizontal === "JUSTIFIED"
+          ) {
+            text.textAlignHorizontal = params.textAlignHorizontal;
+          }
+          if (
+            params.textAlignVertical === "TOP" ||
+            params.textAlignVertical === "CENTER" ||
+            params.textAlignVertical === "BOTTOM"
+          ) {
+            text.textAlignVertical = params.textAlignVertical;
+          }
+          if (typeof params.lineHeightPx === "number") {
+            text.lineHeight = { unit: "PIXELS", value: params.lineHeightPx };
+          }
+          if (typeof params.letterSpacingPx === "number") {
+            text.letterSpacing = { unit: "PIXELS", value: params.letterSpacingPx };
+          }
 
-        if (
-          params.textAlignHorizontal === "LEFT" ||
-          params.textAlignHorizontal === "CENTER" ||
-          params.textAlignHorizontal === "RIGHT" ||
-          params.textAlignHorizontal === "JUSTIFIED"
-        ) {
-          text.textAlignHorizontal = params.textAlignHorizontal;
-        }
+          resizeNodeIfSupported(text, params.width, params.height);
+          placeNew(text, parent, params, layout.index);
+          applyChildLayout(text, layout);
+          // Last of the sizes: a resize or a sizing mode before it would drop it.
+          if (autoResize !== undefined) {
+            text.textAutoResize = autoResize;
+          }
+          positionNode(text, params.x, params.y);
 
-        if (
-          params.textAutoResize === "NONE" ||
-          params.textAutoResize === "WIDTH_AND_HEIGHT" ||
-          params.textAutoResize === "HEIGHT" ||
-          params.textAutoResize === "TRUNCATE"
-        ) {
-          text.textAutoResize = params.textAutoResize;
-        }
-
-        resizeNodeIfSupported(text, params.width, params.height);
-        await appendToParentIfProvided(text, params.parentId);
-        positionNode(text, params.x, params.y);
-
-        return {
-          type: request.type,
-          requestId: request.requestId,
-          data: {
-            nodeId: text.id,
-            nodeName: text.name,
-            parentId: text.parent?.id,
-            characters: text.characters,
-            x: text.x,
-            y: text.y,
-            width: text.width,
-            height: text.height,
-          },
-        };
+          return {
+            type: request.type,
+            requestId: request.requestId,
+            data: describeCreated(text, {
+              characters: text.characters,
+              textAutoResize: text.textAutoResize,
+            }),
+          };
+        });
       }
       case "create_shape": {
+        const tool = "create_shape";
         const params = request.params ?? {};
         const shapeType = params.shapeType;
-        let node: SceneNode;
-
-        if (shapeType === "ELLIPSE") {
-          node = figma.createEllipse();
-        } else if (shapeType === "LINE") {
-          node = figma.createLine();
-        } else {
-          node = figma.createRectangle();
-        }
-
-        if (typeof params.name === "string") {
-          node.name = params.name;
-        }
-
-        resizeNodeIfSupported(node, params.width, params.height);
-
-        if (typeof params.rotation === "number" && "rotation" in node) {
-          node.rotation = params.rotation;
-        }
+        const problems: string[] = [];
+        const parent = await findParent(params.parentId, problems);
+        const layout = readChildLayout(params, problems);
 
         if (shapeType === "LINE" && typeof params.fillHex === "string") {
-          throw new Error("LINE shapes do not support fillHex — use strokeHex instead");
+          problems.push("LINE shapes do not support fillHex — use strokeHex instead");
         }
-
-        if (typeof params.fillHex === "string") {
-          const fillOpacity =
-            typeof params.fillOpacity === "number" ? params.fillOpacity : undefined;
-          setSolidFill(node, params.fillHex, fillOpacity);
-        }
-
         if (shapeType === "LINE" && typeof params.strokeHex !== "string") {
-          throw new Error(
+          problems.push(
             "LINE shapes require strokeHex (lines have no fill, so without a stroke they are invisible)"
           );
         }
+        checkHex(params, "fillHex", problems);
+        checkHex(params, "strokeHex", problems);
+        const nodeType =
+          shapeType === "ELLIPSE" ? "ELLIPSE" : shapeType === "LINE" ? "LINE" : "RECTANGLE";
+        if (parent) {
+          checkChildLayout(
+            layout,
+            { type: nodeType, autoLayout: false, parent, namedParent: namesParent(params) },
+            problems
+          );
+        }
+        if (problems.length > 0 || !parent) throw fieldError(tool, problems);
 
-        if (typeof params.strokeHex === "string") {
-          // Captured before the guard: every shape created above has `strokes`,
-          // so TypeScript narrows `node` to `never` inside it.
-          const shapeId = node.id;
-          if (!("strokes" in node)) {
-            throw new Error(`Node does not support strokes: ${shapeId}`);
+        const node: SceneNode =
+          nodeType === "ELLIPSE"
+            ? figma.createEllipse()
+            : nodeType === "LINE"
+              ? figma.createLine()
+              : figma.createRectangle();
+
+        return await finishOrRemove(node, () => {
+          if (typeof params.name === "string") {
+            node.name = params.name;
           }
-          const strokeOpacity =
-            typeof params.strokeOpacity === "number" ? params.strokeOpacity : undefined;
-          setSolidFill(node, params.strokeHex, strokeOpacity, "stroke");
-        }
 
-        if ("strokeWeight" in node && typeof params.strokeWeight === "number") {
-          node.strokeWeight = params.strokeWeight;
-        }
+          resizeNodeIfSupported(node, params.width, params.height);
 
-        if (typeof params.cornerRadius === "number" && "cornerRadius" in node) {
-          node.cornerRadius = params.cornerRadius;
-        }
+          if (typeof params.rotation === "number" && "rotation" in node) {
+            node.rotation = params.rotation;
+          }
 
-        await appendToParentIfProvided(node, params.parentId);
-        positionNode(node, params.x, params.y);
+          if (typeof params.fillHex === "string") {
+            const fillOpacity =
+              typeof params.fillOpacity === "number" ? params.fillOpacity : undefined;
+            setSolidFill(node, params.fillHex, fillOpacity);
+          }
 
-        return {
-          type: request.type,
-          requestId: request.requestId,
-          data: {
-            nodeId: node.id,
-            nodeName: node.name,
-            shapeType,
-            parentId: node.parent?.id,
-            x: "x" in node ? node.x : undefined,
-            y: "y" in node ? node.y : undefined,
-            width: "width" in node ? node.width : undefined,
-            height: "height" in node ? node.height : undefined,
-          },
-        };
+          if (typeof params.strokeHex === "string") {
+            const strokeOpacity =
+              typeof params.strokeOpacity === "number" ? params.strokeOpacity : undefined;
+            setSolidFill(node, params.strokeHex, strokeOpacity, "stroke");
+          }
+
+          if ("strokeWeight" in node && typeof params.strokeWeight === "number") {
+            node.strokeWeight = params.strokeWeight;
+          }
+
+          if (typeof params.cornerRadius === "number" && "cornerRadius" in node) {
+            node.cornerRadius = params.cornerRadius;
+          }
+
+          placeNew(node, parent, params, layout.index);
+          applyChildLayout(node, layout);
+          positionNode(node, params.x, params.y);
+
+          return {
+            type: request.type,
+            requestId: request.requestId,
+            data: describeCreated(node, { shapeType }),
+          };
+        });
       }
       case "create_image": {
+        const tool = "create_image";
         const params = request.params ?? {};
         if (typeof params.imageBase64 !== "string" || params.imageBase64.length === 0) {
           throw new Error("imageBase64 is required for create_image");
         }
+        const problems: string[] = [];
+        const parent = await findParent(params.parentId, problems);
+        const layout = readChildLayout(params, problems);
+        if (parent) {
+          checkChildLayout(
+            layout,
+            { type: "RECTANGLE", autoLayout: false, parent, namedParent: namesParent(params) },
+            problems
+          );
+        }
+        if (problems.length > 0 || !parent) throw fieldError(tool, problems);
 
+        // The image is made and measured before the node: Figma refuses a
+        // file it cannot read here, and nothing is left on the page.
         const image = figma.createImage(decodeBase64ToBytes(params.imageBase64));
         const imageSize = await image.getSizeAsync();
         const node = figma.createRectangle();
 
-        if (typeof params.name === "string") {
-          node.name = params.name;
-        }
+        return await finishOrRemove(node, () => {
+          if (typeof params.name === "string") {
+            node.name = params.name;
+          }
 
-        const aspectRatio = imageSize.width / imageSize.height;
-        const width =
-          typeof params.width === "number"
-            ? params.width
-            : typeof params.height === "number"
-              ? params.height * aspectRatio
-              : imageSize.width;
-        const height =
-          typeof params.height === "number"
-            ? params.height
-            : typeof params.width === "number"
-              ? params.width / aspectRatio
-              : imageSize.height;
+          const aspectRatio = imageSize.width / imageSize.height;
+          const width =
+            typeof params.width === "number"
+              ? params.width
+              : typeof params.height === "number"
+                ? params.height * aspectRatio
+                : imageSize.width;
+          const height =
+            typeof params.height === "number"
+              ? params.height
+              : typeof params.width === "number"
+                ? params.width / aspectRatio
+                : imageSize.height;
 
-        node.resize(width, height);
-        node.fills = [
-          {
-            type: "IMAGE",
-            imageHash: image.hash,
-            scaleMode: params.scaleMode === "FIT" ? "FIT" : "FILL",
-          },
-        ];
+          node.resize(width, height);
+          node.fills = [
+            {
+              type: "IMAGE",
+              imageHash: image.hash,
+              scaleMode: params.scaleMode === "FIT" ? "FIT" : "FILL",
+            },
+          ];
 
-        if (typeof params.cornerRadius === "number") {
-          node.cornerRadius = params.cornerRadius;
-        }
+          if (typeof params.cornerRadius === "number") {
+            node.cornerRadius = params.cornerRadius;
+          }
 
-        await appendToParentIfProvided(node, params.parentId);
-        positionNode(node, params.x, params.y);
+          placeNew(node, parent, params, layout.index);
+          applyChildLayout(node, layout);
+          positionNode(node, params.x, params.y);
 
-        return {
-          type: request.type,
-          requestId: request.requestId,
-          data: {
-            nodeId: node.id,
-            nodeName: node.name,
-            parentId: node.parent?.id,
-            x: node.x,
-            y: node.y,
-            width: node.width,
-            height: node.height,
-            imageHash: image.hash,
-          },
-        };
+          return {
+            type: request.type,
+            requestId: request.requestId,
+            data: describeCreated(node, { imageHash: image.hash }),
+          };
+        });
       }
       case "import_html_layers": {
         const params = request.params ?? {};
@@ -1531,64 +1775,63 @@ const runRequest = async (request: ServerRequest): Promise<PluginResponse> => {
             "layers (an html-figma LayerNode tree) is required for import_html_layers"
           );
         }
+        const problems: string[] = [];
+        const parent = await findParent(params.parentId, problems);
+        if (problems.length > 0 || !parent) throw fieldError("import_html_layers", problems);
 
         const wrapper = figma.createFrame();
-        wrapper.name =
-          typeof params.name === "string" && params.name.length > 0
-            ? params.name
-            : "imported layers";
-        const rootWidth = typeof root.width === "number" ? root.width : 100;
-        const rootHeight = typeof root.height === "number" ? root.height : 100;
-        wrapper.resize(Math.max(rootWidth, 1), Math.max(rootHeight, 1));
-        wrapper.fills = [];
-        wrapper.clipsContent = true;
-        // Same contract as the create_* tools: when parentId is given the
-        // wrapper is appended into it and x/y are relative to that parent.
-        await appendToParentIfProvided(wrapper, params.parentId);
-        positionNode(wrapper, params.x, params.y);
+        return await finishOrRemove(wrapper, async () => {
+          wrapper.name =
+            typeof params.name === "string" && params.name.length > 0
+              ? params.name
+              : "imported layers";
+          const rootWidth = typeof root.width === "number" ? root.width : 100;
+          const rootHeight = typeof root.height === "number" ? root.height : 100;
+          wrapper.resize(Math.max(rootWidth, 1), Math.max(rootHeight, 1));
+          wrapper.fills = [];
+          wrapper.clipsContent = true;
+          // Same contract as the create_* tools: when parentId is given the
+          // wrapper is appended into it and x/y are relative to that parent.
+          placeNew(wrapper, parent, params, undefined);
+          positionNode(wrapper, params.x, params.y);
 
-        // html-figma catches per-layer render errors internally and keeps
-        // going, so a failed layer would otherwise be silent. Count the tree
-        // up front and compare with how many layers actually rendered.
-        const countLayers = (layer: unknown): number => {
-          if (!layer || typeof layer !== "object") return 0;
-          const children = (layer as { children?: unknown }).children;
-          let total = 1;
-          if (Array.isArray(children)) {
-            for (const child of children) total += countLayers(child);
-          }
-          return total;
-        };
-        const expectedLayerCount = countLayers(root);
+          // html-figma catches per-layer render errors internally and keeps
+          // going, so a failed layer would otherwise be silent. Count the tree
+          // up front and compare with how many layers actually rendered.
+          const countLayers = (layer: unknown): number => {
+            if (!layer || typeof layer !== "object") return 0;
+            const children = (layer as { children?: unknown }).children;
+            let total = 1;
+            if (Array.isArray(children)) {
+              for (const child of children) total += countLayers(child);
+            }
+            return total;
+          };
+          const expectedLayerCount = countLayers(root);
 
-        let layerCount = 0;
-        // html-figma renderer: walks the tree, creates frames/text/rects/SVG
-        // vectors, matches installed fonts (including weights carried by the
-        // serialization), and resolves image fills.
-        await addLayersToFrame([root as never], wrapper, () => {
-          layerCount += 1;
+          let layerCount = 0;
+          // html-figma renderer: walks the tree, creates frames/text/rects/SVG
+          // vectors, matches installed fonts (including weights carried by the
+          // serialization), and resolves image fills.
+          await addLayersToFrame([root as never], wrapper, () => {
+            layerCount += 1;
+          });
+
+          return {
+            type: request.type,
+            requestId: request.requestId,
+            data: {
+              ...describeCreated(wrapper),
+              layerCount,
+              expectedLayerCount,
+              ...(layerCount < expectedLayerCount
+                ? {
+                    warning: `Partial import: ${expectedLayerCount - layerCount} of ${expectedLayerCount} layers failed to render (see the plugin console for per-layer errors). Delete node ${wrapper.id} and retry if completeness matters.`,
+                  }
+                : {}),
+            },
+          };
         });
-
-        return {
-          type: request.type,
-          requestId: request.requestId,
-          data: {
-            nodeId: wrapper.id,
-            nodeName: wrapper.name,
-            parentId: wrapper.parent?.id,
-            x: wrapper.x,
-            y: wrapper.y,
-            width: wrapper.width,
-            height: wrapper.height,
-            layerCount,
-            expectedLayerCount,
-            ...(layerCount < expectedLayerCount
-              ? {
-                  warning: `Partial import: ${expectedLayerCount - layerCount} of ${expectedLayerCount} layers failed to render (see the plugin console for per-layer errors). Delete node ${wrapper.id} and retry if completeness matters.`,
-                }
-              : {}),
-          },
-        };
       }
       case "duplicate_nodes": {
         if (!request.nodeIds || request.nodeIds.length === 0) {
