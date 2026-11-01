@@ -65,7 +65,7 @@ export const createParentIdSchema = () =>
   createFigmaNodeIdSchema()
     .optional()
     .describe(
-      "Parent node ID: a page, a frame, a group, a component, or a section; x and y are relative to it. Pass parentId. Without it the node goes to the page the user is viewing; pageId in the result tells you where it went."
+      "Parent node ID (page, frame, group, component, section); x and y are relative to it. Always pass it: without it the node goes to the page in view"
     );
 
 /**
@@ -79,53 +79,35 @@ export const createChildLayoutFields = () => ({
     .enum(["FIXED", "HUG", "FILL"])
     .optional()
     .describe(
-      "Width behaviour: FIXED keeps the width; HUG fits the content (an auto-layout frame or a text); FILL takes the free width of an auto-layout parent. Applied after the node is in its parent."
+      "FIXED keeps the width, HUG fits the content, FILL takes the free width of an auto-layout parent"
     ),
   layoutSizingVertical: z
     .enum(["FIXED", "HUG", "FILL"])
     .optional()
     .describe(
-      "Height behaviour: FIXED keeps the height; HUG fits the content (an auto-layout frame or a text); FILL takes the free height of an auto-layout parent. Applied after the node is in its parent."
+      "FIXED keeps the height, HUG fits the content, FILL takes the free height of an auto-layout parent"
     ),
   layoutPositioning: z
     .enum(["AUTO", "ABSOLUTE"])
     .optional()
     .describe(
-      "ABSOLUTE takes the node out of its auto-layout parent's flow, so x and y place it (a badge on a card); AUTO puts it back in the flow. Needs a parent with auto layout."
+      "ABSOLUTE takes the node out of the auto-layout flow, and x and y place it (a badge); AUTO puts it back"
     ),
-  minWidth: z
-    .number()
-    .min(0)
-    .optional()
-    .describe("Smallest width, for an auto-layout frame or a direct child of one"),
-  maxWidth: z
-    .number()
-    .min(0)
-    .optional()
-    .describe("Largest width, for an auto-layout frame or a direct child of one"),
-  minHeight: z
-    .number()
-    .min(0)
-    .optional()
-    .describe("Smallest height, for an auto-layout frame or a direct child of one"),
-  maxHeight: z
-    .number()
-    .min(0)
-    .optional()
-    .describe("Largest height, for an auto-layout frame or a direct child of one"),
+  minWidth: z.number().min(0).optional().describe("Smallest width (auto layout)"),
+  maxWidth: z.number().min(0).optional().describe("Largest width (auto layout)"),
+  minHeight: z.number().min(0).optional().describe("Smallest height (auto layout)"),
+  maxHeight: z.number().min(0).optional().describe("Largest height (auto layout)"),
   index: z
     .number()
     .int()
     .min(0)
     .optional()
     .describe(
-      "Position among the parent's children: 0 is the bottom of the stack, and a number past the top puts the node on top. The result reports the index it got."
+      "Stack position among the parent's children: 0 is the bottom; past the end is the top"
     ),
 });
 
 export const fileKeyField = z
   .string()
   .optional()
-  .describe(
-    "The fileKey of the Figma file to query. Required when multiple files are connected. Use list_files to see connected files."
-  );
+  .describe("The file to use; required when several files are connected (see list_files)");

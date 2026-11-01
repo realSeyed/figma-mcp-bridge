@@ -50,11 +50,7 @@ const letterSpacingField = z
  * A new schema for each field: one instance reused by several fields becomes a
  * `$ref` in the advertised JSON Schema, which a strict schema reader refuses.
  */
-const styleVariableIdField = () =>
-  createVariableIdSchema()
-    .nullable()
-    .optional()
-    .describe("The variable to bind, or null to remove the binding from this field");
+const styleVariableIdField = () => createVariableIdSchema().nullable().optional();
 
 /**
  * The variables driving the fields of a text style.
