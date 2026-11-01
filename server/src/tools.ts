@@ -1,7 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { lookup } from "node:dns/promises";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { isIP } from "node:net";
 import path from "node:path";
 import type { z } from "zod";
 import type { Node } from "./node.js";
@@ -40,10 +38,7 @@ import {
   screenshotToolResult,
 } from "./captures.js";
 import { canonicalJson } from "./evidence.js";
-
-const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
-const IMAGE_FETCH_TIMEOUT_MS = 15_000;
-const MAX_IMAGE_REDIRECTS = 5;
+import { loadImageSource } from "./image-source.js";
 
 /**
  * Registers all Figma bridge tools on the given MCP server.
@@ -364,7 +359,8 @@ export function registerTools(server: McpServer, node: Node, port: number): void
     createImageInput.shape,
     async ({ source, fileKey, ...params }): Promise<ToolResult> => {
       try {
-        const imageBase64 = await loadImageSourceAsBase64(source, process.cwd());
+        // The format and the size are checked here, before the bytes travel.
+        const { base64: imageBase64 } = await loadImageSource(source);
         return await renderResponse(() =>
           node.sendWithParams("create_image", undefined, { ...params, imageBase64 }, fileKey)
         );
@@ -598,17 +594,11 @@ export function registerTools(server: McpServer, node: Node, port: number): void
   registerExtensionTools(server, node);
 }
 
-/**
- * Loads an image source as a base64 string from a URL, data URI, or local file.
- * @param source - Image source: URL, data URI, or local file path.
- * @param workspaceRoot - Root directory for resolving relative local paths.
- * @returns Base64-encoded image bytes.
- */
 const MAX_LAYERS_JSON_BYTES = 16 * 1024 * 1024;
 
 /**
  * Reads and parses an html-figma layer-tree JSON file from inside the
- * workspace root. Mirrors the local-path rules of loadImageSourceAsBase64.
+ * workspace root, checked by real path.
  * @param source - JSON file path (absolute or relative to the workspace root).
  * @param workspaceRoot - The MCP server working directory.
  * @returns The parsed layer tree (root LayerNode).
@@ -658,193 +648,4 @@ async function loadLayersJson(
     );
   }
   return root as Record<string, unknown>;
-}
-
-async function loadImageSourceAsBase64(source: string, workspaceRoot: string): Promise<string> {
-  if (/^https?:\/\//i.test(source)) {
-    const bytes = await fetchImageBytes(source);
-    return bytes.toString("base64");
-  }
-
-  const dataUrlMatch = source.match(/^data:.*?;base64,(.+)$/);
-  if (dataUrlMatch) {
-    return dataUrlMatch[1];
-  }
-
-  const resolvedRoot = path.resolve(workspaceRoot);
-  const resolvedPath = path.resolve(resolvedRoot, source);
-  const relativePath = path.relative(resolvedRoot, resolvedPath);
-  const escapesRoot = relativePath.startsWith("..") || path.isAbsolute(relativePath);
-  if (escapesRoot) {
-    throw new Error(
-      `image source must be inside the MCP server working directory: ${resolvedRoot}`
-    );
-  }
-  const bytes = await readFile(resolvedPath);
-  if (bytes.length > MAX_IMAGE_BYTES) {
-    throw new Error(`Image exceeds ${MAX_IMAGE_BYTES} bytes`);
-  }
-  return bytes.toString("base64");
-}
-
-/**
- * Fetches image bytes from a remote URL with redirect and timeout limits.
- * @param source - HTTP or HTTPS image URL.
- * @returns Raw image bytes.
- */
-async function fetchImageBytes(source: string): Promise<Buffer> {
-  let url = new URL(source);
-  let redirects = 0;
-
-  while (true) {
-    await assertSafeHttpUrl(url);
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
-    let resp: Response;
-    try {
-      resp = await fetch(url, {
-        signal: controller.signal,
-        redirect: "manual",
-      });
-    } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") {
-        throw new Error(`Timed out fetching image after ${IMAGE_FETCH_TIMEOUT_MS}ms`);
-      }
-      throw err;
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    if (resp.status >= 300 && resp.status < 400) {
-      const location = resp.headers.get("location");
-      if (!location) {
-        throw new Error(`Image redirect missing Location header: ${resp.status}`);
-      }
-      redirects += 1;
-      if (redirects > MAX_IMAGE_REDIRECTS) {
-        throw new Error(`Image fetch exceeded ${MAX_IMAGE_REDIRECTS} redirects`);
-      }
-      url = new URL(location, url);
-      continue;
-    }
-
-    if (!resp.ok) {
-      throw new Error(`Failed to fetch image: ${resp.status} ${resp.statusText}`);
-    }
-
-    const contentLength = resp.headers.get("content-length");
-    if (contentLength !== null) {
-      const size = Number(contentLength);
-      if (!Number.isFinite(size) || size < 0) {
-        throw new Error("Invalid image Content-Length header");
-      }
-      if (size > MAX_IMAGE_BYTES) {
-        throw new Error(`Image exceeds ${MAX_IMAGE_BYTES} bytes`);
-      }
-    }
-
-    return readBoundedResponse(resp, MAX_IMAGE_BYTES);
-  }
-}
-
-/**
- * Validates that an image URL uses a safe public HTTP(S) endpoint.
- * @param url - URL to validate.
- */
-async function assertSafeHttpUrl(url: URL): Promise<void> {
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("Image URL must use http or https");
-  }
-  if (!url.hostname) {
-    throw new Error("Image URL must include a hostname");
-  }
-
-  const hostname = normalizeHostname(url.hostname);
-  const literalIp = isIP(hostname);
-  if (literalIp !== 0) {
-    if (isBlockedIp(hostname)) {
-      throw new Error("Image URL resolves to a blocked internal address");
-    }
-    return;
-  }
-
-  const addresses = await lookup(hostname, { all: true, verbatim: true });
-  if (addresses.length === 0) {
-    throw new Error("Image URL hostname did not resolve");
-  }
-  if (addresses.some((address) => isBlockedIp(address.address))) {
-    throw new Error("Image URL resolves to a blocked internal address");
-  }
-}
-
-/**
- * Checks whether an IP address is in a private, loopback, or otherwise blocked range.
- * @param address - IPv4 or IPv6 address string.
- * @returns True if the address is blocked for SSRF protection.
- */
-function isBlockedIp(address: string): boolean {
-  if (isIP(address) === 4) {
-    const [a, b] = address.split(".").map(Number);
-    return (
-      a === 0 ||
-      a === 10 ||
-      a === 127 ||
-      (a === 100 && b >= 64 && b <= 127) ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      a >= 224
-    );
-  }
-
-  const normalized = address.toLowerCase();
-  if (normalized.startsWith("::ffff:")) {
-    return isBlockedIp(normalized.slice("::ffff:".length));
-  }
-
-  return (
-    normalized === "::" ||
-    normalized === "::1" ||
-    normalized.startsWith("fc") ||
-    normalized.startsWith("fd") ||
-    /^fe[89ab]:/.test(normalized) ||
-    normalized.startsWith("ff")
-  );
-}
-
-/**
- * Strips surrounding brackets from an IPv6 hostname so it can be parsed as an IP.
- * @param hostname - Hostname string, possibly bracketed.
- * @returns Normalized hostname without brackets.
- */
-function normalizeHostname(hostname: string): string {
-  if (hostname.startsWith("[") && hostname.endsWith("]")) {
-    return hostname.slice(1, -1);
-  }
-  return hostname;
-}
-
-/**
- * Reads a response body up to a maximum byte limit.
- * @param resp - Fetch response with a readable body.
- * @param maxBytes - Maximum number of bytes to accept.
- * @returns Concatenated response bytes.
- */
-async function readBoundedResponse(resp: Response, maxBytes: number): Promise<Buffer> {
-  if (!resp.body) {
-    return Buffer.alloc(0);
-  }
-
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of resp.body) {
-    const bytes = Buffer.from(chunk);
-    total += bytes.length;
-    if (total > maxBytes) {
-      throw new Error(`Image exceeds ${maxBytes} bytes`);
-    }
-    chunks.push(bytes);
-  }
-  return Buffer.concat(chunks, total);
 }

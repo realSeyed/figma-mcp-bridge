@@ -111,6 +111,21 @@ export function jpgWithSize(width: number, height: number): Buffer {
   return Buffer.concat([Buffer.from([0xff, 0xd8]), app0, sof, Buffer.from([0xff, 0xd9])]);
 }
 
+/**
+ * The bytes of a GIF header with the given size: the GIF89a signature and the
+ * logical screen descriptor, little-endian. The server reads only the header.
+ * @param width - Pixel width.
+ * @param height - Pixel height.
+ * @returns The bytes.
+ */
+export function gifWithSize(width: number, height: number): Buffer {
+  const header = Buffer.alloc(13);
+  header.write("GIF89a", 0, "ascii");
+  header.writeUInt16LE(width, 6);
+  header.writeUInt16LE(height, 8);
+  return header;
+}
+
 /** What a `screenshotHandler` callback returns for one node. */
 export interface SimulatedCapture {
   format: "PNG" | "JPG" | "SVG" | "PDF";

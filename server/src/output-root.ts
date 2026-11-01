@@ -22,6 +22,9 @@
  *                                    and a write that fails removes the file
  *                                    it opened. Returns the number of bytes
  *                                    written.
+ *   outputRootPath()                 The root as configured, for a reader of
+ *                                    files under it. Checks nothing.
+ *   isInside(root, candidate)        True when a path is the root or under it.
  *
  * Containment is by real path, so a `..` segment, an absolute path elsewhere,
  * and a symbolic link or a junction inside the root that points out of it are
@@ -60,6 +63,15 @@ export function describeOutputRoot(): string {
       ? ` - the folder does not exist, so each write fails until it does`
       : "";
   return `Output root: ${ROOT.path} (${source})${missing}`;
+}
+
+/**
+ * The root as configured: an absolute path, which can hold a link. A reader
+ * of files under the root compares real paths itself. Makes and checks nothing.
+ * @returns The path.
+ */
+export function outputRootPath(): string {
+  return ROOT.path;
 }
 
 /**
@@ -240,7 +252,7 @@ function refusal(outputPath: string, cause: string, realRoot: string): Error {
 }
 
 /** True when `candidate` is `root` or lies under it. Ignores case on Windows. */
-function isInside(root: string, candidate: string): boolean {
+export function isInside(root: string, candidate: string): boolean {
   const a = comparable(root);
   const b = comparable(candidate);
   return b === a || b.startsWith(a + path.sep);
