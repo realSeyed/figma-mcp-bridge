@@ -455,6 +455,7 @@ tail -n 50 "$APPDATA/figma-mcp-bridge/bridge.log"
 | `move_to_section`              | Move nodes into a section without moving them on the canvas, and optionally fit it around them                                                                                                                                                                                                       |
 | `move_out_of_section`          | Lift nodes out of their section to whatever holds it, without moving them on the canvas                                                                                                                                                                                                              |
 | `fit_section`                  | Draw a section tight around the children it holds, leaving padding, without moving any of them                                                                                                                                                                                                       |
+| `batch`                        | Run up to 100 tool calls in order in one call; a later op takes `{ "ref": "<id>" }` to use the node ID of an earlier one, a stopped batch deletes the nodes it created, and a `batchId` makes a retry safe (see [Batches](#batches))                                                                 |
 
 All tools accept an optional `fileKey` parameter when multiple Figma files are connected. Use `list_files` to discover connected files and their keys.
 
@@ -570,14 +571,14 @@ A written item has `kind: "capture"`, `index`, `nodeId`, `nodeName`, `path`, `fo
 - `create_component` takes either `fromNodeId`, which converts a node in place and keeps its children, size, position, and paint, or `width` and `height`, which makes an empty component — so `fillHex` belongs to the second form only. A node that is already a component, a component set, or an instance is refused, as is a node inside one.
 - A variant carries its properties in its name: `Size=Small`, or several pairs as in `Size=Small, State=Hover`. `combine_as_variants` checks every name before the first write — all the components name the same properties, and no two repeat the same combination of values — so a call with a bad name writes nothing and reports every name to correct.
 - `figma.combineAsVariants` stacks every variant on one spot, so `combine_as_variants` lays the set out afterwards: `layout` picks a row or a column, `gap` sets the space between the variants, and the set is resized to fit them plus `padding`.
-- `create_instance` and `swap_instance` pick a variant with `variantProperties`, a property name mapped to its value. Every value is text in Figma, so write `24` as `"24"`. A value that matches no variant comes back with the valid values of each property; a set of values that still matches several variants comes back naming the properties that need one too, so an instance never lands on an arbitrary variant. Leave `variantProperties` out and the set's default variant is used.
+- `create_instance` and `swap_instance` pick a variant with `variantProperties`, a list of name and value pairs: `[{ "name": "Size", "value": "Large" }]`. The old form, a property name mapped to its value (`{ "Size": "Large" }`), still works. Every value is text in Figma, so write `24` as `"24"`. A value that matches no variant comes back with the valid values of each property; a set of values that still matches several variants comes back naming the properties that need one too, so an instance never lands on an arbitrary variant. Leave `variantProperties` out and the set's default variant is used.
 - `detach_instance` refuses an instance inside another instance: Figma detaches every instance above a nested one as well, so the call would reach further than it names. Detach the outer instance instead.
 - The property tools name a property either way: the display name Figma shows (`Label`) or the full name carrying the suffix Figma appends (`Label#12:0`). An exact full name wins, which also matches Figma's own rule that a `VARIANT` property takes precedence on a name collision; a display name that somehow matches two properties is refused with both full names rather than guessed at.
 - Take the name `add_component_property` and `edit_component_property` return, not the one you asked for. Figma keeps the display names of one component apart and renames a colliding one behind the call — asking for a second `Text` stores `Text2#16:13` — so the returned name is what the file carries and what the other tools take. The suffix does not change on a rename.
 - The property types these tools cover are `BOOLEAN`, `TEXT`, `INSTANCE_SWAP`, and `VARIANT`. `SLOT` properties are not supported: a slot carries a frame contract these tools do not model, and Figma refuses to set one on an instance. Use an `INSTANCE_SWAP` property to let an instance choose the component it shows.
 - A property lives on the component set rather than on one of its variants, so a variant ID is refused with the ID of its set — a property added to the set reaches every variant. A `VARIANT` property is an axis of a set: it is refused on a single component, takes no default value because the set's first variant is the default, and `delete_component_property` cannot remove it. Rename the variants so they no longer name it instead.
 - `bind_component_property` matches the field to the property type: `characters` reads a `TEXT` property and belongs to a text layer, `visible` reads a `BOOLEAN` property, and `mainComponent` reads an `INSTANCE_SWAP` property and belongs to an instance layer. The layer must sit inside the component, or inside one variant of the set, that owns the property; a layer inside an instance is refused, because the link lives on the main component. The other links on the layer are kept, and `propertyName: null` removes one and leaves the layer as it looks.
-- `set_instance_properties` checks every value against the property it names before the first write and hands them to Figma in one call, so a call with a bad value leaves the instance as it was. A `VARIANT` value the set does not have comes back with the values it does have, and the fonts of the text layers a `TEXT` property drives are loaded before the change.
+- `set_instance_properties` takes `properties` as name and value pairs too, each value as text: `[{ "name": "Label", "value": "Buy" }, { "name": "Show icon", "value": "false" }]`. A `BOOLEAN` property takes `"true"` or `"false"`. The old map, booleans included (`{ "Show icon": false }`), still works, and so does a boolean `defaultValue` or `newDefaultValue` in `add_component_property` and `edit_component_property`. The tool checks every value against the property it names before the first write and hands them to Figma in one call, so a call with a bad value leaves the instance as it was. A `VARIANT` value the set does not have comes back with the values it does have, and the fonts of the text layers a `TEXT` property drives are loaded before the change.
 - Figma keeps a section outside the frame tree: its parent is a page or another section, never a frame, a group, a component, or an instance. `create_section` refuses a `parentId` that is one of those, and refuses to wrap a node that sits in one — move it out with `reparent_nodes` first, or wrap the frame itself.
 - `create_section` takes either `nodeIds`, which wraps nodes that already share a parent, or `width` and `height`, which makes an empty section — so `parentId`, `x`, and `y` belong to the second form only, and `padding` to the first. Wrapping keeps every node where it is on the canvas and in the stack: the section is sized to the nodes plus `padding`, takes the stack position of the lowest node, and each node's transform is rewritten against it. Every node is checked before the first write, and a Figma refusal partway through puts the moved nodes back and removes the section.
 - A section does not clip and does not carry its children when it resizes, so a child can end up wholly outside the section that owns it and still be drawn. `get_section` reports `contentBounds`, where the visible children really sit relative to the section, beside the section's own box, and `overflowIds` for the children hanging outside it.
@@ -591,6 +592,44 @@ A written item has `kind: "capture"`, `index`, `nodeId`, `nodeName`, `path`, `fo
 - `list_components` names the nearest section holding each component as `sectionId` and `sectionName`, and `sectionId` narrows the listing to one section at any depth. It searches that section's own subtree rather than a page, so it takes the place of `scope`.
 - `sectionContentsHidden` is reported, never written: collapsing a section is a FigJam feature, and this plugin runs in Figma Design. `devStatus` — Figma's "Ready for dev" and "Completed" — is a Dev Mode feature and is neither read nor written.
 - `clear_paints` sets the whole `fills` list, or the whole `strokes` list, of up to 200 nodes to an empty list, and checks every node before the first write: a batch with a bad node writes nothing and reports every node to correct. An empty list shows as a missing `fills` field (or a missing `strokes` field) in `get_node` and in a dump, so the missing field is the empty list. Each result entry holds `previous`, the record of the old list in the dump form (a hidden paint with `visible: false`, and the variable bound to each paint), `previousCount`, which counts every paint including the types `previous` leaves out, and `previousStyleId`. A text node with fills per range reports `previous: "mixed"` and the fills of each range in `previousSegments`. A paint style link goes with the list. A variable bound to a paint goes with the paint, and the variable stays in the file. On an instance sublayer the write is an override: the instance stays an instance, and `detach_instance` is not called. The auditor role does not register `clear_paints`.
+
+### Batches
+
+`batch` runs up to 100 tool calls in order, in one call, so a component or a page section takes one turn instead of twenty. Each op is `{ id?, tool, args }`. A later op takes `{ "ref": "<id>" }` anywhere in its args for the node ID an earlier op returned (its `nodeId`, `id`, or `pageId`), or `{ "ref": "<id>", "path": "a.b.0.c" }` for any value of that result. Nothing else is rewritten: a string such as `"$49"` arrives as it is.
+
+```json
+{
+  "batchId": "pricing-card-1",
+  "ops": [
+    {
+      "id": "card",
+      "tool": "create_frame",
+      "args": { "name": "Card", "width": 320, "height": 200, "layoutMode": "VERTICAL" }
+    },
+    { "tool": "create_text", "args": { "parentId": { "ref": "card" }, "characters": "$49" } },
+    {
+      "tool": "create_instance",
+      "args": {
+        "componentId": "12:34",
+        "parentId": { "ref": "card" },
+        "variantProperties": [{ "name": "Size", "value": "Large" }]
+      }
+    }
+  ]
+}
+```
+
+- `argsJson`, the args as a JSON string, takes the place of `args` for a client that cannot send an open object. Give exactly one of the two.
+- Every op without a ref is checked against its tool's schema before the first op runs; a bad op runs nothing and the error names it as `ops[<index>] (<tool>)`. An op with a ref is checked when its turn comes.
+- `onError: "stop"` (the default) stops at the first failed op. With `rollback` (default `true`) the batch then deletes the nodes it created, newest first, one `delete_nodes` call each, and reports them in `rolledBack`. A converted or wrapped node (`create_component` with `fromNodeId`, `create_section` with `nodeIds`) is never deleted. `onError: "continue"` runs every op and rolls nothing back.
+- With a `batchId`, the same `batchId` and the same ops within 60 minutes return the first result with `replayed: true` and run nothing, so a retry after a lost answer never builds the card twice. The same `batchId` with other ops is an error.
+- The result is `{ ok, batchId, results: [{ index, id, tool, ok, data | error }], stoppedAt, rolledBack }`, at most 35,000 characters: the largest `data` values go first, each replaced by `{ omitted: true, chars }` and the op's node ID.
+- A process runs one batch at a time. Each op is its own request to the plugin and its own entry in the [write journal](#the-write-journal). `batch` runs in the process that serves the call, as `dump_nodes` does, and the leader refuses it over `/rpc`; the auditor role does not register it.
+- Not batchable: `list_files`, `get_screenshot`, `save_screenshots`, `dump_nodes`, `dump_journal`, and `import_html_layers`.
+
+### Portable schemas
+
+The input schemas the bridge advertises follow rules that a strict schema reader, such as Gemini CLI, accepts: no `$ref`, no type list other than `[X, "null"]`, no open object outside an allowlist (the beta motion records and `batch.ops[].args`), enums of strings only, and a description on every top-level field. `server/test/tool-schemas.test.ts` enforces them. To meet them, `variantProperties` and `properties` are advertised as name and value pairs, and `defaultValue` and `newDefaultValue` as strings. The old shapes are still accepted, so an existing caller keeps working; only a client that reads the schema strictly sees the change.
 
 ### What You Can Build
 
