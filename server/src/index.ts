@@ -8,6 +8,7 @@ import { logEvent } from "./diagnostics.js";
 import { Election } from "./election.js";
 import { LEADER_HOST, leaderUrl } from "./leader.js";
 import { describeOutputRoot } from "./output-root.js";
+import { AUDITOR_INSTRUCTIONS, registerDesignSessionPrompt, SERVER_INSTRUCTIONS } from "./guide.js";
 import { AUDITOR_TOOLS, missingTools, parseRole, restrictServer, ROLE_VARIABLE } from "./role.js";
 import type { ProcessRole } from "./role.js";
 import { rpcToken } from "./rpc-token.js";
@@ -206,10 +207,10 @@ async function main(): Promise<void> {
     console.error("Unhandled rejection:", reason);
   });
 
-  const server = new McpServer({
-    name: "figma-bridge",
-    version: VERSION,
-  });
+  const server = new McpServer(
+    { name: "figma-bridge", version: VERSION },
+    { instructions: ROLE === null ? SERVER_INSTRUCTIONS : AUDITOR_INSTRUCTIONS }
+  );
 
   if (ROLE === null) {
     if (TOOLSET === "full") {
@@ -217,6 +218,7 @@ async function main(): Promise<void> {
     } else {
       registerTools(restrictServer(server, toolsetAllows(TOOLSET)).server, node, PORT);
     }
+    registerDesignSessionPrompt(server);
   } else {
     if (process.env[TOOLSET_VARIABLE]) {
       console.error(

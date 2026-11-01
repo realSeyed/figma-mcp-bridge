@@ -76,6 +76,10 @@ export interface ServerProcess {
   stderr: string[];
   /** The names that `tools/list` returns. */
   listTools(): Promise<string[]>;
+  /** The names that `prompts/list` returns; none when the server has no prompt. */
+  listPrompts(): Promise<string[]>;
+  /** The `instructions` of the initialize result. */
+  instructions(): string | undefined;
   /** Calls one tool and parses its text content as JSON. */
   callTool(name: string, args?: Record<string, unknown>): Promise<ToolOutcome>;
   /** Calls one tool and returns its content blocks as they are, images too. */
@@ -141,6 +145,12 @@ export async function startServer(options: ServerOptions): Promise<ServerProcess
         } while (cursor !== undefined);
         return names;
       },
+      async listPrompts() {
+        if (client.getServerCapabilities()?.prompts === undefined) return [];
+        const page = await client.listPrompts();
+        return page.prompts.map((prompt) => prompt.name);
+      },
+      instructions: () => client.getInstructions(),
       async callToolRaw(name, args = {}) {
         const result = await client.callTool({ name, arguments: args }, undefined, {
           timeout: 30_000,
