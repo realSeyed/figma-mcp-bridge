@@ -724,6 +724,13 @@ const createInstance = async (req: ExtensionRequest): Promise<unknown> => {
     id: instance.id,
     name: instance.name,
     mainComponentId: main ? main.id : null,
+    // The layers of a new instance have IDs no caller can build in a batch
+    // ("I<instance>;<layer>"), so the result names the first level.
+    children: instance.children.map((child) => ({
+      id: child.id,
+      name: child.name,
+      type: child.type,
+    })),
   };
 };
 

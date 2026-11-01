@@ -436,7 +436,7 @@ export function register(server: McpServer, node: Node): void {
 
   server.tool(
     "create_instance",
-    "Create an instance of a component, or of one variant of a component set. Pass variantProperties to pick the variant by its property values; leave it out and the set's default variant is used. A value that matches no variant comes back with the valid values of every property, and a value that still matches several variants comes back naming the properties that need one too, so an instance never lands on an arbitrary variant. variantProperties applies to a component set only. Local components work on a free (Starter) plan. When multiple files are connected, specify fileKey.",
+    'Create an instance of a component, or of one variant of a component set. Pass variantProperties to pick the variant by its property values; leave it out and the set\'s default variant is used. A value that matches no variant comes back with the valid values of every property, and a value that still matches several variants comes back naming the properties that need one too, so an instance never lands on an arbitrary variant. variantProperties applies to a component set only. The result is { id, name, mainComponentId, children }: children lists the first-level layers of the instance as { id, name, type }, so a batch reaches a layer with { "ref": "<op id>", "path": "children.0.id" }, for example to set_image_fill its image layer. Local components work on a free (Starter) plan. When multiple files are connected, specify fileKey.',
     schemas.create_instance.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(schemas.create_instance, args);
