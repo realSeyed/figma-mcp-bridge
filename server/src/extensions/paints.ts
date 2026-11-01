@@ -33,7 +33,7 @@ const clearPaintsShape = z.object({
   target: z
     .enum(["fills", "strokes"])
     .optional()
-    .describe("Which paint list to empty: fills or strokes. fills."),
+    .describe("Which paint list to empty: fills or strokes. Default: fills."),
   fileKey: fileKeyField,
 });
 

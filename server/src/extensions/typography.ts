@@ -46,10 +46,15 @@ const letterSpacingField = z
   })
   .describe('Letter spacing: { "unit": "PIXELS" | "PERCENT", "value": <number> }');
 
-const styleVariableIdField = createVariableIdSchema()
-  .nullable()
-  .optional()
-  .describe("The variable to bind, or null to remove the binding from this field");
+/**
+ * A new schema for each field: one instance reused by several fields becomes a
+ * `$ref` in the advertised JSON Schema, which a strict schema reader refuses.
+ */
+const styleVariableIdField = () =>
+  createVariableIdSchema()
+    .nullable()
+    .optional()
+    .describe("The variable to bind, or null to remove the binding from this field");
 
 /**
  * The variables driving the fields of a text style.
@@ -59,14 +64,14 @@ const styleVariableIdField = createVariableIdSchema()
  */
 const styleBoundVariablesField = z
   .object({
-    fontFamily: styleVariableIdField,
-    fontStyle: styleVariableIdField,
-    fontSize: styleVariableIdField,
-    fontWeight: styleVariableIdField,
-    letterSpacing: styleVariableIdField,
-    lineHeight: styleVariableIdField,
-    paragraphSpacing: styleVariableIdField,
-    paragraphIndent: styleVariableIdField,
+    fontFamily: styleVariableIdField(),
+    fontStyle: styleVariableIdField(),
+    fontSize: styleVariableIdField(),
+    fontWeight: styleVariableIdField(),
+    letterSpacing: styleVariableIdField(),
+    lineHeight: styleVariableIdField(),
+    paragraphSpacing: styleVariableIdField(),
+    paragraphIndent: styleVariableIdField(),
   })
   .strict()
   .describe(
@@ -87,7 +92,10 @@ const styleFields = {
     .enum(["ORIGINAL", "UPPER", "LOWER", "TITLE", "SMALL_CAPS", "SMALL_CAPS_FORCED"])
     .optional()
     .describe("Letter case Figma renders the text in"),
-  textDecoration: z.enum(["NONE", "UNDERLINE", "STRIKETHROUGH"]).optional(),
+  textDecoration: z
+    .enum(["NONE", "UNDERLINE", "STRIKETHROUGH"])
+    .optional()
+    .describe("The line Figma draws under or through the text"),
   leadingTrim: z
     .enum(["NONE", "CAP_HEIGHT"])
     .optional()

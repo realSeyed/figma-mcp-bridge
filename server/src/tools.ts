@@ -39,6 +39,7 @@ import {
 } from "./captures.js";
 import { canonicalJson } from "./evidence.js";
 import { loadImageSource } from "./image-source.js";
+import { recordTools, registerBatchTool } from "./batch.js";
 
 /**
  * Registers all Figma bridge tools on the given MCP server.
@@ -47,6 +48,10 @@ import { loadImageSource } from "./image-source.js";
  * @param port - The bridge port. The node makes the follower-to-leader calls, so no tool reads it now.
  */
 export function registerTools(server: McpServer, node: Node, port: number): void {
+  // Each registration goes through the recorder, so that batch can call each tool.
+  const recorded = recordTools(server);
+  server = recorded.server;
+
   server.tool(
     "list_files",
     "List all currently connected Figma files and the identity of the instrument. Returns { bridgeCommit, leaderCommit, leaderStartedAt, files, journal }; each file has fileKey, fileName, pluginBuild and epoch. The epoch grows at each plugin connection for that key, so a change shows a plugin reload. journal is the write journal of the leader: { status, entryCount, headHash }, plus reason when the status is broken, or null from an older leader. Use the fileKey to target a specific file in other tools.",
@@ -592,6 +597,8 @@ export function registerTools(server: McpServer, node: Node, port: number): void
   );
 
   registerExtensionTools(server, node);
+  // Last: the enum of batch lists the tools registered before it.
+  registerBatchTool(server, recorded.tools);
 }
 
 const MAX_LAYERS_JSON_BYTES = 16 * 1024 * 1024;

@@ -117,8 +117,8 @@ its build is not the build of the leader. The `files` entries do not change.
 
 Each process writes evidence files only under its own output root
 (`FIGMA_BRIDGE_OUTPUT_ROOT`, else its working directory). The leader writes no file for
-another process: `/rpc` refuses `save_screenshots`, `dump_nodes` and `dump_journal` with
-400, and a follower fetches each capture with `get_screenshot`, each dump chunk with
+another process: `/rpc` refuses `save_screenshots`, `dump_nodes`, `dump_journal` and `batch`
+with 400, and a follower fetches each capture with `get_screenshot`, each dump chunk with
 `dump_nodes_chunk`, and each journal chunk with `dump_journal_chunk`, over `/rpc` and writes
 the files itself.
 
@@ -222,6 +222,20 @@ if `leaderStartedAt` changed, and writes `journal.json` and `manifest.json` thro
 `EvidenceSet`. The manifest holds no `fileKey`, `pluginBuild` or `epoch`. `fileKey` filters
 nothing. A dump adds no entry.
 
+`registerTools` wraps its server with `recordTools` (`server/src/batch.ts`) first, and each
+registration, the extension ones included, goes through that wrapper. It records the
+description, the shape and the handler of each tool that really registered; a tool that the
+role wrapper drops (its stub has `enabled: false`) is not recorded. `registerBatchTool` runs
+last and builds the `ops[].tool` enum from the record, less `BATCH_EXCLUDED_TOOLS`. `batch`
+runs in the serving process: it checks each op without a ref against `z.object(shape)` before
+the first op runs, then calls the recorded handlers in order with the parsed args and its own
+`extra`, so a follower sends each plugin request over `/rpc` and the journal records each
+write as its own entry. `/rpc` refuses `batch` with 400 (`SERVED_BY_EACH_PROCESS`), and the
+auditor role drops it. A process runs one batch at a time (a promise chain). A `batchId` is
+remembered in memory for 60 minutes (200 at most) with the hash of the input; the same input
+replays the result. A stop with `rollback` calls the recorded `delete_nodes` once for each
+created node, newest first.
+
 ## 4. File map
 
 | File                                       | Purpose                                                                                                                |
@@ -266,6 +280,7 @@ nothing. A dump adds no entry.
 | `server/src/schema-common.ts`              | `createFigmaNodeIdSchema`, `createHexColorSchema`, `createParentIdSchema`, `createChildLayoutFields`, `fileKeyField`.  |
 | `server/src/tools.ts`                      | `registerTools` of the core tools.                                                                                     |
 | `server/src/tool-helpers.ts`               | `renderResponse`, `parseToolInput`, the `ToolResult` type.                                                             |
+| `server/src/batch.ts`                      | `recordTools` (the tool registry), `batch`: the refs, the order, the rollback, the dedupe, the result cap.             |
 | `server/src/extensions/types.ts`           | The area file types, `ExtensionRpcSchemaMap` included.                                                                 |
 | `server/src/extensions/index.ts`           | Merges `schemas`, `rpcSchemas`, `rpcToArgs`, and `register`.                                                           |
 | `server/src/extensions/variables.ts`       | Variable and variable collection tools.                                                                                |
@@ -282,6 +297,7 @@ nothing. A dump adds no entry.
 | `server/scripts/conformance.ts`            | The dump-conformance test: ID placeholders, the golden file text, the visible projection.                              |
 | `server/scripts/golden/`                   | The golden dump of the conformance fixture. Synthetic data from the test file only.                                    |
 | `server/test/`                             | `bun test` tests. Real server processes against a simulated plugin. Helpers in `helpers/`.                             |
+| `server/test/tool-schemas.test.ts`         | The portable-schema lint: the `tools/list` of a real server, checked against the rules of convention 23.               |
 | `plugin/test/`                             | `bun test` tests of the serializer, the dump form, the chunk walk, the queue, `handleRequest`. Synthetic nodes.        |
 | `plugin/test/helpers/fake-figma.ts`        | A fake file for reads (pages, lookup, search, exports, variables, styles); `writes` adds creates and layout rules.     |
 | `.github/workflows/ci.yml`                 | CI for each pull request and each push to `main`: check, tests, toolset tests, on Ubuntu and Windows.                  |
@@ -321,6 +337,10 @@ imports only Node built-in modules, `image-size.ts`, and `output-root.ts`.
    against the schema of step 2, which then refuses each call of a follower.
 5. Server: register it in `register`, with `parseToolInput`, `renderResponse`, and `node.sendWithParams`.
 6. README: add one row to the table "Available Tools".
+7. The new tool is batchable at once: `batch` calls each recorded tool. Add it to
+   `BATCH_EXCLUDED_TOOLS` in `server/src/batch.ts` only if it writes a file, returns an
+   image, or must not run inside a batch. Run `server/test/tool-schemas.test.ts`: the new
+   schema must pass the portable-schema rules (convention 23).
 
 ## 6. Conventions
 
@@ -384,6 +404,21 @@ mimeType }`), never base64 in text. A capture that is large or that serves as ev
     before the sizing modes and before `textAutoResize`, and `x` and `y` last. A create
     returns `describeCreated` (`layout.ts`), and a set tool reports `applied` values read back
     from the node.
+23. Portable schemas. The advertised input schema of each tool passes
+    `server/test/tool-schemas.test.ts`: no `$ref`, `$defs` or `definitions` (make a schema
+    that several fields use with a factory, one call for each field); `additionalProperties`
+    absent or `false`, and each `type: "object"` with properties; no `type` array but
+    `[X, "null"]`; `enum` of non-empty strings only; a `description` on each top-level field,
+    a default written as "Default: X."; a name that matches `^[a-z][a-z0-9_]{0,47}$`; and the
+    whole `tools/list` result 150,000 characters or less. The open-object allowlist, each with
+    its reason in the test: `apply_animation_style.animationStyleData`,
+    `apply_manual_keyframe_track.field`, `apply_manual_keyframe_track.track`,
+    `remove_manual_keyframe_track.field` (beta motion records), and `batch.ops[].args`
+    (`argsJson` is the portable alternative). Write a map as an array of `{ name, value }`
+    pairs, and a value that is a string or a boolean as a string. To keep an old shape
+    working, wrap the field in `z.preprocess`: the SDK advertises the inner schema and still
+    runs the preprocess on each call (`toPairs` in `server/src/extensions/components.ts`). The
+    plugin then accepts both shapes.
 
 ## 7. Commands
 

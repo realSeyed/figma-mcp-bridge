@@ -111,6 +111,53 @@ const describeValues = (values: Map<string, string>): string =>
     .map(([property, value]) => `${property}=${value}`)
     .join(", ");
 
+/** One name and value of a pairs parameter, with the label its errors use. */
+interface NamedValue {
+  /** `param[<index>]` for an array, `param["<key>"]` for an object. */
+  label: string;
+  name: string;
+  value: unknown;
+}
+
+/**
+ * Reads a parameter of names and values. The server sends an array of
+ * `{ name, value }` pairs; an object of name to value is still accepted.
+ * @param raw - The parameter value, not undefined or null.
+ * @param param - The parameter name, for the labels and the error message.
+ * @param example - An example of the pairs form, for the error message.
+ * @param tool - The tool name, for the error message.
+ * @returns The names and values, in order.
+ */
+const readNamedValues = (
+  raw: unknown,
+  param: string,
+  example: string,
+  tool: string
+): NamedValue[] => {
+  if (Array.isArray(raw)) {
+    return raw.map((item, index) => {
+      const label = `${param}[${index}]`;
+      const pair = item as { name?: unknown; value?: unknown } | null;
+      if (typeof pair !== "object" || pair === null || typeof pair.name !== "string") {
+        throw new Error(
+          `${tool} requires ${label} as { "name": <property name>, "value": <value> }, received ${describeValue(item)}.`
+        );
+      }
+      return { label, name: pair.name, value: pair.value };
+    });
+  }
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error(
+      `${tool} requires ${param} as an array of name and value pairs, such as ${example}, received ${describeValue(raw)}.`
+    );
+  }
+  return Object.entries(raw as Record<string, unknown>).map(([name, value]) => ({
+    label: `${param}["${name}"]`,
+    name,
+    value,
+  }));
+};
+
 /**
  * Reads the `variantProperties` parameter.
  * @param raw - The parameter value.
@@ -120,18 +167,24 @@ const describeValues = (values: Map<string, string>): string =>
 const readVariantProperties = (raw: unknown, tool: string): Map<string, string> => {
   const wanted = new Map<string, string>();
   if (raw === undefined || raw === null) return wanted;
-  if (typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error(
-      `${tool} requires variantProperties as an object of property name to value, such as { "Size": "Large" }, received ${describeValue(raw)}.`
-    );
-  }
-  for (const [property, value] of Object.entries(raw as Record<string, unknown>)) {
+  const pairs = readNamedValues(
+    raw,
+    "variantProperties",
+    '[{ "name": "Size", "value": "Large" }]',
+    tool
+  );
+  for (const { label, name, value } of pairs) {
     if (typeof value !== "string" || value.trim() === "") {
       throw new Error(
-        `${tool} requires every value of variantProperties to be a non-empty string, but variantProperties["${property}"] is ${describeValue(value)}. A variant value is text in Figma, so write 24 as "24".`
+        `${tool} requires every value of variantProperties to be a non-empty string, but ${label} is ${describeValue(value)}. A variant value is text in Figma, so write 24 as "24".`
       );
     }
-    wanted.set(property.trim(), value.trim());
+    if (wanted.has(name.trim())) {
+      throw new Error(
+        `${tool} received the property "${name.trim()}" twice in variantProperties (${label}). Give each property one value.`
+      );
+    }
+    wanted.set(name.trim(), value.trim());
   }
   return wanted;
 };
@@ -1256,9 +1309,11 @@ const readPropertyValue = async (
   tool: string
 ): Promise<string | boolean> => {
   if (type === "BOOLEAN") {
+    // The server sends a value as text, so "true" and "false" stand for the booleans.
+    if (raw === "true" || raw === "false") return raw === "true";
     if (typeof raw !== "boolean") {
       throw new Error(
-        `${tool} requires ${key} as true or false for a BOOLEAN property, received ${describeValue(raw)}.`
+        `${tool} requires ${key} as true or false (or "true" or "false") for a BOOLEAN property, received ${describeValue(raw)}.`
       );
     }
     return raw;
@@ -1692,13 +1747,12 @@ const setInstanceProperties = async (req: ExtensionRequest): Promise<unknown> =>
     );
   }
 
-  const raw = req.params.properties;
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new Error(
-      `${tool} requires properties as an object of property name to value, such as { "Label": "Buy" }, received ${describeValue(raw)}.`
-    );
-  }
-  const wanted = Object.entries(raw as Record<string, unknown>);
+  const wanted = readNamedValues(
+    req.params.properties,
+    "properties",
+    '[{ "name": "Label", "value": "Buy" }]',
+    tool
+  );
   if (wanted.length === 0) {
     throw new Error(
       `${tool} requires properties to name at least one property. Call get_instance to list the properties this instance takes.`
@@ -1712,9 +1766,9 @@ const setInstanceProperties = async (req: ExtensionRequest): Promise<unknown> =>
   const textProperties: string[] = [];
   const seen = new Set<string>();
 
-  for (const [rawName, rawValue] of wanted) {
+  for (const { label: itemLabel, name: rawName, value: rawValue } of wanted) {
     const fail = (problem: string): void => {
-      problems.push(`properties["${rawName}"]: ${problem}`);
+      problems.push(`${itemLabel}: ${problem}`);
     };
 
     let property: PropertyEntry;

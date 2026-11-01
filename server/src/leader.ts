@@ -29,14 +29,24 @@ export function leaderUrl(port: number): string {
 }
 
 /**
- * The tools that write evidence files. `/rpc` refuses each of them: the
- * process that serves the call writes the files under its own output root,
- * and fetches what it needs from the plugin with the request named here.
+ * The tools that each process serves itself. `/rpc` refuses each of them: the
+ * process that serves the call fetches what it needs from the plugin as the
+ * text says. The evidence tools write their files under its own output root.
  */
 const SERVED_BY_EACH_PROCESS: ReadonlyMap<string, string> = new Map([
-  ["save_screenshots", "it fetches each capture with get_screenshot"],
-  ["dump_nodes", "it fetches each root in chunks with dump_nodes_chunk"],
-  ["dump_journal", "it fetches the entries with dump_journal_chunk"],
+  [
+    "save_screenshots",
+    "it writes under its own output root (FIGMA_BRIDGE_OUTPUT_ROOT) and fetches each capture with get_screenshot",
+  ],
+  [
+    "dump_nodes",
+    "it writes under its own output root (FIGMA_BRIDGE_OUTPUT_ROOT) and fetches each root in chunks with dump_nodes_chunk",
+  ],
+  [
+    "dump_journal",
+    "it writes under its own output root (FIGMA_BRIDGE_OUTPUT_ROOT) and fetches the entries with dump_journal_chunk",
+  ],
+  ["batch", "it calls each tool of the batch itself, and each sends its own request"],
 ]);
 
 /**
@@ -274,12 +284,12 @@ export class Leader {
           return;
         }
 
-        // Each process serves the evidence tools itself and writes under its
-        // own output root, so the leader writes no file for another process.
+        // Each process serves these tools itself, so the leader writes no
+        // file for another process and runs no batch for it.
         const fetches = SERVED_BY_EACH_PROCESS.get(rpcReq.tool);
         if (fetches !== undefined) {
           this.sendJSON(res, 400, {
-            error: `${rpcReq.tool} is not served over /rpc: each process serves ${rpcReq.tool} itself, and writes under its own output root (FIGMA_BRIDGE_OUTPUT_ROOT). Call the ${rpcReq.tool} tool of your own MCP server; ${fetches}.`,
+            error: `${rpcReq.tool} is not served over /rpc: each process serves ${rpcReq.tool} itself. Call the ${rpcReq.tool} tool of your own MCP server; ${fetches}.`,
           });
           return;
         }
