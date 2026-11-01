@@ -25,6 +25,7 @@ const STRIPPED_VARIABLES = [
   "FIGMA_BRIDGE_STANDALONE",
   "FIGMA_BRIDGE_LOG_FILE",
   "FIGMA_BRIDGE_MAX_RESULT_CHARS",
+  "FIGMA_BRIDGE_ASSET_ROOT",
 ];
 
 /** How long a process has to log its role. */

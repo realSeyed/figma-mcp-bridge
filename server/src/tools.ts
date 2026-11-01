@@ -1,7 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { lookup } from "node:dns/promises";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { isIP } from "node:net";
 import path from "node:path";
 import type { z } from "zod";
 import type { Node } from "./node.js";
@@ -40,10 +38,7 @@ import {
   screenshotToolResult,
 } from "./captures.js";
 import { canonicalJson } from "./evidence.js";
-
-const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
-const IMAGE_FETCH_TIMEOUT_MS = 15_000;
-const MAX_IMAGE_REDIRECTS = 5;
+import { loadImageSource } from "./image-source.js";
 
 /**
  * Registers all Figma bridge tools on the given MCP server.
@@ -221,7 +216,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "set_text_properties",
-    "Patch common text properties such as font family/style, size, alignment, auto-resize, line height, letter spacing, fill color, and bounds. When multiple files are connected, specify fileKey.",
+    'Patch common text properties such as font family/style, size, alignment, auto-resize, line height, letter spacing, fill color, and bounds. The size is applied before textAutoResize, so { width, textAutoResize: "HEIGHT" } wraps at that width. A font the file cannot use is refused with the closest families before anything is written. applied holds the values read back from the node. When multiple files are connected, specify fileKey.',
     setTextPropertiesShape.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(setTextPropertiesInput, args);
@@ -235,7 +230,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "set_node_properties",
-    "Patch common node properties such as name, position, size, visibility, opacity, and corner radius. Only supported properties for the target node type may be changed. Use set_solid_fill or set_gradient_fill to change paints. When multiple files are connected, specify fileKey.",
+    "Patch common node properties such as name, position, size, visibility, opacity, corner radius, and clipping, and how the node sits in an auto-layout parent: layoutSizingHorizontal and layoutSizingVertical (FIXED, HUG, or FILL), layoutPositioning (AUTO or ABSOLUTE), min and max sizes, and index (its place among its parent's children). FILL and ABSOLUTE need a parent with auto layout; HUG an auto-layout frame or a text. Every field is checked before the first write. The size is applied before the sizing modes, and x and y last. applied holds the values read back from the node. Use set_solid_fill or set_gradient_fill to change paints. When multiple files are connected, specify fileKey.",
     setNodePropertiesInput.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(toolInputSchemas.set_node_properties, args);
@@ -249,7 +244,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "set_solid_fill",
-    "Replace a node's fill (or stroke) with a single solid paint. Provide a hex color and optional paint opacity — fillHex/fillOpacity are accepted as aliases. Use set_gradient_fill for gradient paints.",
+    "Replace a node's fill (or stroke) with a single solid paint. Provide a hex color and optional paint opacity — fillHex/fillOpacity are accepted as aliases. applied holds the paint read back from the node, the hex in lowercase #rrggbb. Use set_gradient_fill for gradient paints.",
     setSolidFillShape.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(setSolidFillInput, args);
@@ -298,7 +293,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "set_auto_layout",
-    "Configure auto-layout on a frame: direction, gap, padding, alignment, sizing modes, wrap. Set layoutMode='NONE' to disable auto-layout on the frame.",
+    "Configure auto-layout on a frame: direction, gap, padding (padding sets all four sides; a side param wins), alignment, sizing modes, wrap. Set layoutMode='NONE' to disable auto-layout on the frame. applied holds each value read back from the node.",
     setAutoLayoutInput.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(toolInputSchemas.set_auto_layout, args);
@@ -324,7 +319,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "create_frame",
-    "Create a new frame, optionally inside a specified parent. You can set name, size, position, and a solid fill. When multiple files are connected, specify fileKey.",
+    "Create a new frame: name, size, position, fill, stroke, corner radius, clipping, and its own auto layout (layoutMode, itemSpacing, padding, alignment, wrap), so one call makes a card or a row. With layoutMode, a width or height you give stays fixed, and an axis with neither hugs its content. The child-layout fields (layoutSizingHorizontal, layoutSizingVertical: FIXED, HUG, or FILL; layoutPositioning; min and max sizes) and index are applied after the node is in its parent; FILL and ABSOLUTE need a parent with auto layout. Every field is checked before the node is made, so a refused call leaves nothing. Pass parentId. Without it the node goes to the page the user is viewing; pageId in the result tells you where it went. Returns { nodeId, nodeName, type, parentId, pageId, index, x, y, width, height }, plus layoutMode, layoutSizingHorizontal, layoutSizingVertical, and layoutPositioning where they apply. When multiple files are connected, specify fileKey.",
     createFrameInput.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(toolInputSchemas.create_frame, args);
@@ -336,7 +331,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "create_text",
-    "Create a new text node, optionally inside a specified parent. You can set its content, font, size, alignment, color, position, and bounds. When multiple files are connected, specify fileKey.",
+    "Create a new text node: content, font or textStyleId, size, line height, letter spacing, alignment, color, position, and bounds. With a width and no height (or with layoutSizingHorizontal FILL), the text wraps and grows downward (textAutoResize HEIGHT); textAutoResize is applied last, so an explicit mode is kept. A font the file cannot use is refused with the closest families. The child-layout fields (layoutSizingHorizontal, layoutSizingVertical: FIXED, HUG, or FILL; layoutPositioning; min and max sizes) and index are applied after the node is in its parent; FILL and ABSOLUTE need a parent with auto layout. Every field is checked before the node is made, so a refused call leaves nothing. Pass parentId. Without it the node goes to the page the user is viewing; pageId in the result tells you where it went. Returns { nodeId, nodeName, type, parentId, pageId, index, x, y, width, height }, plus layoutMode, layoutSizingHorizontal, layoutSizingVertical, and layoutPositioning where they apply. It also returns characters and textAutoResize. When multiple files are connected, specify fileKey.",
     createTextShape.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(createTextInput, args);
@@ -348,7 +343,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "create_shape",
-    "Create a rectangle, ellipse, or line, optionally inside a specified parent. You can set its size, position, rotation, fill, and stroke. When multiple files are connected, specify fileKey.",
+    "Create a rectangle, ellipse, or line: size, position, rotation, fill, and stroke. The child-layout fields (layoutSizingHorizontal, layoutSizingVertical: FIXED, HUG, or FILL; layoutPositioning; min and max sizes) and index are applied after the node is in its parent; FILL and ABSOLUTE need a parent with auto layout. Every field is checked before the node is made, so a refused call leaves nothing. Pass parentId. Without it the node goes to the page the user is viewing; pageId in the result tells you where it went. Returns { nodeId, nodeName, type, parentId, pageId, index, x, y, width, height }, plus layoutMode, layoutSizingHorizontal, layoutSizingVertical, and layoutPositioning where they apply. It also returns shapeType. When multiple files are connected, specify fileKey.",
     createShapeShape.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(createShapeInput, args);
@@ -360,11 +355,12 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "create_image",
-    "Create an image-backed rectangle from a local file path, remote URL, or data URI. You can set its parent, position, size, corner radius, and fit mode. When multiple files are connected, specify fileKey.",
+    "Create an image-backed rectangle from a remote URL, a base64 data URI, or a local path inside the working directory, the output root, or a folder of FIGMA_BRIDGE_ASSET_ROOT. The image must be a PNG, JPEG, or GIF of at most 4096 pixels per side; another format (WebP, AVIF, HEIC, SVG) or a larger image is refused before anything is sent. To fill an existing node, such as an image layer of an instance, use set_image_fill. The child-layout fields (layoutSizingHorizontal, layoutSizingVertical: FIXED, HUG, or FILL; layoutPositioning; min and max sizes) and index are applied after the node is in its parent; FILL and ABSOLUTE need a parent with auto layout. Every field is checked before the node is made, so a refused call leaves nothing. Pass parentId. Without it the node goes to the page the user is viewing; pageId in the result tells you where it went. Returns { nodeId, nodeName, type, parentId, pageId, index, x, y, width, height }, plus layoutMode, layoutSizingHorizontal, layoutSizingVertical, and layoutPositioning where they apply. It also returns imageHash, which set_image_fill reuses. When multiple files are connected, specify fileKey.",
     createImageInput.shape,
     async ({ source, fileKey, ...params }): Promise<ToolResult> => {
       try {
-        const imageBase64 = await loadImageSourceAsBase64(source, process.cwd());
+        // The format and the size are checked here, before the bytes travel.
+        const { base64: imageBase64 } = await loadImageSource(source);
         return await renderResponse(() =>
           node.sendWithParams("create_image", undefined, { ...params, imageBase64 }, fileKey)
         );
@@ -598,17 +594,11 @@ export function registerTools(server: McpServer, node: Node, port: number): void
   registerExtensionTools(server, node);
 }
 
-/**
- * Loads an image source as a base64 string from a URL, data URI, or local file.
- * @param source - Image source: URL, data URI, or local file path.
- * @param workspaceRoot - Root directory for resolving relative local paths.
- * @returns Base64-encoded image bytes.
- */
 const MAX_LAYERS_JSON_BYTES = 16 * 1024 * 1024;
 
 /**
  * Reads and parses an html-figma layer-tree JSON file from inside the
- * workspace root. Mirrors the local-path rules of loadImageSourceAsBase64.
+ * workspace root, checked by real path.
  * @param source - JSON file path (absolute or relative to the workspace root).
  * @param workspaceRoot - The MCP server working directory.
  * @returns The parsed layer tree (root LayerNode).
@@ -658,193 +648,4 @@ async function loadLayersJson(
     );
   }
   return root as Record<string, unknown>;
-}
-
-async function loadImageSourceAsBase64(source: string, workspaceRoot: string): Promise<string> {
-  if (/^https?:\/\//i.test(source)) {
-    const bytes = await fetchImageBytes(source);
-    return bytes.toString("base64");
-  }
-
-  const dataUrlMatch = source.match(/^data:.*?;base64,(.+)$/);
-  if (dataUrlMatch) {
-    return dataUrlMatch[1];
-  }
-
-  const resolvedRoot = path.resolve(workspaceRoot);
-  const resolvedPath = path.resolve(resolvedRoot, source);
-  const relativePath = path.relative(resolvedRoot, resolvedPath);
-  const escapesRoot = relativePath.startsWith("..") || path.isAbsolute(relativePath);
-  if (escapesRoot) {
-    throw new Error(
-      `image source must be inside the MCP server working directory: ${resolvedRoot}`
-    );
-  }
-  const bytes = await readFile(resolvedPath);
-  if (bytes.length > MAX_IMAGE_BYTES) {
-    throw new Error(`Image exceeds ${MAX_IMAGE_BYTES} bytes`);
-  }
-  return bytes.toString("base64");
-}
-
-/**
- * Fetches image bytes from a remote URL with redirect and timeout limits.
- * @param source - HTTP or HTTPS image URL.
- * @returns Raw image bytes.
- */
-async function fetchImageBytes(source: string): Promise<Buffer> {
-  let url = new URL(source);
-  let redirects = 0;
-
-  while (true) {
-    await assertSafeHttpUrl(url);
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
-    let resp: Response;
-    try {
-      resp = await fetch(url, {
-        signal: controller.signal,
-        redirect: "manual",
-      });
-    } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") {
-        throw new Error(`Timed out fetching image after ${IMAGE_FETCH_TIMEOUT_MS}ms`);
-      }
-      throw err;
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    if (resp.status >= 300 && resp.status < 400) {
-      const location = resp.headers.get("location");
-      if (!location) {
-        throw new Error(`Image redirect missing Location header: ${resp.status}`);
-      }
-      redirects += 1;
-      if (redirects > MAX_IMAGE_REDIRECTS) {
-        throw new Error(`Image fetch exceeded ${MAX_IMAGE_REDIRECTS} redirects`);
-      }
-      url = new URL(location, url);
-      continue;
-    }
-
-    if (!resp.ok) {
-      throw new Error(`Failed to fetch image: ${resp.status} ${resp.statusText}`);
-    }
-
-    const contentLength = resp.headers.get("content-length");
-    if (contentLength !== null) {
-      const size = Number(contentLength);
-      if (!Number.isFinite(size) || size < 0) {
-        throw new Error("Invalid image Content-Length header");
-      }
-      if (size > MAX_IMAGE_BYTES) {
-        throw new Error(`Image exceeds ${MAX_IMAGE_BYTES} bytes`);
-      }
-    }
-
-    return readBoundedResponse(resp, MAX_IMAGE_BYTES);
-  }
-}
-
-/**
- * Validates that an image URL uses a safe public HTTP(S) endpoint.
- * @param url - URL to validate.
- */
-async function assertSafeHttpUrl(url: URL): Promise<void> {
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("Image URL must use http or https");
-  }
-  if (!url.hostname) {
-    throw new Error("Image URL must include a hostname");
-  }
-
-  const hostname = normalizeHostname(url.hostname);
-  const literalIp = isIP(hostname);
-  if (literalIp !== 0) {
-    if (isBlockedIp(hostname)) {
-      throw new Error("Image URL resolves to a blocked internal address");
-    }
-    return;
-  }
-
-  const addresses = await lookup(hostname, { all: true, verbatim: true });
-  if (addresses.length === 0) {
-    throw new Error("Image URL hostname did not resolve");
-  }
-  if (addresses.some((address) => isBlockedIp(address.address))) {
-    throw new Error("Image URL resolves to a blocked internal address");
-  }
-}
-
-/**
- * Checks whether an IP address is in a private, loopback, or otherwise blocked range.
- * @param address - IPv4 or IPv6 address string.
- * @returns True if the address is blocked for SSRF protection.
- */
-function isBlockedIp(address: string): boolean {
-  if (isIP(address) === 4) {
-    const [a, b] = address.split(".").map(Number);
-    return (
-      a === 0 ||
-      a === 10 ||
-      a === 127 ||
-      (a === 100 && b >= 64 && b <= 127) ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      a >= 224
-    );
-  }
-
-  const normalized = address.toLowerCase();
-  if (normalized.startsWith("::ffff:")) {
-    return isBlockedIp(normalized.slice("::ffff:".length));
-  }
-
-  return (
-    normalized === "::" ||
-    normalized === "::1" ||
-    normalized.startsWith("fc") ||
-    normalized.startsWith("fd") ||
-    /^fe[89ab]:/.test(normalized) ||
-    normalized.startsWith("ff")
-  );
-}
-
-/**
- * Strips surrounding brackets from an IPv6 hostname so it can be parsed as an IP.
- * @param hostname - Hostname string, possibly bracketed.
- * @returns Normalized hostname without brackets.
- */
-function normalizeHostname(hostname: string): string {
-  if (hostname.startsWith("[") && hostname.endsWith("]")) {
-    return hostname.slice(1, -1);
-  }
-  return hostname;
-}
-
-/**
- * Reads a response body up to a maximum byte limit.
- * @param resp - Fetch response with a readable body.
- * @param maxBytes - Maximum number of bytes to accept.
- * @returns Concatenated response bytes.
- */
-async function readBoundedResponse(resp: Response, maxBytes: number): Promise<Buffer> {
-  if (!resp.body) {
-    return Buffer.alloc(0);
-  }
-
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of resp.body) {
-    const bytes = Buffer.from(chunk);
-    total += bytes.length;
-    if (total > maxBytes) {
-      throw new Error(`Image exceeds ${maxBytes} bytes`);
-    }
-    chunks.push(bytes);
-  }
-  return Buffer.concat(chunks, total);
 }

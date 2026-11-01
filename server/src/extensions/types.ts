@@ -19,6 +19,14 @@ export type RpcArgMapper = (nodeIds?: string[], params?: Record<string, unknown>
 export type ExtensionRpcMap = Record<string, RpcArgMapper>;
 
 /**
+ * Wire-shape overrides: the schema the follower to leader RPC path validates
+ * a tool against, when its handler rewrites the params before it forwards
+ * them (for example, a `source` loaded into base64 bytes). A tool without an
+ * entry is validated against its advertised schema in `schemas`.
+ */
+export type ExtensionRpcSchemaMap = Record<string, z.ZodType<unknown, z.ZodTypeDef, unknown>>;
+
+/**
  * Registers an area's tools on the MCP server.
  * @param server - The MCP server instance.
  * @param node - The node coordinator for leader/follower routing.

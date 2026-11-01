@@ -269,3 +269,181 @@ export const moveKeepingCanvasPosition = (
     [before[1][0], before[1][1], before[1][2] - origin.y],
   ];
 };
+
+/** How long the font list of `listFontFamilies` stays cached. */
+const FONT_LIST_TTL_MS = 5 * 60 * 1000;
+
+let fontFamilyCache: { at: number; families: Map<string, string[]> } | null = null;
+
+/**
+ * Forgets the cached font list, so the next call asks Figma again. The tests
+ * call it when they install another set of fonts.
+ */
+export const clearFontFamilyCache = (): void => {
+  fontFamilyCache = null;
+};
+
+/**
+ * Groups every font Figma can use by family, in the order Figma lists them.
+ *
+ * `listAvailableFontsAsync` returns every font of the account, which is slow
+ * to ask for at each text call, and the list changes only when the user
+ * installs a font. So the map is cached for the plugin session, for five
+ * minutes at most.
+ * @returns Family name to its styles.
+ */
+export const listFontFamilies = async (): Promise<Map<string, string[]>> => {
+  if (fontFamilyCache && Date.now() - fontFamilyCache.at < FONT_LIST_TTL_MS) {
+    return fontFamilyCache.families;
+  }
+  const families = new Map<string, string[]>();
+  for (const font of await figma.listAvailableFontsAsync()) {
+    const styles = families.get(font.fontName.family);
+    if (styles) {
+      if (!styles.includes(font.fontName.style)) styles.push(font.fontName.style);
+    } else {
+      families.set(font.fontName.family, [font.fontName.style]);
+    }
+  }
+  fontFamilyCache = { at: Date.now(), families };
+  return families;
+};
+
+/**
+ * Orders two names.
+ *
+ * A plain comparison rather than `localeCompare`: the plugin sandbox is not a
+ * browser, so its Intl support is not something to depend on, and a font list
+ * that reorders itself with the host locale is harder to test against.
+ * @param a - One name.
+ * @param b - The other name.
+ * @returns Negative when a sorts first, positive when b does, 0 when equal.
+ */
+export const compareNames = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * Counts the characters two names open with.
+ * @param a - One name.
+ * @param b - The other name.
+ * @returns How many leading characters they share.
+ */
+const sharedPrefixLength = (a: string, b: string): number => {
+  const limit = Math.min(a.length, b.length);
+  let shared = 0;
+  while (shared < limit && a[shared] === b[shared]) shared++;
+  return shared;
+};
+
+/**
+ * Names the families closest to one Figma does not have, so a misspelling
+ * comes back with the spellings to try.
+ * @param wanted - The family the caller asked for.
+ * @param families - Every family Figma can use.
+ * @returns Up to five family names, closest first.
+ */
+export const similarFamilies = (wanted: string, families: Iterable<string>): string[] => {
+  const needle = wanted.trim().toLowerCase();
+  const scored: { name: string; score: number }[] = [];
+
+  for (const name of families) {
+    const candidate = name.toLowerCase();
+    let score: number;
+    if (candidate.startsWith(needle) || needle.startsWith(candidate)) {
+      score = 0;
+    } else if (candidate.includes(needle) || needle.includes(candidate)) {
+      score = 1;
+    } else {
+      const shared = sharedPrefixLength(candidate, needle);
+      if (shared === 0) continue;
+      score = 2 + (needle.length - shared);
+    }
+    scored.push({ name, score });
+  }
+
+  scored.sort((a, b) => a.score - b.score || compareNames(a.name, b.name));
+  return scored.slice(0, 5).map((entry) => entry.name);
+};
+
+/**
+ * Resolves a family and a style to a font Figma has, and loads it.
+ *
+ * A text property cannot be written until its font is loaded, so this runs
+ * during validation: a font the file cannot use is reported before anything
+ * is written, with the closest families or the styles the family has.
+ * @param family - The font family.
+ * @param style - The font style within that family.
+ * @param problems - Collects the complaint when the font is unavailable.
+ * @returns The loaded font, or undefined when there is none to load.
+ */
+export const resolveFont = async (
+  family: string,
+  style: string,
+  problems: string[]
+): Promise<FontName | undefined> => {
+  const families = await listFontFamilies();
+  const styles = families.get(family);
+
+  if (!styles) {
+    const near = similarFamilies(family, families.keys());
+    const suggestion =
+      near.length > 0 ? ` Did you mean ${near.map((name) => `"${name}"`).join(", ")}?` : "";
+    problems.push(
+      `fontFamily "${family}" is not available in Figma.${suggestion} Call list_fonts to see the families this file can use.`
+    );
+    return undefined;
+  }
+  if (!styles.includes(style)) {
+    problems.push(
+      `fontStyle "${style}" is not available for "${family}". That family has: ${styles.join(", ")}.`
+    );
+    return undefined;
+  }
+
+  const font: FontName = { family, style };
+  try {
+    await figma.loadFontAsync(font);
+  } catch (err) {
+    problems.push(
+      `the font "${family} ${style}" could not be loaded: ${err instanceof Error ? err.message : String(err)}. Call list_fonts to see the families this file can use.`
+    );
+    return undefined;
+  }
+  return font;
+};
+
+/**
+ * Looks a text style up by ID.
+ *
+ * `getStyleByIdAsync` throws on a malformed ID and resolves to null on an
+ * unknown one, and the ID of another kind of style resolves to that style, so
+ * each case comes back as the sentence that names it.
+ * @param styleId - The style ID.
+ * @returns The style, or the sentence explaining why there is none.
+ */
+export const findTextStyle = async (styleId: string): Promise<TextStyle | string> => {
+  let style: BaseStyle | null = null;
+  try {
+    style = await figma.getStyleByIdAsync(styleId);
+  } catch {
+    style = null;
+  }
+  if (!style) {
+    return `text style not found: ${styleId}. Call get_styles to list the text style IDs of this file.`;
+  }
+  if (style.type !== "TEXT") {
+    return `${styleId} is a ${style.type} style, not a text style. Call get_styles and use an ID from its "text" list.`;
+  }
+  return style as TextStyle;
+};
+
+/**
+ * Writes a colour as the lowercase `#rrggbb` the read tools report.
+ * @param color - The colour, each channel from 0 to 1.
+ * @returns The hex string.
+ */
+export const rgbToHex = (color: RGB): string => {
+  const clamp = (value: number) => Math.min(255, Math.max(0, Math.round(value * 255)));
+  return `#${[clamp(color.r), clamp(color.g), clamp(color.b)]
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("")}`;
+};

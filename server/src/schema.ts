@@ -1,6 +1,13 @@
 import { z } from "zod";
-import { createFigmaNodeIdSchema, createHexColorSchema, fileKeyField } from "./schema-common.js";
-import { extensionRpcToArgs, extensionSchemas } from "./extensions/index.js";
+import {
+  createChildLayoutFields,
+  createFigmaNodeIdSchema,
+  createHexColorSchema,
+  createParentIdSchema,
+  createTextStyleIdSchema,
+  fileKeyField,
+} from "./schema-common.js";
+import { extensionRpcSchemas, extensionRpcToArgs, extensionSchemas } from "./extensions/index.js";
 
 /**
  * Creates a Zod schema that validates a screenshot export format.
@@ -42,6 +49,22 @@ const textAlignVertical = z.enum(["TOP", "CENTER", "BOTTOM"]);
 const textAutoResize = z.enum(["NONE", "WIDTH_AND_HEIGHT", "HEIGHT", "TRUNCATE"]);
 const shapeType = z.enum(["RECTANGLE", "ELLIPSE", "LINE"]);
 const imageScaleMode = z.enum(["FILL", "FIT"]);
+
+/** The names of the child-layout fields, for the at-least-one checks. */
+const CHILD_LAYOUT_KEYS = Object.keys(createChildLayoutFields());
+
+/**
+ * The padding shorthand of the auto-layout tools.
+ * @returns The optional field.
+ */
+const createPaddingSchema = () =>
+  z
+    .number()
+    .min(0)
+    .optional()
+    .describe(
+      "Padding on all four sides; paddingTop, paddingRight, paddingBottom, and paddingLeft win over it"
+    );
 
 const gradientStop = z.object({
   position: z
@@ -90,6 +113,11 @@ export const setNodePropertiesInput = z.object({
   opacity: z.number().min(0).max(1).optional().describe("Optional opacity from 0 to 1"),
   visible: z.boolean().optional().describe("Optional visibility"),
   cornerRadius: z.number().min(0).optional().describe("Optional corner radius"),
+  clipsContent: z
+    .boolean()
+    .optional()
+    .describe("Whether a frame, a component, or an instance clips what overflows it"),
+  ...createChildLayoutFields(),
   fileKey: fileKeyField,
 });
 
@@ -312,10 +340,11 @@ export const setAutoLayoutInput = z.object({
     .number()
     .optional()
     .describe("Gap between wrapped rows/columns (only when layoutWrap=WRAP)"),
-  paddingTop: z.number().min(0).optional(),
-  paddingRight: z.number().min(0).optional(),
-  paddingBottom: z.number().min(0).optional(),
-  paddingLeft: z.number().min(0).optional(),
+  padding: createPaddingSchema(),
+  paddingTop: z.number().min(0).optional().describe("Top padding in pixels"),
+  paddingRight: z.number().min(0).optional().describe("Right padding in pixels"),
+  paddingBottom: z.number().min(0).optional().describe("Bottom padding in pixels"),
+  paddingLeft: z.number().min(0).optional().describe("Left padding in pixels"),
   primaryAxisAlignItems: z
     .enum(["MIN", "MAX", "CENTER", "SPACE_BETWEEN"])
     .optional()
@@ -355,15 +384,19 @@ export const createPageInput = z.object({
 
 export const createFrameInput = z.object({
   name: z.string().optional().describe("Optional frame name"),
-  parentId: createFigmaNodeIdSchema()
+  parentId: createParentIdSchema(),
+  x: z.number().optional().describe("Optional x position; ignored inside an auto-layout flow"),
+  y: z.number().optional().describe("Optional y position; ignored inside an auto-layout flow"),
+  width: z
+    .number()
+    .positive()
     .optional()
-    .describe(
-      "Optional parent node ID: a page, a frame, a group, a component, or a section. x and y are relative to it. Defaults to the current page."
-    ),
-  x: z.number().optional().describe("Optional x position"),
-  y: z.number().optional().describe("Optional y position"),
-  width: z.number().positive().optional().describe("Frame width"),
-  height: z.number().positive().optional().describe("Frame height"),
+    .describe("Frame width (default 100). With layoutMode, a given width stays fixed."),
+  height: z
+    .number()
+    .positive()
+    .optional()
+    .describe("Frame height (default 100). With layoutMode, a given height stays fixed."),
   fillHex: createHexColorSchema().optional().describe("Optional solid fill color as hex"),
   fillOpacity: z
     .number()
@@ -371,6 +404,43 @@ export const createFrameInput = z.object({
     .max(1)
     .optional()
     .describe("Optional solid fill opacity from 0 to 1"),
+  strokeHex: createHexColorSchema().optional().describe("Optional solid stroke color as hex"),
+  strokeWeight: z.number().min(0).optional().describe("Optional stroke thickness in pixels"),
+  strokeAlign: z
+    .enum(["INSIDE", "OUTSIDE", "CENTER"])
+    .optional()
+    .describe("Where the stroke sits against the edge"),
+  cornerRadius: z.number().min(0).optional().describe("Optional corner radius"),
+  clipsContent: z.boolean().optional().describe("Whether the frame clips what overflows it"),
+  layoutMode: z
+    .enum(["NONE", "HORIZONTAL", "VERTICAL"])
+    .optional()
+    .describe(
+      "The frame's own auto layout: a row or a column. An axis with no size and no layoutSizing then hugs the content."
+    ),
+  itemSpacing: z.number().optional().describe("Gap between children along the layout direction"),
+  counterAxisSpacing: z
+    .number()
+    .optional()
+    .describe("Gap between wrapped rows (only with layoutWrap WRAP)"),
+  padding: createPaddingSchema(),
+  paddingTop: z.number().min(0).optional().describe("Top padding in pixels"),
+  paddingRight: z.number().min(0).optional().describe("Right padding in pixels"),
+  paddingBottom: z.number().min(0).optional().describe("Bottom padding in pixels"),
+  paddingLeft: z.number().min(0).optional().describe("Left padding in pixels"),
+  primaryAxisAlignItems: z
+    .enum(["MIN", "MAX", "CENTER", "SPACE_BETWEEN"])
+    .optional()
+    .describe("Alignment along the layout direction"),
+  counterAxisAlignItems: z
+    .enum(["MIN", "MAX", "CENTER", "BASELINE"])
+    .optional()
+    .describe("Alignment across the layout direction"),
+  layoutWrap: z
+    .enum(["NO_WRAP", "WRAP"])
+    .optional()
+    .describe("Let children wrap onto more rows (horizontal layout only)"),
+  ...createChildLayoutFields(),
   fileKey: fileKeyField,
 });
 
@@ -428,7 +498,11 @@ export const setTextPropertiesShape = z.object({
     .describe("Optional text fill opacity from 0 to 1"),
   x: z.number().optional().describe("Optional x position"),
   y: z.number().optional().describe("Optional y position"),
-  width: z.number().positive().optional().describe("Optional width"),
+  width: z
+    .number()
+    .positive()
+    .optional()
+    .describe("Optional width; applied before textAutoResize, so both are kept"),
   height: z.number().positive().optional().describe("Optional height"),
   fileKey: fileKeyField,
 });
@@ -459,17 +533,28 @@ export const setTextPropertiesInput = setTextPropertiesShape
 
 export const createTextShape = z.object({
   name: z.string().optional().describe("Optional text node name"),
-  parentId: createFigmaNodeIdSchema()
-    .optional()
-    .describe(
-      "Optional parent node ID: a page, a frame, a group, a component, or a section. x and y are relative to it. Defaults to the current page."
-    ),
+  parentId: createParentIdSchema(),
   characters: z.string().optional().describe("Initial text content"),
   fontFamily: z.string().optional().describe("Font family, defaults to Inter"),
   fontStyle: z.string().optional().describe("Font style, defaults to Regular"),
   fontSize: z.number().positive().optional().describe("Optional font size"),
+  textStyleId: createTextStyleIdSchema()
+    .optional()
+    .describe(
+      "A local text style to apply. It sets the font, size, line height, and letter spacing, so it does not go with those fields."
+    ),
+  lineHeightPx: z.number().positive().optional().describe("Optional line height in pixels"),
+  letterSpacingPx: z.number().optional().describe("Optional letter spacing in pixels"),
   textAlignHorizontal: textAlignHorizontal.optional().describe("Optional horizontal alignment"),
-  textAutoResize: textAutoResize.optional().describe("Optional text auto-resize mode"),
+  textAlignVertical: z
+    .enum(["TOP", "CENTER", "BOTTOM"])
+    .optional()
+    .describe("Optional vertical alignment"),
+  textAutoResize: textAutoResize
+    .optional()
+    .describe(
+      "Optional auto-resize mode, applied last. Default: HEIGHT (wrap and grow downward) when width is given without height, or with layoutSizingHorizontal FILL; else WIDTH_AND_HEIGHT without a width, and fixed with both."
+    ),
   fillHex: createHexColorSchema().optional().describe("Optional text fill color as hex"),
   fillOpacity: z
     .number()
@@ -477,10 +562,15 @@ export const createTextShape = z.object({
     .max(1)
     .optional()
     .describe("Optional text fill opacity from 0 to 1"),
-  x: z.number().optional().describe("Optional x position"),
-  y: z.number().optional().describe("Optional y position"),
-  width: z.number().positive().optional().describe("Optional width"),
+  x: z.number().optional().describe("Optional x position; ignored inside an auto-layout flow"),
+  y: z.number().optional().describe("Optional y position; ignored inside an auto-layout flow"),
+  width: z
+    .number()
+    .positive()
+    .optional()
+    .describe("Optional width. Without a height, the text wraps at it and grows downward."),
   height: z.number().positive().optional().describe("Optional height"),
+  ...createChildLayoutFields(),
   fileKey: fileKeyField,
 });
 
@@ -492,11 +582,7 @@ export const createTextInput = createTextShape.refine(
 export const createShapeShape = z.object({
   shapeType: shapeType.describe("Shape type to create"),
   name: z.string().optional().describe("Optional shape name"),
-  parentId: createFigmaNodeIdSchema()
-    .optional()
-    .describe(
-      "Optional parent node ID: a page, a frame, a group, a component, or a section. x and y are relative to it. Defaults to the current page."
-    ),
+  parentId: createParentIdSchema(),
   x: z.number().optional().describe("Optional x position"),
   y: z.number().optional().describe("Optional y position"),
   width: z.number().positive().optional().describe("Optional width"),
@@ -517,6 +603,7 @@ export const createShapeShape = z.object({
     .optional()
     .describe("Optional stroke opacity from 0 to 1"),
   strokeWeight: z.number().positive().optional().describe("Optional stroke weight"),
+  ...createChildLayoutFields(),
   fileKey: fileKeyField,
 });
 
@@ -543,14 +630,10 @@ export const createImageInput = z.object({
     .string()
     .min(1)
     .describe(
-      "Image source. Accepts a local file path (absolute or relative to the MCP server cwd), an http/https URL, or a data URI."
+      "Image source: an http/https URL, a base64 data URI, or a local path. A relative path resolves against the MCP server working directory; a local file must lie inside the working directory, the output root, or a folder of FIGMA_BRIDGE_ASSET_ROOT. PNG, JPEG, or GIF of at most 4096 pixels per side."
     ),
   name: z.string().optional().describe("Optional image node name"),
-  parentId: createFigmaNodeIdSchema()
-    .optional()
-    .describe(
-      "Optional parent node ID: a page, a frame, a group, a component, or a section. x and y are relative to it. Defaults to the current page."
-    ),
+  parentId: createParentIdSchema(),
   x: z.number().optional().describe("Optional x position"),
   y: z.number().optional().describe("Optional y position"),
   width: z.number().positive().optional().describe("Optional width"),
@@ -559,6 +642,7 @@ export const createImageInput = z.object({
   scaleMode: imageScaleMode
     .optional()
     .describe("How the image should fit its bounds: FILL (default) or FIT"),
+  ...createChildLayoutFields(),
   fileKey: fileKeyField,
 });
 
@@ -583,11 +667,7 @@ export const importHtmlLayersInput = z.object({
     .string()
     .optional()
     .describe("Optional name for the wrapper frame (default: 'imported layers')"),
-  parentId: createFigmaNodeIdSchema()
-    .optional()
-    .describe(
-      "Optional parent node ID: a page, a frame, a group, a component, or a section. x and y are relative to it. Defaults to the current page."
-    ),
+  parentId: createParentIdSchema(),
   x: z.number().optional().describe("Optional x position of the wrapper frame"),
   y: z.number().optional().describe("Optional y position of the wrapper frame"),
   fileKey: fileKeyField,
@@ -734,6 +814,7 @@ export const toolInputSchemas = {
       value.paddingRight !== undefined ||
       value.paddingBottom !== undefined ||
       value.paddingLeft !== undefined ||
+      value.padding !== undefined ||
       value.primaryAxisAlignItems !== undefined ||
       value.counterAxisAlignItems !== undefined ||
       value.primaryAxisSizingMode !== undefined ||
@@ -752,7 +833,9 @@ export const toolInputSchemas = {
       value.rotation !== undefined ||
       value.opacity !== undefined ||
       value.visible !== undefined ||
-      value.cornerRadius !== undefined,
+      value.cornerRadius !== undefined ||
+      value.clipsContent !== undefined ||
+      CHILD_LAYOUT_KEYS.some((key) => (value as Record<string, unknown>)[key] !== undefined),
     "At least one property must be provided"
   ),
 
@@ -946,6 +1029,7 @@ const importHtmlLayersRpcInput = importHtmlLayersInput
 
 const rpcInputSchemas = {
   ...toolInputSchemas,
+  ...extensionRpcSchemas,
   create_image: createImageRpcInput,
   import_html_layers: importHtmlLayersRpcInput,
 } as const;

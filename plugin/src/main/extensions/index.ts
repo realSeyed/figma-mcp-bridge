@@ -4,6 +4,7 @@ import { typographyHandlers } from "./typography";
 import { componentsHandlers } from "./components";
 import { sectionsHandlers } from "./sections";
 import { paintsHandlers } from "./paints";
+import { assetsHandlers } from "./assets";
 import { dumpsHandlers } from "./dumps";
 import { discoveryHandlers } from "./discovery";
 import { e2eHandlers } from "./e2e";
@@ -24,6 +25,7 @@ export const extensionHandlers = {
   ...componentsHandlers,
   ...sectionsHandlers,
   ...paintsHandlers,
+  ...assetsHandlers,
   ...dumpsHandlers,
   ...discoveryHandlers,
   ...e2eHandlers,

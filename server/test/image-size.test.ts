@@ -5,7 +5,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { readImageSize } from "../src/image-size.js";
-import { jpgWithSize, PNG_1X1_BASE64, pngWithSize } from "./helpers/plugin.js";
+import { gifWithSize, jpgWithSize, PNG_1X1_BASE64, pngWithSize } from "./helpers/plugin.js";
 
 describe("readImageSize", () => {
   test("reads a real PNG", () => {
@@ -75,5 +75,22 @@ describe("readImageSize", () => {
     expect(readImageSize(jpgWithSize(8, 8).subarray(0, 24), "JPG")).toBeNull();
     expect(readImageSize(Buffer.from([0x00, 0x01, 0x02, 0x03]), "JPG")).toBeNull();
     expect(readImageSize(Buffer.alloc(0), "JPG")).toBeNull();
+  });
+
+  test("reads the size of a GIF, little-endian after the signature", () => {
+    expect(readImageSize(gifWithSize(320, 200), "GIF")).toEqual({ width: 320, height: 200 });
+    expect(readImageSize(gifWithSize(65_535, 1), "GIF")).toEqual({ width: 65_535, height: 1 });
+    const old = gifWithSize(7, 9);
+    old.write("GIF87a", 0, "ascii");
+    expect(readImageSize(old, "GIF")).toEqual({ width: 7, height: 9 });
+  });
+
+  test("refuses a GIF with a wrong signature, too few bytes, or a size of 0", () => {
+    const wrong = gifWithSize(4, 4);
+    wrong.write("GIF90a", 0, "ascii");
+    expect(readImageSize(wrong, "GIF")).toBeNull();
+    expect(readImageSize(gifWithSize(4, 4).subarray(0, 9), "GIF")).toBeNull();
+    expect(readImageSize(gifWithSize(0, 4), "GIF")).toBeNull();
+    expect(readImageSize(pngWithSize(4, 4), "GIF")).toBeNull();
   });
 });

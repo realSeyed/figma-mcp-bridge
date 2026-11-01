@@ -5,6 +5,7 @@ import * as typography from "./typography.js";
 import * as components from "./components.js";
 import * as sections from "./sections.js";
 import * as paints from "./paints.js";
+import * as assets from "./assets.js";
 import * as dumps from "./dumps.js";
 import * as journal from "./journal.js";
 import * as discovery from "./discovery.js";
@@ -12,6 +13,7 @@ import * as discovery from "./discovery.js";
 export type {
   ExtensionRegister,
   ExtensionRpcMap,
+  ExtensionRpcSchemaMap,
   ExtensionSchemaMap,
   RpcArgMapper,
 } from "./types.js";
@@ -30,6 +32,7 @@ export const extensionSchemas = {
   ...components.schemas,
   ...sections.schemas,
   ...paints.schemas,
+  ...assets.schemas,
   ...dumps.schemas,
   ...journal.schemas,
   ...discovery.schemas,
@@ -42,9 +45,18 @@ export const extensionRpcToArgs = {
   ...components.rpcToArgs,
   ...sections.rpcToArgs,
   ...paints.rpcToArgs,
+  ...assets.rpcToArgs,
   ...dumps.rpcToArgs,
   ...journal.rpcToArgs,
   ...discovery.rpcToArgs,
+};
+
+/**
+ * Every wire-shape override, merged from the area files that export one.
+ * Spread into `rpcInputSchemas` in `schema.ts`, after the advertised schemas.
+ */
+export const extensionRpcSchemas = {
+  ...assets.rpcSchemas,
 };
 
 /**
@@ -58,6 +70,7 @@ export function registerExtensionTools(server: McpServer, node: Node): void {
   components.register(server, node);
   sections.register(server, node);
   paints.register(server, node);
+  assets.register(server, node);
   dumps.register(server, node);
   journal.register(server, node);
   discovery.register(server, node);

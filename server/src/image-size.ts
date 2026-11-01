@@ -1,9 +1,10 @@
 /**
- * The pixel size of a raster capture, read from its header. No decoder runs,
+ * The pixel size of a raster image, read from its header. No decoder runs,
  * and the module imports nothing.
  *
  * A PNG holds its size in the IHDR chunk, which comes first. A JPG holds it in
- * the first SOF segment, after the other segments.
+ * the first SOF segment, after the other segments. A GIF holds it in the
+ * logical screen descriptor, right after the six-byte signature.
  */
 
 export interface PixelSize {
@@ -67,12 +68,31 @@ function readJpgSize(bytes: Uint8Array): PixelSize | null {
 }
 
 /**
- * Reads the pixel size of a PNG or a JPG.
+ * Reads the size of a GIF from its logical screen descriptor.
+ * @param bytes - The file.
+ * @returns The size, or null if the signature is not GIF87a or GIF89a, or the file is too short.
+ */
+function readGifSize(bytes: Uint8Array): PixelSize | null {
+  if (bytes.byteLength < 10) return null;
+  const signature = String.fromCharCode(...bytes.subarray(0, 6));
+  if (signature !== "GIF87a" && signature !== "GIF89a") return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // Width and height, little-endian, at offsets 6 and 8.
+  return { width: view.getUint16(6, true), height: view.getUint16(8, true) };
+}
+
+/**
+ * Reads the pixel size of a PNG, a JPG, or a GIF.
  * @param bytes - The file contents.
- * @param format - `PNG` or `JPG`.
+ * @param format - `PNG`, `JPG`, or `GIF`.
  * @returns The size, or null if the header cannot be read or the size is 0.
  */
-export function readImageSize(bytes: Uint8Array, format: "PNG" | "JPG"): PixelSize | null {
-  const size = format === "PNG" ? readPngSize(bytes) : readJpgSize(bytes);
+export function readImageSize(bytes: Uint8Array, format: "PNG" | "JPG" | "GIF"): PixelSize | null {
+  const size =
+    format === "PNG"
+      ? readPngSize(bytes)
+      : format === "GIF"
+        ? readGifSize(bytes)
+        : readJpgSize(bytes);
   return size !== null && size.width > 0 && size.height > 0 ? size : null;
 }
