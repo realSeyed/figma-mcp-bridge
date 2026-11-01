@@ -56,6 +56,73 @@ export const createVariableIdSchema = () =>
 export const createTextStyleIdSchema = () =>
   z.string().regex(/^S:.+$/, "Text style ID must start with 'S:' — use an ID from get_styles");
 
+/**
+ * The parent of a new node. A factory, as in `schema-common.ts`, so each tool
+ * gets its own copy and the listed schema holds no `$ref`.
+ * @returns The optional field.
+ */
+export const createParentIdSchema = () =>
+  createFigmaNodeIdSchema()
+    .optional()
+    .describe(
+      "Parent node ID: a page, a frame, a group, a component, or a section; x and y are relative to it. Pass parentId. Without it the node goes to the page the user is viewing; pageId in the result tells you where it went."
+    );
+
+/**
+ * The child-layout fields and `index` of the create and set tools: how a
+ * node sizes and sits inside an auto-layout parent, and where it goes among
+ * its parent's children. A factory, so each tool gets its own copies.
+ * @returns The fields, each optional.
+ */
+export const createChildLayoutFields = () => ({
+  layoutSizingHorizontal: z
+    .enum(["FIXED", "HUG", "FILL"])
+    .optional()
+    .describe(
+      "Width behaviour: FIXED keeps the width; HUG fits the content (an auto-layout frame or a text); FILL takes the free width of an auto-layout parent. Applied after the node is in its parent."
+    ),
+  layoutSizingVertical: z
+    .enum(["FIXED", "HUG", "FILL"])
+    .optional()
+    .describe(
+      "Height behaviour: FIXED keeps the height; HUG fits the content (an auto-layout frame or a text); FILL takes the free height of an auto-layout parent. Applied after the node is in its parent."
+    ),
+  layoutPositioning: z
+    .enum(["AUTO", "ABSOLUTE"])
+    .optional()
+    .describe(
+      "ABSOLUTE takes the node out of its auto-layout parent's flow, so x and y place it (a badge on a card); AUTO puts it back in the flow. Needs a parent with auto layout."
+    ),
+  minWidth: z
+    .number()
+    .min(0)
+    .optional()
+    .describe("Smallest width, for an auto-layout frame or a direct child of one"),
+  maxWidth: z
+    .number()
+    .min(0)
+    .optional()
+    .describe("Largest width, for an auto-layout frame or a direct child of one"),
+  minHeight: z
+    .number()
+    .min(0)
+    .optional()
+    .describe("Smallest height, for an auto-layout frame or a direct child of one"),
+  maxHeight: z
+    .number()
+    .min(0)
+    .optional()
+    .describe("Largest height, for an auto-layout frame or a direct child of one"),
+  index: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      "Position among the parent's children: 0 is the bottom of the stack, and a number past the top puts the node on top. The result reports the index it got."
+    ),
+});
+
 export const fileKeyField = z
   .string()
   .optional()

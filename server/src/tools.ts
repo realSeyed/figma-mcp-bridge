@@ -216,7 +216,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "set_text_properties",
-    "Patch common text properties such as font family/style, size, alignment, auto-resize, line height, letter spacing, fill color, and bounds. When multiple files are connected, specify fileKey.",
+    'Patch common text properties such as font family/style, size, alignment, auto-resize, line height, letter spacing, fill color, and bounds. The size is applied before textAutoResize, so { width, textAutoResize: "HEIGHT" } wraps at that width. A font the file cannot use is refused with the closest families before anything is written. applied holds the values read back from the node. When multiple files are connected, specify fileKey.',
     setTextPropertiesShape.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(setTextPropertiesInput, args);
@@ -230,7 +230,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "set_node_properties",
-    "Patch common node properties such as name, position, size, visibility, opacity, and corner radius. Only supported properties for the target node type may be changed. Use set_solid_fill or set_gradient_fill to change paints. When multiple files are connected, specify fileKey.",
+    "Patch common node properties such as name, position, size, visibility, opacity, corner radius, and clipping, and how the node sits in an auto-layout parent: layoutSizingHorizontal and layoutSizingVertical (FIXED, HUG, or FILL), layoutPositioning (AUTO or ABSOLUTE), min and max sizes, and index (its place among its parent's children). FILL and ABSOLUTE need a parent with auto layout; HUG an auto-layout frame or a text. Every field is checked before the first write. The size is applied before the sizing modes, and x and y last. applied holds the values read back from the node. Use set_solid_fill or set_gradient_fill to change paints. When multiple files are connected, specify fileKey.",
     setNodePropertiesInput.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(toolInputSchemas.set_node_properties, args);
@@ -244,7 +244,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "set_solid_fill",
-    "Replace a node's fill (or stroke) with a single solid paint. Provide a hex color and optional paint opacity — fillHex/fillOpacity are accepted as aliases. Use set_gradient_fill for gradient paints.",
+    "Replace a node's fill (or stroke) with a single solid paint. Provide a hex color and optional paint opacity — fillHex/fillOpacity are accepted as aliases. applied holds the paint read back from the node, the hex in lowercase #rrggbb. Use set_gradient_fill for gradient paints.",
     setSolidFillShape.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(setSolidFillInput, args);
@@ -293,7 +293,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "set_auto_layout",
-    "Configure auto-layout on a frame: direction, gap, padding, alignment, sizing modes, wrap. Set layoutMode='NONE' to disable auto-layout on the frame.",
+    "Configure auto-layout on a frame: direction, gap, padding (padding sets all four sides; a side param wins), alignment, sizing modes, wrap. Set layoutMode='NONE' to disable auto-layout on the frame. applied holds each value read back from the node.",
     setAutoLayoutInput.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(toolInputSchemas.set_auto_layout, args);
@@ -319,7 +319,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "create_frame",
-    "Create a new frame, optionally inside a specified parent. You can set name, size, position, and a solid fill. When multiple files are connected, specify fileKey.",
+    "Create a new frame: name, size, position, fill, stroke, corner radius, clipping, and its own auto layout (layoutMode, itemSpacing, padding, alignment, wrap), so one call makes a card or a row. With layoutMode, a width or height you give stays fixed, and an axis with neither hugs its content. The child-layout fields (layoutSizingHorizontal, layoutSizingVertical: FIXED, HUG, or FILL; layoutPositioning; min and max sizes) and index are applied after the node is in its parent; FILL and ABSOLUTE need a parent with auto layout. Every field is checked before the node is made, so a refused call leaves nothing. Pass parentId. Without it the node goes to the page the user is viewing; pageId in the result tells you where it went. Returns { nodeId, nodeName, type, parentId, pageId, index, x, y, width, height }, plus layoutMode, layoutSizingHorizontal, layoutSizingVertical, and layoutPositioning where they apply. When multiple files are connected, specify fileKey.",
     createFrameInput.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(toolInputSchemas.create_frame, args);
@@ -331,7 +331,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "create_text",
-    "Create a new text node, optionally inside a specified parent. You can set its content, font, size, alignment, color, position, and bounds. When multiple files are connected, specify fileKey.",
+    "Create a new text node: content, font or textStyleId, size, line height, letter spacing, alignment, color, position, and bounds. With a width and no height (or with layoutSizingHorizontal FILL), the text wraps and grows downward (textAutoResize HEIGHT); textAutoResize is applied last, so an explicit mode is kept. A font the file cannot use is refused with the closest families. The child-layout fields (layoutSizingHorizontal, layoutSizingVertical: FIXED, HUG, or FILL; layoutPositioning; min and max sizes) and index are applied after the node is in its parent; FILL and ABSOLUTE need a parent with auto layout. Every field is checked before the node is made, so a refused call leaves nothing. Pass parentId. Without it the node goes to the page the user is viewing; pageId in the result tells you where it went. Returns { nodeId, nodeName, type, parentId, pageId, index, x, y, width, height }, plus layoutMode, layoutSizingHorizontal, layoutSizingVertical, and layoutPositioning where they apply. It also returns characters and textAutoResize. When multiple files are connected, specify fileKey.",
     createTextShape.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(createTextInput, args);
@@ -343,7 +343,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "create_shape",
-    "Create a rectangle, ellipse, or line, optionally inside a specified parent. You can set its size, position, rotation, fill, and stroke. When multiple files are connected, specify fileKey.",
+    "Create a rectangle, ellipse, or line: size, position, rotation, fill, and stroke. The child-layout fields (layoutSizingHorizontal, layoutSizingVertical: FIXED, HUG, or FILL; layoutPositioning; min and max sizes) and index are applied after the node is in its parent; FILL and ABSOLUTE need a parent with auto layout. Every field is checked before the node is made, so a refused call leaves nothing. Pass parentId. Without it the node goes to the page the user is viewing; pageId in the result tells you where it went. Returns { nodeId, nodeName, type, parentId, pageId, index, x, y, width, height }, plus layoutMode, layoutSizingHorizontal, layoutSizingVertical, and layoutPositioning where they apply. It also returns shapeType. When multiple files are connected, specify fileKey.",
     createShapeShape.shape,
     async (args): Promise<ToolResult> => {
       const parsed = parseToolInput(createShapeInput, args);
@@ -355,7 +355,7 @@ export function registerTools(server: McpServer, node: Node, port: number): void
 
   server.tool(
     "create_image",
-    "Create an image-backed rectangle from a local file path, remote URL, or data URI. You can set its parent, position, size, corner radius, and fit mode. When multiple files are connected, specify fileKey.",
+    "Create an image-backed rectangle from a remote URL, a base64 data URI, or a local path inside the working directory, the output root, or a folder of FIGMA_BRIDGE_ASSET_ROOT. The image must be a PNG, JPEG, or GIF of at most 4096 pixels per side; another format (WebP, AVIF, HEIC, SVG) or a larger image is refused before anything is sent. To fill an existing node, such as an image layer of an instance, use set_image_fill. The child-layout fields (layoutSizingHorizontal, layoutSizingVertical: FIXED, HUG, or FILL; layoutPositioning; min and max sizes) and index are applied after the node is in its parent; FILL and ABSOLUTE need a parent with auto layout. Every field is checked before the node is made, so a refused call leaves nothing. Pass parentId. Without it the node goes to the page the user is viewing; pageId in the result tells you where it went. Returns { nodeId, nodeName, type, parentId, pageId, index, x, y, width, height }, plus layoutMode, layoutSizingHorizontal, layoutSizingVertical, and layoutPositioning where they apply. It also returns imageHash, which set_image_fill reuses. When multiple files are connected, specify fileKey.",
     createImageInput.shape,
     async ({ source, fileKey, ...params }): Promise<ToolResult> => {
       try {
